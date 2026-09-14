@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	xterm "github.com/gitpod-io/xterm-go"
 	"github.com/rceman/reposuite-relay/internal/fixtures"
+	xterm "github.com/rceman/xterm-go"
 )
 
 func newTestModel(t *testing.T, cols, rows int) (*Model, *[][]byte) {

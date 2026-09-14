@@ -1,4 +1,4 @@
-// Package term wraps gitpod-io/xterm-go as RepoSuite Relay's headless
+// Package term wraps rceman/xterm-go as RepoSuite Relay's headless
 // terminal model. It owns the host-side responsibilities xterm.js delegates
 // to its embedder: color-palette queries (OSC 4/10/11/12) and delivery of
 // terminal-generated reply bytes (DA, DSR, CPR, DECRQM, kitty keyboard).
@@ -11,7 +11,7 @@ package term
 import (
 	"fmt"
 
-	xterm "github.com/gitpod-io/xterm-go"
+	xterm "github.com/rceman/xterm-go"
 )
 
 // Color indices beyond the 256-color palette, matching xterm-go's

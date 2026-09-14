@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	xterm "github.com/gitpod-io/xterm-go"
+	xterm "github.com/rceman/xterm-go"
 )
 
 // Fingerprint is a canonical, comparable dump of a terminal's observable

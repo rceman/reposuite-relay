@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	xterm "github.com/gitpod-io/xterm-go"
 	"github.com/rceman/reposuite-relay/internal/fixtures"
+	xterm "github.com/rceman/xterm-go"
 )
 
 // cellAt loads one cell from the active buffer's viewport row/col.

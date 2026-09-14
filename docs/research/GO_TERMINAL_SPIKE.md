@@ -4,6 +4,28 @@ PROMPT_ID: RSR-P-20260914-1205-GO01
 Branch: `spike/go-terminal-runtime`
 Status: research spike — NOT production code, NOT v0.1.0
 
+## Downstream module migration (2026-09-14, PROMPT RSR-P-20260914-1315-XTERM01)
+
+The canonical terminal module is now:
+
+- Module path: `github.com/rceman/xterm-go`
+- Upstream origin: `github.com/gitpod-io/xterm-go`
+- Upstream baseline: `dae5128cb6b377a559b07d4a2d9eb1321f05e390`
+- Exact downstream commit pinned by this repo: `11f9a83d3f402263737f9d56d2cf6891d63de51e`
+  (module version `v0.0.0-20260914105654-11f9a83d3f40`, direct require, **no replace directive**)
+- Go validation toolchain: `go1.27.1` (module directive `go 1.27.1`, auto-resolved)
+- Migration revalidation: **PASS** — the complete spike suite re-ran green
+  on `spike/go-terminal-runtime-rceman-xterm`: `go vet` clean, `go test`
+  42/42, `go test -race` clean, `go build` ok, Node oracle parity 11/11
+  with 0 diffs, real Codex fixture replay PASS (5 replies, identical
+  fingerprint), DECSTBM known edge unchanged, performance unchanged
+  (parse ~24 MiB/s, snapshot ~0.42 ms, RSS ~62 MiB; binary 4.06 MiB —
+  +0.3 MiB attributed to the go1.27 toolchain, not a regression).
+
+All evidence below was originally collected against upstream
+`gitpod-io/xterm-go@dae5128` — the fork's baseline commit — and re-verified
+identical against `rceman/xterm-go@11f9a83`.
+
 ## Question
 
 Can RepoSuite Relay use Go as its implementation language while preserving

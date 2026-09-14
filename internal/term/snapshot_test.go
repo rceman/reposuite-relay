@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	xterm "github.com/gitpod-io/xterm-go"
 	"github.com/rceman/reposuite-relay/internal/fixtures"
+	xterm "github.com/rceman/xterm-go"
 )
 
 // liveReset mirrors Airelay's LIVE_PRESENTATION_RESET prefix used before a
