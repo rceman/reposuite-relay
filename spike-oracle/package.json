@@ -1,0 +1,14 @@
+{
+  "name": "reposuite-relay-spike-oracle",
+  "private": true,
+  "version": "0.0.0",
+  "description": "SPIKE-ONLY xterm.js behavioral oracle. NOT a production dependency of reposuite-relay. Used to diff Go xterm-go against @xterm/headless on identical byte streams.",
+  "type": "module",
+  "scripts": {
+    "oracle": "node oracle.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/headless": "6.0.0"
+  }
+}
