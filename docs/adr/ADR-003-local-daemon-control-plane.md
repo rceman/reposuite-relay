@@ -48,6 +48,16 @@ reachable only on a private Unix socket:
   ownership and retains the session — the daemon never loses authority
   over a still-running generation. Concurrent stops resolve to exactly
   one owner; losers get `SESSION_NOT_FOUND`.
+- **Stop semantics.** Generation stop success means the process is
+  *confirmed terminated and reaped* — exit 0, non-zero, or SIGKILL all
+  count. `exec.ExitError` alone is never a lifecycle failure; only an
+  unconfirmed termination (failed kill, missing reap) is.
+- **Shutdown quiescence.** Shutdown stops accepting, waits for the accept
+  loop to die, closes tracked connections to unblock idle readers, then
+  waits for in-flight request handlers (`sync.WaitGroup`, bounded by a
+  10s quiescence timeout) *before* the final registry drain — the drain
+  never races a create/stop lifecycle operation, and after `Drain` the
+  registry is closed to any late reserve/stop.
 - **Registry.** In-memory `mutex + map` is authoritative for logical
   sessions in this milestone. A daemon restart loses all sessions; durable
   metadata and crash recovery are deferred (ADR-002).

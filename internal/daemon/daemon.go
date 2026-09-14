@@ -34,6 +34,12 @@ const LockName = "relayd.lock"
 const (
 	ReadTimeout  = 5 * time.Second // per-connection read deadline
 	WriteTimeout = 5 * time.Second // per-connection write deadline
+
+	// QuiescenceTimeout bounds how long shutdown waits for already-running
+	// request handlers (create/stop lifecycle ops) to finish before the
+	// final registry drain. Never unbounded, and never skipped — the drain
+	// must not race lifecycle ownership.
+	QuiescenceTimeout = 10 * time.Second
 )
 
 // Options configures a Daemon. Zero fields take production defaults; the
@@ -45,6 +51,9 @@ type Options struct {
 	WriteTimeout time.Duration
 	SpawnFixture func(selfExe, cwd string) (*fixture.Child, error)
 	RandID       func() (string, error)
+	// WrapStop decorates each session's generation-stop function — the seam
+	// tests use to pause an in-flight stop under shutdown.
+	WrapStop func(stop func() error) func() error
 }
 
 func (o Options) withDefaults() Options {
@@ -79,6 +88,7 @@ type Daemon struct {
 	conns    map[net.Conn]struct{}
 	shutdown chan struct{}
 	once     sync.Once
+	wg       sync.WaitGroup // in-flight request handlers (lifecycle ops)
 }
 
 // ErrAlreadyRunning is returned when another daemon owns this state root.
@@ -121,6 +131,16 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 
 // Serve runs the accept loop until shutdown or SIGTERM/SIGINT, then stops
 // every fixture generation, closes the listener, and removes the socket.
+//
+// Shutdown is a quiescence barrier, in order:
+//  1. mark shutting down (no new dispatch work)
+//  2. close the listener — stops new connections
+//  3. wait for the accept loop to die — no more handler Adds are possible
+//  4. close tracked connections — unblocks idle readers (a handler blocked
+//     in a lifecycle op is unaffected; it is not conn-bound)
+//  5. wait for in-flight handlers, bounded by QuiescenceTimeout
+//  6. only then drain the registry and stop remaining generations —
+//     never concurrently with a create/stop lifecycle operation
 func (d *Daemon) Serve() error {
 	defer os.Remove(d.paths.DaemonSocket())
 	defer d.releaseLock()
@@ -138,21 +158,34 @@ func (d *Daemon) Serve() error {
 	case <-d.shutdown:
 	}
 
-	// Graceful shutdown: stop accepting, drain registry (stop all fixture
-	// generations), close client conns, close listener, remove socket.
 	d.initiate()
-	for _, m := range d.registry.Drain() {
-		if err := m.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "relayd: stop %s: %v\n", m.Session.Key, err)
-		}
-	}
+	_ = d.ln.Close()
+	<-acceptDone
+
 	d.mu.Lock()
 	for c := range d.conns {
 		_ = c.Close()
 	}
 	d.mu.Unlock()
-	_ = d.ln.Close()
-	<-acceptDone
+
+	drained := make(chan struct{})
+	go func() { d.wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(QuiescenceTimeout):
+		// Do not drain: a live handler may still own a generation's Stop.
+		// Process exit is the final safety net — fixture children die via
+		// stdin-pipe EOF when this process exits.
+		err := fmt.Errorf("relayd: handler quiescence exceeded %s", QuiescenceTimeout)
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+
+	for _, m := range d.registry.Drain() {
+		if err := m.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "relayd: stop %s: %v\n", m.Session.Key, err)
+		}
+	}
 	return nil
 }
 
@@ -228,6 +261,7 @@ func (d *Daemon) acceptLoop() {
 			continue
 		}
 		d.conns[c] = struct{}{}
+		d.wg.Add(1) // before the goroutine; no Adds survive acceptDone
 		d.mu.Unlock()
 		go d.serveConn(c)
 	}
@@ -248,6 +282,7 @@ func (d *Daemon) initiate() {
 // the request, WriteTimeout while writing the response.
 func (d *Daemon) serveConn(c net.Conn) {
 	defer func() {
+		d.wg.Done()
 		d.mu.Lock()
 		delete(d.conns, c)
 		d.mu.Unlock()
@@ -361,6 +396,10 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if err != nil {
 		return fail(protocol.Fail(protocol.ErrFixtureStart, err.Error()))
 	}
+	stop := child.Stop
+	if d.opts.WrapStop != nil {
+		stop = d.opts.WrapStop(stop)
+	}
 	now := time.Now()
 	m := &session.Managed{
 		Session: &session.Session{
@@ -373,7 +412,7 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 			Generation: 1,
 		},
 		Generation: &session.ActiveGeneration{PID: child.PID(), StartedAt: now},
-		Stop:       child.Stop,
+		Stop:       stop,
 	}
 	if !d.registry.Commit(req.Key, m) {
 		// Reservation lost — should be unreachable; never leak the child.

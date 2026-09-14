@@ -11,7 +11,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,8 +26,9 @@ import (
 )
 
 // startInProcess brings up a daemon on an isolated root with the given
-// option overrides. It is Serve'd in a goroutine and Shutdown on cleanup.
-func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, *Client) {
+// option overrides. It is Serve'd in a goroutine (result on `served`) and
+// Shutdown on cleanup.
+func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, *Client, chan error) {
 	t.Helper()
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
@@ -47,7 +50,8 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	go d.Serve()
+	served := make(chan error, 1)
+	go func() { served <- d.Serve() }()
 	t.Cleanup(d.Shutdown)
 
 	// Wait until the socket answers ping.
@@ -55,12 +59,12 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := c.Ping(); err == nil {
-			return d, p, c
+			return d, p, c, served
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("in-process daemon did not become ready")
-	return nil, paths.Paths{}, nil
+	return nil, paths.Paths{}, nil, nil
 }
 
 func do(t *testing.T, c *Client, req protocol.Request) *protocol.Response {
@@ -76,7 +80,7 @@ func do(t *testing.T, c *Client, req protocol.Request) *protocol.Response {
 // fixture processes — the key is reserved before spawn.
 func TestDuplicateKeyNoSpawn(t *testing.T) {
 	var spawns int32
-	_, _, c := startInProcess(t, func(o *Options) {
+	_, _, c, _ := startInProcess(t, func(o *Options) {
 		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
@@ -100,7 +104,7 @@ func TestDuplicateKeyNoSpawn(t *testing.T) {
 // one succeeds, one fixture is spawned, one session exists.
 func TestSameKeyCreateRace(t *testing.T) {
 	var spawns int32
-	_, _, c := startInProcess(t, func(o *Options) {
+	_, _, c, _ := startInProcess(t, func(o *Options) {
 		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
@@ -156,7 +160,7 @@ func TestSameKeyCreateRace(t *testing.T) {
 // Single-invocation of the generation's Stop is proven separately at the
 // registry level in TestStopOwnershipSingleInvocation.
 func TestSameKeyStopRace(t *testing.T) {
-	_, _, c := startInProcess(t, nil)
+	_, _, c, _ := startInProcess(t, nil)
 
 	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "victim", Cwd: "/"})
 	if !r.OK {
@@ -245,7 +249,7 @@ func TestRuntimeIDFailure(t *testing.T) {
 	var spawns int32
 	failRand := errors.New("no entropy")
 	var randFails int32 = 1
-	_, _, c := startInProcess(t, func(o *Options) {
+	_, _, c, _ := startInProcess(t, func(o *Options) {
 		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
@@ -281,7 +285,7 @@ func TestRuntimeIDFailure(t *testing.T) {
 // registry, reservation released, retry works.
 func TestSpawnFailure(t *testing.T) {
 	var failSpawn int32 = 1
-	_, _, c := startInProcess(t, func(o *Options) {
+	_, _, c, _ := startInProcess(t, func(o *Options) {
 		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
 			if atomic.LoadInt32(&failSpawn) == 1 {
 				return nil, errors.New("spawn broke")
@@ -419,7 +423,7 @@ func TestBadPeer(t *testing.T) {
 // TestReadDeadlineEnforced: an idle connection is closed by the server's
 // read deadline — proven with a short test timeout, not 5s.
 func TestReadDeadlineEnforced(t *testing.T) {
-	_, p, _ := startInProcess(t, func(o *Options) {
+	_, p, _, _ := startInProcess(t, func(o *Options) {
 		o.ReadTimeout = 150 * time.Millisecond
 	})
 	c, err := net.DialTimeout("unix", p.DaemonSocket(), time.Second)
@@ -479,7 +483,7 @@ func TestClientDeadlineSeparation(t *testing.T) {
 // TestKeyValidationAllOps: serve/status/stop reject malformed keys with
 // INVALID_SESSION_KEY (not SESSION_NOT_FOUND).
 func TestKeyValidationAllOps(t *testing.T) {
-	_, _, c := startInProcess(t, nil)
+	_, _, c, _ := startInProcess(t, nil)
 	bad := []string{"", "../x", "bad key", "a/b", ".dot"}
 	for _, op := range []string{protocol.OpServeFixture, protocol.OpSessionStatus, protocol.OpStopSession} {
 		for _, k := range bad {
@@ -489,5 +493,248 @@ func TestKeyValidationAllOps(t *testing.T) {
 				t.Fatalf("%s key=%q: want INVALID_SESSION_KEY, got %+v", op, k, r)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// DMN03: shutdown quiescence + fixture stop semantics
+// ---------------------------------------------------------------------
+
+// procAlive reports whether pid exists and is not a zombie (same-package
+// copy; the _test package helper is not visible here).
+func procAlive(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	s := string(data)
+	i := strings.LastIndex(s, ")")
+	return i >= 0 && i+2 < len(s) && s[i+2] != 'Z'
+}
+
+func waitProcDead(t *testing.T, pid int, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if !procAlive(pid) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pid %d still alive after %s", pid, d)
+}
+
+// TestCreateVsShutdown: a create in flight (key reserved, spawn blocked)
+// must resolve before the final drain — the committed session is drained
+// and its fixture stopped; the registry ends empty.
+func TestCreateVsShutdown(t *testing.T) {
+	spawnGate := make(chan struct{})
+	spawnRelease := make(chan struct{})
+	var childPID int32
+	var spawns int32
+
+	d, _, c, served := startInProcess(t, func(o *Options) {
+		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+			atomic.AddInt32(&spawns, 1)
+			close(spawnGate) // key reserved, spawn in flight
+			<-spawnRelease   // hold the handler inside the lifecycle op
+			child, err := fixture.Spawn(selfExe, cwd)
+			if err == nil {
+				atomic.StoreInt32(&childPID, int32(child.PID()))
+			}
+			return child, err
+		}
+	})
+
+	serveDone := make(chan struct{})
+	go func() {
+		_, _ = c.Do(protocol.Request{Op: protocol.OpServeFixture, Key: "racer", Cwd: "/"})
+		close(serveDone)
+	}()
+
+	<-spawnGate // handler owns the reservation mid-spawn
+	d.Shutdown()
+
+	// Serve must not finish while the create handler is in flight.
+	select {
+	case <-served:
+		t.Fatal("Serve returned while a create handler was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(spawnRelease) // let the create resolve
+	<-serveDone         // handler exits (conn already closed — fine)
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Serve did not return after quiescence")
+	}
+
+	if n := atomic.LoadInt32(&spawns); n != 1 {
+		t.Fatalf("spawns=%d", n)
+	}
+	if d.registry.Len() != 0 {
+		t.Fatalf("registry len=%d after shutdown", d.registry.Len())
+	}
+	waitProcDead(t, int(atomic.LoadInt32(&childPID)), 3*time.Second)
+
+	// The registry is closed: no late Commit/Reserve can resurrect it.
+	if d.registry.Reserve("late") {
+		t.Fatal("Reserve succeeded after drain")
+	}
+}
+
+// TestStopVsShutdown: a stop in flight (BeginStop owned, Stop blocked) —
+// shutdown waits for it; the underlying Stop runs exactly once; no drain
+// races the same generation.
+func TestStopVsShutdown(t *testing.T) {
+	stopEntered := make(chan struct{})
+	stopRelease := make(chan struct{})
+	var underlyingStops int32
+
+	d, _, c, served := startInProcess(t, func(o *Options) {
+		o.WrapStop = func(stop func() error) func() error {
+			return func() error {
+				close(stopEntered) // BeginStop owner inside Stop
+				<-stopRelease      // hold the lifecycle op
+				atomic.AddInt32(&underlyingStops, 1)
+				return stop()
+			}
+		}
+	})
+
+	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "victim", Cwd: "/"})
+	if !r.OK {
+		t.Fatalf("serve: %+v", r)
+	}
+
+	stopDone := make(chan *protocol.Response, 1)
+	go func() {
+		r, _ := c.Do(protocol.Request{Op: protocol.OpStopSession, Key: "victim"})
+		stopDone <- r
+	}()
+
+	<-stopEntered // the request handler owns the stop and is inside it
+	d.Shutdown()
+
+	// Shutdown must quiesce — Serve cannot return while Stop is blocked.
+	select {
+	case <-served:
+		t.Fatal("Serve returned while a stop handler was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(stopRelease)
+	<-stopDone // stop request resolved (response may be lost on closed conn)
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+	if n := atomic.LoadInt32(&underlyingStops); n != 1 {
+		t.Fatalf("underlying Stop invoked %d times, want exactly 1", n)
+	}
+	if d.registry.Len() != 0 {
+		t.Fatalf("registry len=%d", d.registry.Len())
+	}
+}
+
+// TestShutdownOpResponse: the `shutdown` request itself gets its OK
+// response written before teardown — not torn down mid-reply.
+func TestShutdownOpResponse(t *testing.T) {
+	_, _, c, served := startInProcess(t, nil)
+	r := do(t, c, protocol.Request{Op: protocol.OpShutdown})
+	if !r.OK {
+		t.Fatalf("shutdown response: %+v", r)
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Serve did not return after shutdown op")
+	}
+}
+
+// TestShutdownWithIdleConn: a connected client that sent nothing is closed
+// by shutdown — it must not delay shutdown for the read deadline.
+func TestShutdownWithIdleConn(t *testing.T) {
+	_, p, _, served := startInProcess(t, nil)
+	idle, err := net.DialTimeout("unix", p.DaemonSocket(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	time.Sleep(30 * time.Millisecond) // let the accept loop register it
+
+	// In-process Shutdown — Serve must return promptly (< read deadline).
+	// Use the protocol op to also prove response delivery.
+	c := newClient(p.DaemonSocket())
+	r := do(t, c, protocol.Request{Op: protocol.OpShutdown})
+	if !r.OK {
+		t.Fatalf("shutdown: %+v", r)
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle connection delayed shutdown")
+	}
+	// The idle conn was closed server-side.
+	idle.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := idle.Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle conn still open after shutdown")
+	}
+}
+
+// TestStopSessionForcedKill: a stubborn child (ignores stdin EOF) reaches
+// the SIGKILL fallback; confirmed reaping → stop_session succeeds and the
+// session is removed — not INTERNAL/AbortStop.
+func TestStopSessionForcedKill(t *testing.T) {
+	var childPID int32
+	_, _, c, _ := startInProcess(t, func(o *Options) {
+		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+			// /bin/sleep ignores stdin and never exits on EOF — exercises
+			// the real forced-kill path through fixture.Child.Stop.
+			cmd := exec.Command("sleep", "600")
+			cmd.Dir = cwd
+			child, err := fixture.SpawnCmd(cmd)
+			if err == nil {
+				atomic.StoreInt32(&childPID, int32(child.PID()))
+			}
+			return child, err
+		}
+	})
+
+	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "stubborn", Cwd: "/"})
+	if !r.OK {
+		t.Fatalf("serve: %+v", r)
+	}
+	pid := int(atomic.LoadInt32(&childPID))
+	if pid == 0 || !procAlive(pid) {
+		t.Fatal("stubborn child not running")
+	}
+
+	// The child ignores stdin EOF → StopTimeout(3s) → SIGKILL → reaped.
+	r = do(t, c, protocol.Request{Op: protocol.OpStopSession, Key: "stubborn"})
+	if !r.OK {
+		t.Fatalf("stop_session after forced kill must succeed: %+v", r)
+	}
+	waitProcDead(t, pid, 2*time.Second)
+
+	r = do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "stubborn"})
+	if r.OK || r.Code != protocol.ErrSessionNotFound {
+		t.Fatalf("status after forced-kill stop: %+v", r)
 	}
 }

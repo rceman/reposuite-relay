@@ -106,6 +106,7 @@ type Registry struct {
 	byKey    map[string]*Managed
 	reserved map[string]struct{}
 	stopping map[string]struct{}
+	closed   bool // set by Drain: no new Reserve/BeginStop ever succeeds
 }
 
 // NewRegistry returns an empty registry.
@@ -123,6 +124,9 @@ func NewRegistry() *Registry {
 func (r *Registry) Reserve(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
 	if _, ok := r.byKey[key]; ok {
 		return false
 	}
@@ -163,6 +167,9 @@ func (r *Registry) Commit(key string, m *Managed) bool {
 func (r *Registry) BeginStop(key string) (*Managed, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, false
+	}
 	if _, ok := r.reserved[key]; ok {
 		return nil, false
 	}
@@ -222,14 +229,22 @@ func (r *Registry) Len() int {
 	return len(r.byKey)
 }
 
-// Drain atomically removes and returns every managed session (shutdown).
+// Drain closes the registry and atomically removes every managed session
+// (shutdown). After Drain, Reserve and BeginStop permanently fail — the
+// daemon only calls it once all lifecycle handlers are quiescent, so no
+// Commit can create a session and no other goroutine holds stop ownership
+// while it runs. In-flight reservations/stop-holds are discarded: their
+// owners have already exited or will find the key gone.
 func (r *Registry) Drain() []*Managed {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 	out := make([]*Managed, 0, len(r.byKey))
 	for _, m := range r.byKey {
 		out = append(out, m)
 	}
 	r.byKey = map[string]*Managed{}
+	r.reserved = map[string]struct{}{}
+	r.stopping = map[string]struct{}{}
 	return out
 }
