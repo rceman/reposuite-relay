@@ -31,12 +31,17 @@ func legacyAirelayRoot(home string) string { return filepath.Join(home, ".airela
 
 // Resolve computes the layout from an explicit home directory and the
 // REPOSUITE_HOME value ("" means unset). Pure: touches no filesystem.
-// Returns an error when the configured root overlaps the legacy Airelay
-// state directory.
+// Returns an error when the configured root is relative (daemon identity
+// must not depend on the invoking client's working directory) or overlaps
+// the legacy Airelay state directory.
 func Resolve(home, envRepoSuiteHome string) (Paths, error) {
 	root := envRepoSuiteHome
 	if root == "" {
 		root = filepath.Join(home, ".reposuite")
+	}
+	if !filepath.IsAbs(root) {
+		return Paths{}, fmt.Errorf(
+			"REPOSUITE_HOME %q is not absolute; daemon identity requires an absolute path", root)
 	}
 	root = filepath.Clean(root)
 	if err := checkNotLegacy(home, root); err != nil {

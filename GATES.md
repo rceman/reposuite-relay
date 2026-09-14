@@ -17,6 +17,7 @@ toolchain: exactly **go1.27.1**.
 | 8 | Dependency shape | no `replace` in go.mod; no `github.com/gitpod-io/xterm-go` in code; no `AIRELAY_`/`~/.airelay` usage |
 | 9 | CLI | `reposuite-relay version` and `reposuite-relay help` succeed; unknown command fails non-zero |
 | 10 | Terminal regression | covered by gate 5 — query/reply, snapshot roundtrip, SGR continuation, alt buffer, BCE/bg, Unicode, chunking, concurrency, Codex fixture replay |
+| 11 | Daemon regression | covered by gate 5 — singleton race, two-session isolation, duplicate key, stale socket, malformed client, shutdown, permissions, churn |
 
 ## Notes
 

@@ -9,17 +9,25 @@ import (
 )
 
 func TestRunCommands(t *testing.T) {
-	if got := run([]string{"version"}); got != 0 {
+	if got := run([]string{"version"}, "reposuite-relay"); got != 0 {
 		t.Fatalf("version exit=%d", got)
 	}
-	if got := run([]string{"help"}); got != 0 {
+	if got := run([]string{"help"}, "reposuite-relay"); got != 0 {
 		t.Fatalf("help exit=%d", got)
 	}
-	if got := run([]string{"bogus"}); got == 0 {
+	if got := run([]string{"bogus"}, "reposuite-relay"); got == 0 {
 		t.Fatal("unknown command should fail non-zero")
 	}
-	if got := run(nil); got == 0 {
+	if got := run(nil, "reposuite-relay"); got == 0 {
 		t.Fatal("no args should fail non-zero")
+	}
+	// version/help must not depend on valid filesystem configuration.
+	t.Setenv("REPOSUITE_HOME", "relative/path")
+	if got := run([]string{"version"}, "reposuite-relay"); got != 0 {
+		t.Fatalf("version must not depend on REPOSUITE_HOME, exit=%d", got)
+	}
+	if got := run([]string{"help"}, "reposuite-relay"); got != 0 {
+		t.Fatalf("help must not depend on REPOSUITE_HOME, exit=%d", got)
 	}
 }
 

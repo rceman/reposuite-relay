@@ -12,8 +12,16 @@ alive independently of any single attachment.
 - Standalone CLI: `reposuite-relay`
 - Future RepoSuite umbrella invocation: `reposuite relay ...` — dispatches to
   the same Relay implementation.
-- Daemon concept: one persistent daemon per user/state root
-  (`reposuite-relayd`, socket `${REPOSUITE_HOME}/relay/run/relayd.sock`).
+- Daemon: one persistent daemon per user/state root, currently realized as
+  the hidden `reposuite-relay __daemon` mode of the same binary (the
+  `reposuite-relayd` name remains the future packaged form). Socket:
+  `${REPOSUITE_HOME}/relay/run/relayd.sock`; singleton via advisory lock on
+  `run/relayd.lock`.
+
+**Current implementation status:** the daemon, control protocol, logical
+session registry, and a **fixture** ActiveGeneration (deterministic
+same-binary child, no PTY/terminal) are implemented. PTY-backed harness
+generations, hibernation, attach, and durable persistence are not yet.
 
 ## Sessions
 
@@ -23,10 +31,14 @@ Owned by the daemon; persists as a lightweight record even while the session
 is hibernated.
 
 **Active generation** — the ephemeral owned runtime resources for one awake
-harness generation: the PTY, the harness process, the VirtualTerminal, and
-generation-scoped timers/listeners. A generation is created on wake and
-destroyed completely on hibernate/exit. Session counters increment per
-generation.
+harness generation: eventually the PTY, the harness process, the
+VirtualTerminal, and generation-scoped timers/listeners. A generation is
+created on wake and destroyed completely on hibernate/exit. Session
+generation counters increment per generation.
+
+_Currently:_ a generation owns exactly one fixture child process
+(`reposuite-relay __fixture` with a daemon-held stdin pipe); no PTY or
+VirtualTerminal is attached yet.
 
 **Hibernated session** — a logical session with **zero** active-generation
 resources: no harness process, no PTY, no xterm object. Hibernation is not

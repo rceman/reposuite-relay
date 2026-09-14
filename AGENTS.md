@@ -32,6 +32,13 @@ report each as PASS/FAIL/N/A with evidence.
 
 ## Architecture invariants
 
+- One daemon per RepoSuite state root; singleton via `flock` on
+  `run/relayd.lock` — never PID files. Socket `run/relayd.sock` is 0600,
+  state dirs 0700.
+- The control protocol (internal/protocol) is versioned bounded JSON; it
+  never carries client-supplied commands. The daemon only runs the built-in
+  `fixture` harness today.
+- Session registry is daemon-memory only — deliberately not durable yet.
 - "Hibernated" means **zero** active runtime resources (no process, no PTY,
   no xterm object).
 - Session resume requires the **exact native session identity** — never

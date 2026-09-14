@@ -82,6 +82,21 @@ func TestLegacyAirelayOverlap(t *testing.T) {
 	}
 }
 
+// TestRelativeRootRejected: a relative REPOSUITE_HOME must be rejected —
+// daemon identity cannot depend on the invoking client's CWD.
+func TestRelativeRootRejected(t *testing.T) {
+	for _, env := range []string{"reposuite", "./reposuite", "x/y/z", "../out"} {
+		if _, err := Resolve("/home/user", env); err == nil {
+			t.Errorf("REPOSUITE_HOME=%q must be rejected (relative)", env)
+		}
+	}
+	for _, env := range []string{"/abs/ok", "/"} {
+		if _, err := Resolve("/home/user", env); err != nil {
+			t.Errorf("REPOSUITE_HOME=%q must be allowed: %v", env, err)
+		}
+	}
+}
+
 func TestNoAirelayPaths(t *testing.T) {
 	for _, s := range []string{"/dev/null", "/home/x"} {
 		p := mustResolve(t, s, "")

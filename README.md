@@ -21,12 +21,21 @@ without owning the session's lifetime.
 $ reposuite-relay version
 reposuite-relay 0.1.0-dev
 $ reposuite-relay help
-$ reposuite-relay paths    # resolved RepoSuite/Relay state paths
+$ reposuite-relay paths                      # resolved RepoSuite/Relay state paths
+$ reposuite-relay serve fixture --key demo   # start a fixture session (dev/test harness)
+$ reposuite-relay list                       # managed sessions
+$ reposuite-relay status demo                # one session
+$ reposuite-relay stop demo                  # stop it
+$ reposuite-relay daemon status              # daemon liveness (no autostart)
+$ reposuite-relay daemon stop                # graceful shutdown
 ```
 
-Daemon, session management, hibernation, and attach are designed
-(`docs/adr/ADR-002`) but **not yet implemented** — no such commands exist
-yet.
+A single persistent daemon (Unix socket `~/.reposuite/relay/run/relayd.sock`,
+singleton-locked) owns in-memory logical sessions. The `fixture` harness is
+a deterministic development/test child — **not** a real agent harness.
+Hibernation, PTY-backed sessions, Codex lifecycle, attach, and durable
+session persistence are designed (`docs/adr/ADR-002`) but **not yet
+implemented**.
 
 ## Layout
 
