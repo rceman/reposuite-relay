@@ -16,8 +16,19 @@ import (
 	"github.com/rceman/reposuite-relay/internal/protocol"
 )
 
-// ErrNotRunning means no daemon is reachable at the resolved socket.
+// ErrNotRunning means no daemon is reachable at the resolved socket —
+// absent socket, refused connection, or dial timeout. It is distinct from
+// a live-but-incompatible peer.
 var ErrNotRunning = errors.New("daemon not running")
+
+// ErrProtocolMismatch means a live peer answered but speaks an
+// incompatible protocol version — never misreported as "not running" and
+// never a reason to spawn a second daemon.
+var ErrProtocolMismatch = errors.New("incompatible Relay daemon protocol")
+
+// ErrBadPeer means a live socket endpoint did not return a valid protocol
+// response at all.
+var ErrBadPeer = errors.New("unrecognized daemon peer")
 
 // StartupTimeout bounds how long a client waits for a freshly spawned
 // daemon to answer its first ping.
@@ -25,44 +36,62 @@ const StartupTimeout = 4 * time.Second
 
 const dialTimeout = 2 * time.Second
 
+// spawnDaemonFunc is the test seam for "Ensure must not spawn" proofs.
+var spawnDaemonFunc = spawnDaemon
+
 // Client speaks the control protocol to one daemon socket.
 type Client struct {
-	sock string
+	sock         string
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
-// Dial connects and verifies the daemon by pinging it. Returns
-// ErrNotRunning when no live daemon answers.
+// newClient applies production deadlines.
+func newClient(sock string) *Client {
+	return &Client{sock: sock, readTimeout: ReadTimeout, writeTimeout: WriteTimeout}
+}
+
+// Dial connects and verifies the daemon by pinging it. Errors are typed:
+// ErrNotRunning when nothing answers, ErrProtocolMismatch for a live
+// incompatible peer, ErrBadPeer for a live non-protocol endpoint.
 func Dial(p paths.Paths) (*Client, error) {
-	c := &Client{sock: p.DaemonSocket()}
+	c := newClient(p.DaemonSocket())
 	if _, err := c.Ping(); err != nil {
-		return nil, ErrNotRunning
+		return nil, err
 	}
 	return c, nil
 }
 
-// Do performs one request/response round-trip on a fresh connection.
+// Do performs one request/response round-trip on a fresh connection with
+// phase-specific deadlines: WriteTimeout covers the send phase,
+// ReadTimeout covers the receive phase.
 func (c *Client) Do(req protocol.Request) (*protocol.Response, error) {
 	conn, err := net.DialTimeout("unix", c.sock, dialTimeout)
 	if err != nil {
 		return nil, ErrNotRunning
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(ReadTimeout + WriteTimeout))
 
 	req.Version = protocol.Version
+	_ = conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return nil, fmt.Errorf("send: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrBadPeer, err)
 	}
 	// Half-close so the daemon sees request EOF instead of waiting for more.
 	if uc, ok := conn.(*net.UnixConn); ok {
 		_ = uc.CloseWrite()
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(c.readTimeout))
 	var resp protocol.Response
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return nil, fmt.Errorf("recv: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrBadPeer, err)
 	}
 	if resp.Version != protocol.Version {
-		return nil, fmt.Errorf("protocol mismatch: response v%d", resp.Version)
+		return nil, fmt.Errorf("%w: client v%d, daemon v%d",
+			ErrProtocolMismatch, protocol.Version, resp.Version)
+	}
+	if !resp.OK && resp.Code == protocol.ErrProtocolMismatch {
+		return nil, fmt.Errorf("%w: %s", ErrProtocolMismatch, resp.Error)
 	}
 	return &resp, nil
 }
@@ -73,19 +102,26 @@ func (c *Client) Ping() (*protocol.DaemonInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r.Daemon == nil {
+		return nil, ErrBadPeer
+	}
 	return r.Daemon, nil
 }
 
 // Ensure returns a client for the state root's daemon, spawning a hidden
-// `__daemon` process when none is running. Multiple racing clients may each
-// spawn a contender; exactly one wins the daemon lock and the rest exit —
-// all clients converge on the same socket/PID.
+// `__daemon` process only when nothing is running. A live but incompatible
+// or malformed peer fails immediately — spawning another daemon against it
+// would be wrong (it may still hold relayd.lock).
 func Ensure(p paths.Paths, selfExe string) (*Client, error) {
-	c := &Client{sock: p.DaemonSocket()}
-	if _, err := c.Ping(); err == nil {
+	c := newClient(p.DaemonSocket())
+	_, err := c.Ping()
+	switch {
+	case err == nil:
 		return c, nil
+	case !errors.Is(err, ErrNotRunning):
+		return nil, err // protocol mismatch / bad peer: never spawn
 	}
-	if err := spawnDaemon(p, selfExe); err != nil {
+	if err := spawnDaemonFunc(p, selfExe); err != nil {
 		return nil, err
 	}
 	deadline := time.Now().Add(StartupTimeout)

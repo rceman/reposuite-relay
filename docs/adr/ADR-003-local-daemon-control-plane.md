@@ -25,13 +25,29 @@ reachable only on a private Unix socket:
 - **Permissions.** State dirs 0700, socket 0600, lock 0600. No TCP, no
   localhost HTTP, no WSS, no network exposure.
 - **Client flow.** Managed commands (`serve`/`list`/`status`/`stop`) ping
-  the socket; if unreachable they spawn `__daemon` detached (new session,
-  absolute `REPOSUITE_HOME`, CWD-independent) and poll readiness with a
-  bounded 4s deadline. `daemon status|stop` never auto-start.
+  the socket; only when nothing answers (`ErrNotRunning`) do they spawn
+  `__daemon` detached (new session, absolute `REPOSUITE_HOME`,
+  CWD-independent) and poll readiness with a bounded 4s deadline. A live
+  but incompatible peer (`ErrProtocolMismatch`) or malformed peer
+  (`ErrBadPeer`) fails immediately — never misreported as "not running",
+  never a reason to spawn. `daemon status|stop` never auto-start.
 - **Protocol.** Versioned (`v=1`) JSON request/response; one connection =
-  one request = one response = close. Max request 64 KiB; per-connection
-  read/write deadlines (5s each); structured error codes; no
-  client-supplied command fields — the only harness is `fixture`.
+  one request = one response = close. Max request 64 KiB; phase-specific
+  deadlines — the read phase gets 5s (SetReadDeadline before reading the
+  request / before reading the response on the client), the write phase
+  gets 5s — not a combined 10s. Structured error codes; no client-supplied
+  command fields — the only harness is `fixture`.
+- **Atomic creation.** `serve_fixture` reserves the key under the registry
+  lock *before* spawning (`Reserve`/`Commit`/`Cancel`): a duplicate or
+  racing request loses the reservation, returns `SESSION_EXISTS`, and
+  never spawns a process. A failed runtime-id generation or spawn cancels
+  the reservation and leaves nothing.
+- **Atomic removal.** `stop_session` takes exclusive stop ownership
+  (`BeginStop`/`CommitStop`/`AbortStop`): the session is removed only
+  after its generation is confirmed stopped. A failed stop aborts the
+  ownership and retains the session — the daemon never loses authority
+  over a still-running generation. Concurrent stops resolve to exactly
+  one owner; losers get `SESSION_NOT_FOUND`.
 - **Registry.** In-memory `mutex + map` is authoritative for logical
   sessions in this milestone. A daemon restart loses all sessions; durable
   metadata and crash recovery are deferred (ADR-002).

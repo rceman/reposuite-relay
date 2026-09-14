@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -151,6 +152,9 @@ func cmdServe(args []string, selfExe string) int {
 	if !r.OK {
 		return failResp(r)
 	}
+	if r.Session == nil || r.Daemon == nil {
+		return fail(daemon.ErrBadPeer)
+	}
 	printSession(r.Session)
 	fmt.Printf("daemon_pid=%d\n", r.Daemon.PID)
 	return 0
@@ -173,6 +177,9 @@ func cmdManaged(selfExe, op, key string) int {
 	if !r.OK {
 		return failResp(r)
 	}
+	if r.Daemon == nil {
+		return fail(daemon.ErrBadPeer)
+	}
 	switch op {
 	case protocol.OpListSessions:
 		for i := range r.Sessions {
@@ -180,6 +187,9 @@ func cmdManaged(selfExe, op, key string) int {
 		}
 		fmt.Printf("daemon_pid=%d sessions=%d\n", r.Daemon.PID, r.Daemon.SessionCount)
 	case protocol.OpSessionStatus:
+		if r.Session == nil {
+			return fail(daemon.ErrBadPeer)
+		}
 		printSession(r.Session)
 	case protocol.OpStopSession:
 		fmt.Printf("stopped key=%s\n", key)
@@ -205,13 +215,21 @@ func cmdDaemon(args []string) int {
 	}
 	c, err := daemon.Dial(p)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "reposuite-relay: daemon not running")
+		if errors.Is(err, daemon.ErrNotRunning) {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: daemon not running")
+		} else {
+			// Protocol mismatch / bad peer is NOT "not running".
+			fmt.Fprintln(os.Stderr, "reposuite-relay:", err)
+		}
 		return 1
 	}
 	if args[0] == "status" {
 		r, err := c.Do(protocol.Request{Op: protocol.OpDaemonStatus})
 		if err != nil {
 			return fail(err)
+		}
+		if r.Daemon == nil {
+			return fail(daemon.ErrBadPeer)
 		}
 		fmt.Printf("pid=%d protocolVersion=%d uptimeSeconds=%.3f sessionCount=%d\n",
 			r.Daemon.PID, r.Daemon.ProtocolVersion, r.Daemon.UptimeSeconds, r.Daemon.SessionCount)

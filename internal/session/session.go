@@ -9,6 +9,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"regexp"
 	"sort"
 	"sync"
@@ -34,12 +35,14 @@ func ValidKey(k string) bool { return keyRe.MatchString(k) }
 
 // NewRuntimeID returns a collision-safe session runtime identity
 // (128 bits of crypto/rand, hex-encoded). Not derived from PID or time.
-func NewRuntimeID() string {
+// Errors are returned, never panicked — a caller must be able to abort
+// session creation cleanly when secure randomness is unavailable.
+func NewRuntimeID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic("crypto/rand: " + err.Error())
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
 
 // Session is one lightweight logical record per managed session. It is
@@ -89,41 +92,114 @@ func (m *Managed) Info() protocol.SessionInfo {
 
 // Registry is the daemon-memory session authority: a mutex-guarded map.
 // Deliberately not durable (no SQLite/JSON store/event log).
+//
+// Besides the committed sessions it tracks two internal key holds that keep
+// the public state model (running/absent) intact:
+//
+//	reserved — a creator holds the key between conflict check and spawn
+//	stopping — a stop owner holds the key until the child is reaped
+//
+// Both are invisible to clients: a reserved key is not yet a session and a
+// stopping key still is one.
 type Registry struct {
-	mu    sync.Mutex
-	byKey map[string]*Managed
+	mu       sync.Mutex
+	byKey    map[string]*Managed
+	reserved map[string]struct{}
+	stopping map[string]struct{}
 }
 
 // NewRegistry returns an empty registry.
-func NewRegistry() *Registry { return &Registry{byKey: map[string]*Managed{}} }
+func NewRegistry() *Registry {
+	return &Registry{
+		byKey:    map[string]*Managed{},
+		reserved: map[string]struct{}{},
+		stopping: map[string]struct{}{},
+	}
+}
 
-// Create inserts m; false if the key already exists.
-func (r *Registry) Create(m *Managed) bool {
+// Reserve atomically claims key for creation BEFORE any process spawn.
+// Exactly one concurrent caller wins; losers get false (→ SESSION_EXISTS)
+// and must not spawn. Pair with Commit on success or Cancel on failure.
+func (r *Registry) Reserve(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, dup := r.byKey[m.Session.Key]; dup {
+	if _, ok := r.byKey[key]; ok {
 		return false
 	}
-	r.byKey[m.Session.Key] = m
+	if _, ok := r.reserved[key]; ok {
+		return false
+	}
+	if _, ok := r.stopping[key]; ok {
+		return false // stop in flight — key still owned
+	}
+	r.reserved[key] = struct{}{}
 	return true
 }
 
-// Get returns the managed session for key.
+// Cancel releases a failed reservation so the key can be retried.
+func (r *Registry) Cancel(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.reserved, key)
+}
+
+// Commit atomically turns the caller's reservation into the running managed
+// session. False if the caller does not hold the reservation.
+func (r *Registry) Commit(key string, m *Managed) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.reserved[key]; !ok {
+		return false
+	}
+	delete(r.reserved, key)
+	r.byKey[key] = m
+	return true
+}
+
+// BeginStop returns the managed session plus exclusive stop ownership, or
+// false when the key is absent, reserved, or already being stopped (losers
+// must not call Stop on the same generation). The session remains queryable
+// until CommitStop — it is still running until confirmed stopped.
+func (r *Registry) BeginStop(key string) (*Managed, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.reserved[key]; ok {
+		return nil, false
+	}
+	if _, ok := r.stopping[key]; ok {
+		return nil, false
+	}
+	m, ok := r.byKey[key]
+	if !ok {
+		return nil, false
+	}
+	r.stopping[key] = struct{}{}
+	return m, true
+}
+
+// CommitStop removes the session after its generation is confirmed stopped.
+func (r *Registry) CommitStop(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stopping, key)
+	delete(r.byKey, key)
+}
+
+// AbortStop releases stop ownership after a failed Stop: the session stays
+// in the registry — the daemon retains authority over the still-running
+// generation instead of losing it.
+func (r *Registry) AbortStop(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stopping, key)
+}
+
+// Get returns the managed session for key — including one mid-stop (it is
+// still running until CommitStop confirms).
 func (r *Registry) Get(key string) (*Managed, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, ok := r.byKey[key]
-	return m, ok
-}
-
-// Remove deletes key and returns it if present.
-func (r *Registry) Remove(key string) (*Managed, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	m, ok := r.byKey[key]
-	if ok {
-		delete(r.byKey, key)
-	}
 	return m, ok
 }
 

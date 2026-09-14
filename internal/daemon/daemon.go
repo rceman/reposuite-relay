@@ -30,16 +30,43 @@ import (
 // LockName is the daemon singleton lock file inside the run directory.
 const LockName = "relayd.lock"
 
-// Bounds for the local control plane.
+// Bounds for the local control plane — phase-specific deadlines.
 const (
 	ReadTimeout  = 5 * time.Second // per-connection read deadline
 	WriteTimeout = 5 * time.Second // per-connection write deadline
 )
 
+// Options configures a Daemon. Zero fields take production defaults; the
+// seams exist so tests can count spawns, inject failures, and shorten
+// deadlines deterministically without changing production behavior.
+type Options struct {
+	SelfExe      string // path used to spawn __fixture children
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	SpawnFixture func(selfExe, cwd string) (*fixture.Child, error)
+	RandID       func() (string, error)
+}
+
+func (o Options) withDefaults() Options {
+	if o.ReadTimeout <= 0 {
+		o.ReadTimeout = ReadTimeout
+	}
+	if o.WriteTimeout <= 0 {
+		o.WriteTimeout = WriteTimeout
+	}
+	if o.SpawnFixture == nil {
+		o.SpawnFixture = fixture.Spawn
+	}
+	if o.RandID == nil {
+		o.RandID = session.NewRuntimeID
+	}
+	return o
+}
+
 // Daemon owns the listener, the registry, and all active generations.
 type Daemon struct {
-	paths   paths.Paths
-	selfExe string
+	paths paths.Paths
+	opts  Options
 
 	started  time.Time
 	registry *session.Registry
@@ -54,33 +81,49 @@ type Daemon struct {
 	once     sync.Once
 }
 
-// Run is the __daemon entry point: acquire singleton lock, recover stale
-// socket, serve until shutdown/signal, then clean up. It returns nil on
-// graceful shutdown and a non-nil error when the daemon cannot start.
-// If another daemon owns this state root, Run returns ErrAlreadyRunning.
+// ErrAlreadyRunning is returned when another daemon owns this state root.
 var ErrAlreadyRunning = errors.New("another daemon owns this state root")
 
+// Run is the __daemon entry point: acquire singleton lock, recover stale
+// socket, serve until shutdown/signal, then clean up.
 func Run(p paths.Paths, selfExe string) error {
-	if err := p.Ensure(); err != nil {
+	d, err := Start(p, Options{SelfExe: selfExe})
+	if err != nil {
 		return err
+	}
+	return d.Serve()
+}
+
+// Start performs singleton lock acquisition, stale-socket recovery, and the
+// socket bind, then returns a Daemon ready to Serve. Splitting Start/Serve
+// lets tests inject seams via Options before the accept loop begins.
+func Start(p paths.Paths, opts Options) (*Daemon, error) {
+	if err := p.Ensure(); err != nil {
+		return nil, err
 	}
 	d := &Daemon{
 		paths:    p,
-		selfExe:  selfExe,
+		opts:     opts.withDefaults(),
 		started:  time.Now(),
 		registry: session.NewRegistry(),
 		conns:    map[net.Conn]struct{}{},
 		shutdown: make(chan struct{}),
 	}
 	if err := d.acquireLock(); err != nil {
-		return err
+		return nil, err
 	}
-	defer d.releaseLock()
-
 	if err := d.bindSocket(); err != nil {
-		return err
+		d.releaseLock()
+		return nil, err
 	}
-	defer os.Remove(p.DaemonSocket())
+	return d, nil
+}
+
+// Serve runs the accept loop until shutdown or SIGTERM/SIGINT, then stops
+// every fixture generation, closes the listener, and removes the socket.
+func (d *Daemon) Serve() error {
+	defer os.Remove(d.paths.DaemonSocket())
+	defer d.releaseLock()
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -112,6 +155,10 @@ func Run(p paths.Paths, selfExe string) error {
 	<-acceptDone
 	return nil
 }
+
+// Shutdown asks a running daemon to stop gracefully (test seam; external
+// users normally use the `shutdown` protocol op or SIGTERM).
+func (d *Daemon) Shutdown() { d.initiate() }
 
 // acquireLock takes the exclusive non-blocking advisory lock that makes the
 // daemon a singleton. Stale lock FILES are harmless: the kernel lock, not
@@ -196,8 +243,9 @@ func (d *Daemon) initiate() {
 	})
 }
 
-// serveConn handles one request/response with bounded deadlines, then
-// closes the connection.
+// serveConn handles one request/response with bounded phase-specific
+// deadlines, then closes the connection: ReadTimeout applies while reading
+// the request, WriteTimeout while writing the response.
 func (d *Daemon) serveConn(c net.Conn) {
 	defer func() {
 		d.mu.Lock()
@@ -205,12 +253,12 @@ func (d *Daemon) serveConn(c net.Conn) {
 		d.mu.Unlock()
 		_ = c.Close()
 	}()
-	_ = c.SetDeadline(time.Now().Add(ReadTimeout + WriteTimeout))
 
+	_ = c.SetReadDeadline(time.Now().Add(d.opts.ReadTimeout))
 	limited := io.LimitReader(c, protocol.MaxRequest+1)
 	raw, err := io.ReadAll(limited)
 	if err != nil {
-		return // idle/short-lived client: deadline or close, nothing to say
+		return // idle/short-lived client: read deadline or close
 	}
 	var resp protocol.Response
 	switch {
@@ -221,7 +269,7 @@ func (d *Daemon) serveConn(c net.Conn) {
 	default:
 		resp = d.dispatch(raw)
 	}
-	_ = c.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	_ = c.SetWriteDeadline(time.Now().Add(d.opts.WriteTimeout))
 	_ = json.NewEncoder(c).Encode(resp)
 
 	// shutdown is deferred until the response has been written.
@@ -287,6 +335,9 @@ func (d *Daemon) info() *protocol.DaemonInfo {
 	}
 }
 
+// serveFixture atomically reserves the key BEFORE spawning, so a duplicate
+// or racing request can never create a transient extra process. On any
+// failure the reservation is cancelled and nothing remains.
 func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if !session.ValidKey(req.Key) {
 		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
@@ -295,15 +346,26 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if cwd == "" || !filepath.IsAbs(cwd) {
 		return protocol.Fail(protocol.ErrInvalidRequest, "serve requires an absolute client cwd")
 	}
-	child, err := fixture.Spawn(d.selfExe, cwd)
+	if !d.registry.Reserve(req.Key) {
+		return protocol.Fail(protocol.ErrSessionExists, "session "+req.Key+" already exists")
+	}
+	fail := func(r protocol.Response) protocol.Response {
+		d.registry.Cancel(req.Key)
+		return r
+	}
+	runtimeID, err := d.opts.RandID()
 	if err != nil {
-		return protocol.Fail(protocol.ErrFixtureStart, err.Error())
+		return fail(protocol.Fail(protocol.ErrInternal, "runtime id: "+err.Error()))
+	}
+	child, err := d.opts.SpawnFixture(d.opts.SelfExe, cwd)
+	if err != nil {
+		return fail(protocol.Fail(protocol.ErrFixtureStart, err.Error()))
 	}
 	now := time.Now()
 	m := &session.Managed{
 		Session: &session.Session{
 			Key:        req.Key,
-			RuntimeID:  session.NewRuntimeID(),
+			RuntimeID:  runtimeID,
 			Harness:    session.HarnessFixture,
 			Cwd:        cwd,
 			State:      session.StateRunning,
@@ -313,9 +375,11 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 		Generation: &session.ActiveGeneration{PID: child.PID(), StartedAt: now},
 		Stop:       child.Stop,
 	}
-	if !d.registry.Create(m) {
-		_ = child.Stop() // duplicate key: leave no half-created session
-		return protocol.Fail(protocol.ErrSessionExists, "session "+req.Key+" already exists")
+	if !d.registry.Commit(req.Key, m) {
+		// Reservation lost — should be unreachable; never leak the child.
+		_ = child.Stop()
+		d.registry.Cancel(req.Key)
+		return protocol.Fail(protocol.ErrInternal, "lost key reservation")
 	}
 	r := protocol.Ok(d.info())
 	r.Session = ptr(m.Info())
@@ -323,6 +387,9 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 }
 
 func (d *Daemon) sessionStatus(req protocol.Request) protocol.Response {
+	if !session.ValidKey(req.Key) {
+		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
+	}
 	m, ok := d.registry.Get(req.Key)
 	if !ok {
 		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
@@ -332,14 +399,23 @@ func (d *Daemon) sessionStatus(req protocol.Request) protocol.Response {
 	return r
 }
 
+// stopSession takes exclusive stop ownership (BeginStop), stops the
+// generation, and only then removes the session (CommitStop). A failed Stop
+// keeps the session in the registry (AbortStop) — the daemon never loses
+// authority over a still-running generation.
 func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
-	m, ok := d.registry.Remove(req.Key)
+	if !session.ValidKey(req.Key) {
+		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
+	}
+	m, ok := d.registry.BeginStop(req.Key)
 	if !ok {
 		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
 	}
 	if err := m.Stop(); err != nil {
+		d.registry.AbortStop(req.Key)
 		return protocol.Fail(protocol.ErrInternal, "stop fixture: "+err.Error())
 	}
+	d.registry.CommitStop(req.Key)
 	return protocol.Ok(d.info())
 }
 
