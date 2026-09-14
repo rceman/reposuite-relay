@@ -1,0 +1,7 @@
+# Binaries and test artifacts
+*.test
+*.out
+coverage.*
+
+# Local environment
+.env
