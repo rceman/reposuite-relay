@@ -12,8 +12,10 @@ RepoSuite Relay is implemented in **Go**.
 - PTY: `github.com/creack/pty v1.1.24`.
 - Terminal engine: `github.com/rceman/xterm-go` — our maintained downstream
   fork of `github.com/gitpod-io/xterm-go` — pinned at commit
-  `f690bbc9735dc7a3a34fd1025da37b6d72289588`
-  (`v0.0.0-20260914111126-f690bbc9735d`), no replace directive.
+  `02f8c312eaafac9069c571f6a26982238a001360`
+  (`v0.0.0-20260914121151-02f8c312eaaf`; accepted baseline `f690bbc` +
+  first downstream fix: OSC 104 restore-all event disambiguation), no
+  replace directive.
 - Node/xterm.js is **not** a production dependency. The Node oracle used in
   the feasibility spike remains research tooling only.
 - No Rust spike: unnecessary — Go passed all required fidelity gates.

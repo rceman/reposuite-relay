@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/fixtures"
@@ -114,9 +115,9 @@ func TestKittyKeyboardStack(t *testing.T) {
 	}
 }
 
-// TestColorSetQueryRestore verifies palette mutation via OSC 10/4 is stored
+// TestColorSetQuery verifies palette mutation via OSC 10/4 is stored
 // host-side and reported back on query.
-func TestColorSetQueryRestore(t *testing.T) {
+func TestColorSetQuery(t *testing.T) {
 	m, replies := newTestModel(t, 80, 24)
 	m.Term.WriteString("\x1b]10;rgb:12/34/56\x1b\\")
 	m.Term.WriteString("\x1b]4;42;#abcdef\x1b\\")
@@ -127,6 +128,132 @@ func TestColorSetQueryRestore(t *testing.T) {
 	wantIdx := "\x1b]4;42;rgb:abab/cdcd/efef\x1b\\"
 	if !replyContains(*replies, wantFg) || !replyContains(*replies, wantIdx) {
 		t.Fatalf("got %q, want both %q and %q", got, wantFg, wantIdx)
+	}
+}
+
+// queryReply runs queries and returns the joined reply bytes.
+func queryReply(t *testing.T, m *Model, replies *[][]byte, queries ...string) string {
+	t.Helper()
+	*replies = nil
+	for _, q := range queries {
+		m.Term.WriteString(q)
+	}
+	return string(bytes.Join(*replies, nil))
+}
+
+// TestColorRestoreIndexedSingle: set entry, restore it via OSC 104;i, and
+// verify the ORIGINAL default is reported — not the mutated value.
+func TestColorRestoreIndexedSingle(t *testing.T) {
+	m, replies := newTestModel(t, 80, 24)
+	m.Term.WriteString("\x1b]4;42;#abcdef\x1b\\")
+	if got := queryReply(t, m, replies, "\x1b]4;42;?\x1b\\"); !strings.Contains(got, "abab/cdcd/efef") {
+		t.Fatalf("set not stored: %q", got)
+	}
+	m.Term.WriteString("\x1b]104;42\x1b\\")
+	got := queryReply(t, m, replies, "\x1b]4;42;?\x1b\\")
+	// Default for index 42: 216-cube offset 26 → {0,215,135} = 0000/d7d7/8787.
+	want := "\x1b]4;42;rgb:0000/d7d7/8787\x1b\\"
+	if got != want {
+		t.Fatalf("restore single: got %q want %q", got, want)
+	}
+}
+
+// TestColorRestoreAll: OSC 104 (no indices) restores every indexed entry
+// while leaving the special fg/bg/cursor colors untouched.
+func TestColorRestoreAll(t *testing.T) {
+	m, replies := newTestModel(t, 80, 24)
+	// Mutate two indexed entries AND all three special colors.
+	m.Term.WriteString("\x1b]4;5;#112233\x1b\\\x1b]4;200;#445566\x1b\\")
+	m.Term.WriteString("\x1b]10;#010203\x1b\\\x1b]11;#040506\x1b\\\x1b]12;#070809\x1b\\")
+
+	m.Term.WriteString("\x1b]104\x1b\\")
+
+	got := queryReply(t, m, replies,
+		"\x1b]4;5;?\x1b\\", "\x1b]4;200;?\x1b\\",
+		"\x1b]10;?\x1b\\", "\x1b]11;?\x1b\\", "\x1b]12;?\x1b\\")
+
+	// Indexed entries back to xterm defaults: 5 → magenta cd/00/cd,
+	// 200 → 216-cube {255,0,215} = ffff/0000/d7d7.
+	for _, want := range []string{
+		"\x1b]4;5;rgb:cdcd/0000/cdcd\x1b\\",
+		"\x1b]4;200;rgb:ffff/0000/d7d7\x1b\\",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("restore-all missed default %q; got %q", want, got)
+		}
+	}
+	// Specials must NOT be reset by OSC 104.
+	for _, want := range []string{
+		"\x1b]10;rgb:0101/0202/0303\x1b\\",
+		"\x1b]11;rgb:0404/0505/0606\x1b\\",
+		"\x1b]12;rgb:0707/0808/0909\x1b\\",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("OSC 104 must not reset special colors; want %q in %q", want, got)
+		}
+	}
+}
+
+// TestColorRestoreIndex0VsAll proves restore-all is distinguishable from
+// restoring entry 0 at the model level: after 104;0, entry 1 keeps its
+// mutated value.
+func TestColorRestoreIndex0VsAll(t *testing.T) {
+	m, replies := newTestModel(t, 80, 24)
+	m.Term.WriteString("\x1b]4;0;#010101\x1b\\\x1b]4;1;#020202\x1b\\")
+	m.Term.WriteString("\x1b]104;0\x1b\\")
+	got := queryReply(t, m, replies, "\x1b]4;0;?\x1b\\", "\x1b]4;1;?\x1b\\")
+	if !strings.Contains(got, "\x1b]4;0;rgb:0000/0000/0000\x1b\\") {
+		t.Fatalf("entry 0 not restored to default: %q", got)
+	}
+	if !strings.Contains(got, "\x1b]4;1;rgb:0202/0202/0202\x1b\\") {
+		t.Fatalf("entry 1 wrongly restored: %q", got)
+	}
+}
+
+// TestColorRestoreSpecials: OSC 110/111/112 restore exactly one special
+// color each, from the immutable defaults (never the mutated palette).
+func TestColorRestoreSpecials(t *testing.T) {
+	m, replies := newTestModel(t, 80, 24)
+	m.Term.WriteString("\x1b]10;#010203\x1b\\\x1b]11;#040506\x1b\\\x1b]12;#070809\x1b\\")
+
+	// Restore fg only; bg + cursor stay mutated.
+	m.Term.WriteString("\x1b]110\x1b\\")
+	got := queryReply(t, m, replies,
+		"\x1b]10;?\x1b\\", "\x1b]11;?\x1b\\", "\x1b]12;?\x1b\\")
+	for _, want := range []string{
+		"\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\", // default fg restored
+		"\x1b]11;rgb:0404/0505/0606\x1b\\", // bg still mutated
+		"\x1b]12;rgb:0707/0808/0909\x1b\\", // cursor still mutated
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("after OSC 110: want %q in %q", want, got)
+		}
+	}
+
+	// Restore bg only; cursor stays mutated.
+	m.Term.WriteString("\x1b]111\x1b\\")
+	got = queryReply(t, m, replies, "\x1b]11;?\x1b\\", "\x1b]12;?\x1b\\")
+	if !strings.Contains(got, "\x1b]11;rgb:1a1a/1a1a/1a1a\x1b\\") ||
+		!strings.Contains(got, "\x1b]12;rgb:0707/0808/0909\x1b\\") {
+		t.Fatalf("after OSC 111: %q", got)
+	}
+
+	// Restore cursor color.
+	m.Term.WriteString("\x1b]112\x1b\\")
+	got = queryReply(t, m, replies, "\x1b]12;?\x1b\\")
+	if !strings.Contains(got, "\x1b]12;rgb:ffff/ffff/ffff\x1b\\") {
+		t.Fatalf("after OSC 112: %q", got)
+	}
+}
+
+// TestColorRestoreInvalidIndex: invalid indices are ignored safely.
+func TestColorRestoreInvalidIndex(t *testing.T) {
+	m, replies := newTestModel(t, 80, 24)
+	m.Term.WriteString("\x1b]4;9;#aabbcc\x1b\\")
+	m.Term.WriteString("\x1b]104;999;zz\x1b\\") // out of range / non-numeric
+	got := queryReply(t, m, replies, "\x1b]4;9;?\x1b\\")
+	if !strings.Contains(got, "\x1b]4;9;rgb:aaaa/bbbb/cccc\x1b\\") {
+		t.Fatalf("entry 9 must stay mutated after invalid restore: %q", got)
 	}
 }
 

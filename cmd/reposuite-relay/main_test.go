@@ -9,17 +9,48 @@ import (
 )
 
 func TestRunCommands(t *testing.T) {
-	if got := run([]string{"version"}, ""); got != 0 {
+	if got := run([]string{"version"}); got != 0 {
 		t.Fatalf("version exit=%d", got)
 	}
-	if got := run([]string{"help"}, ""); got != 0 {
+	if got := run([]string{"help"}); got != 0 {
 		t.Fatalf("help exit=%d", got)
 	}
-	if got := run([]string{"bogus"}, ""); got == 0 {
+	if got := run([]string{"bogus"}); got == 0 {
 		t.Fatal("unknown command should fail non-zero")
 	}
-	if got := run(nil, ""); got == 0 {
+	if got := run(nil); got == 0 {
 		t.Fatal("no args should fail non-zero")
+	}
+}
+
+// TestPathsRejectsLegacyAirelayRoot: REPOSUITE_HOME under ~/.airelay must
+// fail non-zero before any filesystem write. Uses a synthetic temp HOME.
+func TestPathsRejectsLegacyAirelayRoot(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "reposuite-relay")
+	if out, err := exec.Command("go", "build", "-o", bin,
+		"github.com/rceman/reposuite-relay/cmd/reposuite-relay").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".airelay")
+	for _, env := range []string{legacy, legacy + "/relay", legacy + "/x/y"} {
+		cmd := exec.Command(bin, "paths")
+		cmd.Env = []string{"HOME=" + home, "REPOSUITE_HOME=" + env, "PATH=" + os.Getenv("PATH")}
+		o, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("REPOSUITE_HOME=%q must fail, got %q", env, o)
+		}
+		if !strings.Contains(string(o), "legacy Airelay") {
+			t.Fatalf("REPOSUITE_HOME=%q error should explain the rejection, got %q", env, o)
+		}
+	}
+	// Safe sibling remains allowed.
+	cmd := exec.Command(bin, "paths")
+	cmd.Env = []string{"HOME=" + home, "REPOSUITE_HOME=" + filepath.Join(home, ".reposuite"),
+		"PATH=" + os.Getenv("PATH")}
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("safe root must succeed: %v: %s", err, o)
 	}
 }
 

@@ -21,9 +21,9 @@ Commands:
   help       show this help
 `
 
-func main() { os.Exit(run(os.Args[1:], os.Getenv("REPOSUITE_HOME"))) }
+func main() { os.Exit(run(os.Args[1:])) }
 
-func run(args []string, envRepoSuiteHome string) int {
+func run(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2

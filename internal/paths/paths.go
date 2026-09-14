@@ -8,13 +8,16 @@
 //	Daemon socket    = <Run dir>/relayd.sock   (future; not created here)
 //	Log directory    = <Relay root>/logs
 //
-// Relay state never lives under ~/.airelay and never reads AIRELAY_*.
+// Safety invariant: Relay state never lives under ~/.airelay and never
+// reads AIRELAY_*. A configured RepoSuite root equal to, or contained in,
+// <home>/.airelay is rejected.
 package paths
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Paths is the resolved RepoSuite/Relay filesystem layout.
@@ -22,14 +25,41 @@ type Paths struct {
 	repoSuiteRoot string
 }
 
+// legacyAirelayRoot is the state directory of legacy Airelay; Relay must
+// never store state inside it.
+func legacyAirelayRoot(home string) string { return filepath.Join(home, ".airelay") }
+
 // Resolve computes the layout from an explicit home directory and the
 // REPOSUITE_HOME value ("" means unset). Pure: touches no filesystem.
-func Resolve(home, envRepoSuiteHome string) Paths {
+// Returns an error when the configured root overlaps the legacy Airelay
+// state directory.
+func Resolve(home, envRepoSuiteHome string) (Paths, error) {
 	root := envRepoSuiteHome
 	if root == "" {
 		root = filepath.Join(home, ".reposuite")
 	}
-	return Paths{repoSuiteRoot: filepath.Clean(root)}
+	root = filepath.Clean(root)
+	if err := checkNotLegacy(home, root); err != nil {
+		return Paths{}, err
+	}
+	return Paths{repoSuiteRoot: root}, nil
+}
+
+// checkNotLegacy rejects root when it equals or descends from
+// <home>/.airelay. Containment is path-component-aware (filepath.Rel):
+// ".airelay2" and similar sibling names are NOT rejected.
+func checkNotLegacy(home, root string) error {
+	legacy := legacyAirelayRoot(filepath.Clean(home))
+	rel, err := filepath.Rel(legacy, root)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", root, err)
+	}
+	if rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..") {
+		return fmt.Errorf(
+			"REPOSUITE_HOME %q overlaps legacy Airelay state %q; Relay state must not live there",
+			root, legacy)
+	}
+	return nil
 }
 
 // Current resolves the layout from the process environment.
@@ -38,7 +68,7 @@ func Current() (Paths, error) {
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve home: %w", err)
 	}
-	return Resolve(home, os.Getenv("REPOSUITE_HOME")), nil
+	return Resolve(home, os.Getenv("REPOSUITE_HOME"))
 }
 
 // RepoSuiteRoot is the RepoSuite state root.

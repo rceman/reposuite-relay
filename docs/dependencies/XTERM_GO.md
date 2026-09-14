@@ -6,10 +6,15 @@ RepoSuite Relay's terminal engine is our maintained downstream fork of
 ## Pins
 
 - **Canonical module:** `github.com/rceman/xterm-go`
-- **Canonical commit:** `f690bbc9735dc7a3a34fd1025da37b6d72289588`
-  (module version `v0.0.0-20260914111126-f690bbc9735d`)
+- **Canonical commit:** `02f8c312eaafac9069c571f6a26982238a001360`
+  (module version `v0.0.0-20260914121151-02f8c312eaaf`, branch
+  `fix/color-restore-semantics`)
 - **Upstream:** `github.com/gitpod-io/xterm-go`
 - **Upstream baseline:** `dae5128cb6b377a559b07d4a2d9eb1321f05e390`
+- **Original accepted baseline:** `f690bbc9735dc7a3a34fd1025da37b6d72289588`
+- **First downstream behavioral fix:** `02f8c312…` — OSC 104 no-parameter
+  restore now emits `ColorEvent.Index = ColorIndexAll` (-1) instead of the
+  ambiguous index 0.
 
 No `replace` directive is used; the canonical module path is imported
 directly.
