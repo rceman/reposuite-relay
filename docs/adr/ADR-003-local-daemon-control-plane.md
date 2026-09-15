@@ -6,10 +6,19 @@ Transport decision partially superseded (2026-09-15) by ADR-006.
 > **Supersession note.** Only the **Unix-socket public transport**
 > decision is superseded: the canonical local control plane is now
 > loopback TCP `127.0.0.1:0` with HTTP/JSON commands + NDJSON events
-> (ADR-006). Everything else here remains accepted: one daemon per state
-> root, flock singleton, stale-endpoint recovery, permissions,
-> versioned bounded protocol, atomic create/stop ownership,
-> confirmed-reaping stop semantics, and shutdown quiescence ordering.
+> (ADR-006).
+>
+> Still-valid **portable invariants**: one daemon per state root;
+> exclusive singleton ownership with fail-closed competing startup;
+> bounded request/lifecycle behavior; atomic create/stop ownership;
+> confirmed termination/reaping semantics; shutdown quiescence ordering;
+> fail-closed lifecycle behavior.
+>
+> **Historical implementation details** (valid evidence for the current
+> Linux build, not cross-platform requirements): the `flock` syscall,
+> `relayd.sock` inode lifecycle and stale-Unix-socket recovery, and
+> literal mode `0600` — replaced by platform-equivalent mechanisms per
+> ADR-006.
 
 ## Decision
 
