@@ -200,6 +200,40 @@ processes / 0 RAM** trivially — the question is resume fidelity, which
 all four pass for *idle* sessions. `waiting_input` is a sleep blocker
 everywhere (pending ask requests are transport-bound, not durable).
 
+## 5b. Runtime transport security (verified)
+
+Harness runtimes are **private implementation details of relayd** —
+external clients (TUI/Web/Gateway/automation) never connect to them
+directly. Verified transport/auth facts:
+
+| fact | Codex app-server | OpenCode serve | OpenCode acp | Devin acp |
+|---|---|---|---|---|
+| preferred Relay transport | **stdio** (default) or `unix://` | HTTP loopback | **stdio only** | **stdio only** |
+| network listener required | NO | YES (HTTP) | NO | NO |
+| default bind | none (stdio) | 127.0.0.1 | n/a | n/a |
+| loopback restriction | n/a | YES (`--hostname`, default is loopback; `--mdns` switches to 0.0.0.0 — never enable) | n/a | n/a |
+| unix socket | YES — `unix://PATH` created **`srw-------` (0600)** verified | NO | n/a | n/a |
+| authentication | stdio: n/a; ws: `--ws-auth capability-token\|signed-bearer-token` (for non-loopback); token via `--ws-token-file`/`--ws-shared-secret-file` (file, not argv) | YES — verified: `OPENCODE_SERVER_PASSWORD` env → HTTP Basic `opencode:<pw>`; all endpoints incl. `/event` SSE and `/session` return 401 without it | n/a (pipe fd) | n/a (pipe fd) |
+| credential supply | env/`--ws-token-file` path | env `OPENCODE_SERVER_PASSWORD` (not argv) | — | — |
+| argv/log exposure | token via file/sha — safe | env — safe | — | — |
+| ephemeral credential per runtime | YES (random token file) | YES (random `OPENCODE_SERVER_PASSWORD` per spawn) | n/a | n/a |
+| misconfiguration risk | ws on non-loopback w/o auth | `--mdns`/non-loopback bind or missing password = open server | none | none |
+
+**Policy:** prefer `stdio` (Codex/ACP) → `unix://` socket 0600 (Codex
+where a socket is needed) → loopback HTTP **with** generated Basic
+password (OpenCode serve — Relay should *always* set a fresh random
+`OPENCODE_SERVER_PASSWORD` per runtime spawn; never rely on the
+unauthenticated default). Runtime credentials are **ephemeral per
+generation** — generated with `crypto/rand` at wake, held only in the
+runtime record, discarded at sleep; never part of `nativeSessionId`,
+event history, logs, or status output.
+
+**Fail-closed startup:** after spawning, the adapter must verify the
+expected posture (e.g. `ss`/connect-check: listener is loopback-only;
+a no-auth request returns 401). If the runtime comes up `0.0.0.0` or
+unauthenticated, stop it and fail startup rather than accept the weaker
+configuration.
+
 ## 6. Proposed canonical model (minimal)
 
 - **RelayDaemon** — existing singleton control plane (keep).

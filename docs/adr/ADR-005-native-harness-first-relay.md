@@ -25,7 +25,14 @@ agent-requested-input channels.
   only when every bound session is cold-resumable-safe — no active turn,
   no in-flight native request, no pending requested input.
 - **`waiting_input` is a sleep blocker** — pending ask/permission
-  requests are transport-bound and do not survive runtime restart.
+  requests are transport-bound and do not survive runtime restart
+  (proven on OpenCode: pending `que_` lost across restart).
+- **Harness runtimes are private to relayd.** Transport order: stdio →
+  unix socket (0600) → loopback HTTP + auth. OpenCode serve always gets a
+  fresh random `OPENCODE_SERVER_PASSWORD` per spawn (Basic
+  `opencode:<pw>`, env-supplied — verified). Runtime credentials are
+  ephemeral per generation, never part of `nativeSessionId`/logs/events;
+  startup fails closed if the listener isn't loopback+authenticated.
 - **UI attachment never wakes a runtime** — transcript/history is served
   from Relay/native durable state; only native ops (prompt, model/mode
   change, cancel) wake.
