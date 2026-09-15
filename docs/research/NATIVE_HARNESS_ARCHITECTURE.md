@@ -173,6 +173,7 @@ for all — every runtime is just a child process we spawn).
 
 | state | Codex app-server | OpenCode serve | OpenCode acp | Devin acp |
 |---|---|---|---|---|
+| model used | `gpt-5.6-luna` @ effort `medium` (sub) | `muse-spark-1.3-contributor-free` (free) | `muse-spark-1.3-contributor-free` (free) | `swe-1-7-medium` (sub; session default) |
 | tree pids | 2 (codex+node) | 1 | 1 | 1 |
 | STARTED PSS | 94.6 MB | 300.6 MB | ~356 MB (1 sess) | ~27 MB (init) |
 | 1 idle sess PSS | 124.6 | 327.6 | — | ~27–90 MB |
@@ -181,14 +182,14 @@ for all — every runtime is just a child process we spawn).
 | fds | 56–73 | 24–34 | 36–41 | 28–29 |
 | spawn→ready | 0.25s | 2.06s | 1.73s | 0.19s |
 | exact cold resume | YES (`thread/resume`, ~0.3s; needs ≥1 turn materialized; ephemeral=opt-out) | YES (`GET /session/{ses_id}`, immediate) | YES (`session/load`, 0.55s) | YES (`session/load`, 0.13s) |
-| prompt→first event | 2.59s cold-ish, 5.39s post-resume | ~3.7s (free model) | 2.07s (free model) | 2.88s fresh / 35.6s on resumed session (one sample, high variance) |
+| prompt→first event | 5.98s @ medium effort (2.59s/5.39s were xhigh) | ~3.7s (free model) | 2.07s (free model) | 2.88s fresh / 35.6s on resumed session (one sample, high variance) |
 | transcript survives | YES (items/turns on resumed thread) | YES (`/session/{id}/message`) | YES (same ses store) | YES (load replays) |
-| model cfg survives | YES (`gpt-5.6-luna`, `xhigh`) | YES (session record) | YES | YES |
+| model cfg survives | YES (`gpt-5.6-luna`, effort incl. per-turn override — verified persists) | YES (session record) | YES | YES |
 | waiting_input survives restart | NO (server→client req bound to live transport; tool env-gated) | **NO — proven** (pending `que_` lost across restart; tool part stranded `running` forever) | NO (in-flight req dies with process) | NO (same) |
 | verdict | **COLD_RESUME_SUPPORTED** (idle sessions) | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** |
 
-Real-quota turns consumed: Codex ×2 (one "PONG" turn + one post-resume
-turn) + one failed request_user_input probe; OpenCode serve ×2 (PONG +
+Real-quota turns consumed: Codex ×3 (xhigh PONG, post-resume xhigh, medium-effort PONG)
++ one failed request_user_input probe; OpenCode serve ×2 (PONG +
 question-triggering turn, free `muse-spark-1.3-contributor-free`);
 OpenCode ACP ×1 (free model); Devin ACP ×2. All minimal single-turn
 prompts, no coding work.
