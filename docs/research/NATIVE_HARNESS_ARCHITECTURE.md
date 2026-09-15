@@ -72,10 +72,14 @@ on 127.0.0.1, no auth by default. Authoritative OpenAPI 3.1 spec at `/doc`.
   `session/abort`, `v2.session.interrupt`, `session.fork`.
 - **Requested input:** `question.asked` / `question.replied` /
   `question.rejected` SSE events + `POST /question/{requestID}/reply|reject`,
-  `GET /question` — questions are **server-side records**
-  (`questions[]` = `{header, question, options[{label,description}],
-  multiple, custom}`). Durable across restart plausibly — unproven (no
-  provider quota to run a question-generating turn).
+  `GET /question` — `questions[]` = `{header, question,
+  options[{label,description}], multiple, custom}`. Verified live: a turn
+  produced `que_…` with 3 options. ⚠ **Pending questions do NOT survive
+  server restart** — after kill+restart `GET /question` returns empty and
+  the tool part is permanently stranded `status:"running"` →
+  `waiting_input` is a hard sleep blocker.
+- **Free model:** `opencode/muse-spark-1.3-contributor-free` runs turns
+  without a paid key (used for the measurements below).
 - **Permissions:** `permission.asked/replied` events +
   `permission/{requestID}/reply` (`once|always|reject`).
 - **Model/mode:** `v2.session.switchModel`, `v2.session.switchAgent`
@@ -103,8 +107,13 @@ JSON-RPC 2.0 over stdio per the Agent Client Protocol.
   ~0.55s after full process restart** — cold resume confirmed even for a
   zero-turn session.
 - `configOptions` in `session/new` result expose `model` select with the
-  full provider/model list.
+  full provider/model list; **`session/set_config_option` switches the
+  model mid-session** (verified: `currentValue` updated to
+  `opencode/muse-spark-1.3-contributor-free`).
 - One process hosted 5 concurrent sessions (multi-session confirmed).
+- Live turn on the free `muse-spark-1.3-contributor-free` model:
+  prompt→first `agent_message_chunk` 2.07s, `stopReason:end_turn`,
+  `usage{input 7476, output 12, thought 5}`.
 
 ## 4. Devin ACP (`devin acp`) (verified)
 
@@ -148,7 +157,7 @@ JSON-RPC 2.0 over stdio, ACP v1 + Cognition extensions.
 | cancel | YES `turn/interrupt` | YES `abort`/`interrupt` | YES `session/cancel` | YES `session/cancel` |
 | requested user input | PARTIAL (`ToolRequestUserInput`, env-gated) | YES (`question.asked`+reply) | PARTIAL (ACP request_permission) | PARTIAL (request_permission; generic ask unobserved) |
 | model selection | YES (thread+turn `model`) | YES (`switchModel`) | YES (configOptions) | YES (`--model`, configOptions) |
-| mode/fast selection | YES (`effort`, `serviceTier`) | YES (`switchAgent`, `variant`) | PARTIAL (configOptions) | YES (mode: code/smart/ask/plan/bypass) |
+| mode/fast selection | YES (`effort`, `serviceTier`) | YES (`switchAgent`, `variant`) | YES (`session/set_config_option`, verified) | YES (mode: code/smart/ask/plan/bypass) |
 | context metrics | YES (`tokenUsage/updated`) | YES (`session.context`) | PARTIAL | YES (usage in prompt result) |
 | quota metrics | YES (`account/rateLimits/*`) | PARTIAL (`session.cost`) | PARTIAL | PARTIAL |
 | bypass permissions | YES (`approvalPolicy:never`, reviewer) | YES (permission config/agent mode) | PARTIAL | YES (`bypass` mode) |
@@ -168,19 +177,21 @@ for all — every runtime is just a child process we spawn).
 | STARTED PSS | 94.6 MB | 300.6 MB | ~356 MB (1 sess) | ~27 MB (init) |
 | 1 idle sess PSS | 124.6 | 327.6 | — | ~27–90 MB |
 | 5 idle sess PSS | 170.1 (+~15/thread) | 330.2 (+0.7/sess) | 485.8 | 89.8 |
-| post-turn PSS | 225.8 | 467.8* | UNKNOWN | — |
-| fds | 56–73 | 24–34 | 36 | 28–29 |
+| post-turn PSS | 225.8 | 650.8 | 572.5 | — |
+| fds | 56–73 | 24–34 | 36–41 | 28–29 |
 | spawn→ready | 0.25s | 2.06s | 1.73s | 0.19s |
 | exact cold resume | YES (`thread/resume`, ~0.3s; needs ≥1 turn materialized; ephemeral=opt-out) | YES (`GET /session/{ses_id}`, immediate) | YES (`session/load`, 0.55s) | YES (`session/load`, 0.13s) |
-| prompt→first event | 2.59s cold-ish, 5.39s post-resume | UNKNOWN (no quota) | UNKNOWN | 2.88s |
+| prompt→first event | 2.59s cold-ish, 5.39s post-resume | ~3.7s (free model) | 2.07s (free model) | 2.88s |
 | transcript survives | YES (items/turns on resumed thread) | YES (`/session/{id}/message`) | YES (same ses store) | YES (load replays) |
 | model cfg survives | YES (`gpt-5.6-luna`, `xhigh`) | YES (session record) | YES | YES |
-| waiting_input survives restart | NO (server→client req bound to live transport; tool env-gated) | UNKNOWN (server-side `question` records; couldn't run a turn) | NO (in-flight req dies with process) | NO (same) |
+| waiting_input survives restart | NO (server→client req bound to live transport; tool env-gated) | **NO — proven** (pending `que_` lost across restart; tool part stranded `running` forever) | NO (in-flight req dies with process) | NO (same) |
 | verdict | **COLD_RESUME_SUPPORTED** (idle sessions) | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** |
 
-\* OpenCode's measured turn failed (`Insufficient balance` on the Zen
-key; local `llama-server` unreachable) — post-turn figure is
-post-failed-turn. prompt→first-event UNKNOWN pending quota.
+Real-quota turns consumed: Codex ×2 (one "PONG" turn + one post-resume
+turn) + one failed request_user_input probe; OpenCode serve ×2 (PONG +
+question-triggering turn, free `muse-spark-1.3-contributor-free`);
+OpenCode ACP ×1 (free model); Devin ACP ×1. All minimal single-turn
+prompts, no coding work.
 
 **Interpretation:** expensive server / cheap sessions — OpenCode ~300 MB
 PSS base, ~0.7 MB per extra idle session; Codex ~95 MB base, ~15 MB per
@@ -271,11 +282,14 @@ One vertical slice (Codex) before generalizing adapters.
 
 - Codex `request_user_input` is environment-gated — which config enables
   it? (Blocking for the A/B/C UI on Codex.)
-- OpenCode question-request durability across restart — needs a working
-  provider to prove; currently UNKNOWN.
+- ~~OpenCode question durability~~ — **answered: NO** — pending `que_`
+  requests are lost across restart; the tool part stays `running`
+  forever. `waiting_input` is a proven sleep blocker on all four paths.
 - Devin generic (non-permission) agent questions — not observed;
   `_meta` surface suggests richer channels exist.
 - Codex `thread/resume` needs ≥1 materialized turn — zero-turn sessions
   are not resumable (acceptable: an unmaterialized session is empty).
-- ACP `session/set_mode` / set_model availability — configOptions show
-  selection is exposed; exact setter method to verify at adapter build.
+- ~~ACP model setter~~ — **answered:** `session/set_config_option`
+  (configId=`model`) switches mid-session on OpenCode ACP; Devin exposes
+  mode via configOptions (`bypass` etc.) — exact Devin model setter
+  verify at adapter build (`--model` covers creation-time).
