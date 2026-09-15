@@ -33,6 +33,7 @@ type Child struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 	wait  chan error
+	kill  func() error // test seam; defaults to cmd.Process.Kill
 
 	stopTimeout time.Duration
 	killTimeout time.Duration
@@ -67,6 +68,7 @@ func SpawnCmd(cmd *exec.Cmd) (*Child, error) {
 		stopTimeout: StopTimeout,
 		killTimeout: KillTimeout,
 	}
+	c.kill = func() error { return cmd.Process.Kill() }
 	go func() { c.wait <- cmd.Wait() }()
 	return c, nil
 }
@@ -84,24 +86,32 @@ func (c *Child) PID() int { return c.cmd.Process.Pid }
 // *exec.ExitError is therefore a successful stop, not a lifecycle failure.
 func (c *Child) Stop() error {
 	_ = c.stdin.Close()
+	if err := c.waitReaped(c.stopTimeout); err == nil {
+		return nil
+	}
+	// Graceful window expired — bounded SIGKILL fallback. A kill error
+	// (including os.ErrProcessDone) may race a concurrent natural exit, so
+	// we still give reaping one bounded chance to confirm termination.
+	killErr := c.kill()
+	reapErr := c.waitReaped(c.killTimeout)
+	if reapErr == nil {
+		return nil // terminated + reaped, regardless of killErr
+	}
+	if killErr != nil {
+		return fmt.Errorf("fixture kill pid=%d: %w (reap unconfirmed: %v)", c.PID(), killErr, reapErr)
+	}
+	return reapErr
+}
+
+// waitReaped waits up to timeout for cmd.Wait() to finish, then maps the
+// result through confirmed(). Every receive on c.wait goes through here —
+// no unbounded reap wait exists on any Stop path.
+func (c *Child) waitReaped(timeout time.Duration) error {
 	select {
 	case err := <-c.wait:
 		return confirmed(err)
-	case <-time.After(c.stopTimeout):
-	}
-	if err := c.cmd.Process.Kill(); err != nil {
-		// Kill failed — if the process already exited on its own, wait
-		// confirms it; otherwise we cannot confirm termination.
-		if errors.Is(err, os.ErrProcessDone) {
-			return confirmed(<-c.wait)
-		}
-		return fmt.Errorf("fixture kill pid=%d: %w", c.PID(), err)
-	}
-	select {
-	case err := <-c.wait:
-		return confirmed(err)
-	case <-time.After(c.killTimeout):
-		return fmt.Errorf("fixture pid=%d did not reap after SIGKILL", c.PID())
+	case <-time.After(timeout):
+		return fmt.Errorf("fixture pid=%d not reaped within %s", c.PID(), timeout)
 	}
 }
 
