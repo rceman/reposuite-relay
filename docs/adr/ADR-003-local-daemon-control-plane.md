@@ -1,6 +1,15 @@
 # ADR-003: Local daemon control plane
 
 Status: Accepted (2026-09-14) — implemented in this milestone.
+Transport decision partially superseded (2026-09-15) by ADR-006.
+
+> **Supersession note.** Only the **Unix-socket public transport**
+> decision is superseded: the canonical local control plane is now
+> loopback TCP `127.0.0.1:0` with HTTP/JSON commands + NDJSON events
+> (ADR-006). Everything else here remains accepted: one daemon per state
+> root, flock singleton, stale-endpoint recovery, permissions,
+> versioned bounded protocol, atomic create/stop ownership,
+> confirmed-reaping stop semantics, and shutdown quiescence ordering.
 
 ## Decision
 

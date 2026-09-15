@@ -165,41 +165,62 @@ JSON-RPC 2.0 over stdio, ACP v1 + Cognition extensions.
 | runtime restart resume | YES (proven) | YES (proven) | YES (proven) | YES (proven) |
 | schema discoverability | YES (`generate-json-schema`) | YES (`/doc` OpenAPI) | YES (ACP spec + initialize caps) | YES (ACP + `_meta` caps) |
 
-## 5. Cold-resume / resource measurements
+## 5. Cold-resume / resource measurements (final, verified)
 
 Measured via `/proc/<pid>/smaps_rollup` (PSS preferred) + process-tree
 walk + fd count. Cold = runtime absent = 0 procs / 0 RAM (trivially true
 for all — every runtime is just a child process we spawn).
 
-| state | Codex app-server | OpenCode serve | OpenCode acp | Devin acp |
+Fresh-session prompt: `hey` (one turn per measurement). Models:
+Codex `gpt-5.6-luna` @ `medium` (subscription); OpenCode serve + ACP
+`muse-spark-1.3-contributor-free` (free); Devin `swe-1-7-medium`
+(subscription, session default — confirmed `currentValue`).
+
+| state | Codex app-server | OpenCode serve | OpenCode ACP | Devin ACP |
 |---|---|---|---|---|
-| model used | `gpt-5.6-luna` @ effort `medium` (sub) | `muse-spark-1.3-contributor-free` (free) | `muse-spark-1.3-contributor-free` (free) | `swe-1-7-medium` (sub; session default) |
+| model used | `gpt-5.6-luna` @ `medium` (sub) | `muse-spark-1.3-contributor-free` (free) | `muse-spark-1.3-contributor-free` (free) | `swe-1-7-medium` (sub; session default) |
 | tree pids | 2 (codex+node) | 1 | 1 | 1 |
-| STARTED PSS | 94.6 MB | 300.6 MB | ~356 MB (1 sess) | ~27 MB (init) |
-| 1 idle sess PSS | 124.6 | 327.6 | — | ~27–90 MB |
-| 5 idle sess PSS | 170.1 (+~15/thread) | 330.2 (+0.7/sess) | 485.8 | 89.8 |
+| STARTED PSS (no session) | 94.6 MB | 300.6 MB | UNKNOWN | ~27 MB |
+| 1 idle session PSS | 124.6 | 327.6 | ~356 MB | ~46 MB (loaded) |
+| 5 idle sessions PSS | 170.1 (+~15/thread) | 330.2 (+0.7/sess) | 485.8 | 89.8 |
 | post-turn PSS | 225.8 | 650.8 | 572.5 | 51.2 |
-| fds | 56–73 | 24–34 | 36–41 | 28–29 |
+| FDs | 56–73 | 24–34 | 36–41 | 28–29 |
 | spawn→ready | 0.25s | 2.06s | 1.73s | 0.19s |
 | exact cold resume | YES (`thread/resume`, ~0.3s; needs ≥1 turn materialized; ephemeral=opt-out) | YES (`GET /session/{ses_id}`, immediate) | YES (`session/load`, 0.55s) | YES (`session/load`, 0.13s) |
-| prompt→first event (fresh session, prompt `hey`) | 4.15s | 3.57s | 2.22s | 1.37s |
-| transcript survives | YES (items/turns on resumed thread) | YES (`/session/{id}/message`) | YES (same ses store) | YES (load replays) |
-| model cfg survives | YES (`gpt-5.6-luna`, effort incl. per-turn override — verified persists) | YES (session record) | YES | YES |
-| waiting_input survives restart | NO (server→client req bound to live transport; tool env-gated) | **NO — proven** (pending `que_` lost across restart; tool part stranded `running` forever) | NO (in-flight req dies with process) | NO (same) |
-| verdict | **COLD_RESUME_SUPPORTED** (idle sessions) | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** |
+| fresh prompt→first agent event | 4.15s | 3.57s | 2.22s | 1.37s |
+| transcript survives restart | YES | YES | YES | YES |
+| model config survives | YES (incl. per-turn effort override) | YES | YES | YES |
+| waiting_input survives restart | NO (transport-bound; tool env-gated) | **NO — proven** (pending `que_` lost; tool part stranded `running`) | NO (in-flight req dies) | NO (same) |
+| verdict | COLD_RESUME_SUPPORTED | COLD_RESUME_SUPPORTED | COLD_RESUME_SUPPORTED | COLD_RESUME_SUPPORTED |
 
-Measurement prompt: `hey` — a fresh native session per row, one turn.
+Note on OpenCode ACP: `~356 MB` was measured on a process that already
+held one session — it is reported under "1 idle session", not as a true
+zero-session STARTED value. Zero-session STARTED was not separately
+measured → UNKNOWN.
+
+**Latency terminology** — three distinct metrics, never conflated:
+
+- **A: spawn → protocol ready** (process up, initialize/health answered)
+- **B: ready → exact session resumed** (`thread/resume`/`session/load`/`GET /session/{id}`)
+- **C: prompt dispatch → first agent event** (first delta/chunk/part)
+
+Full cold-prompt latency (COLD → first agent event) was **not** measured
+as one timer; A+B+C above are per-phase measurements — composing them is
+inference, not a benchmark. The fresh-session C values (4.15 / 3.57 /
+2.22 / 1.37s) supersede earlier mixed fresh/resumed numbers.
+
 Real-quota turns consumed: Codex ×4, OpenCode serve ×4, OpenCode ACP ×2,
-Devin ACP ×3 — all minimal single-turn prompts, no coding work.
-(OpenCode turns used the free `muse-spark-1.3-contributor-free` model;
-earlier probe prompts were `Reply with exactly: PONG`.)
+Devin ACP ×3 — minimal single-turn prompts only.
 
-**Interpretation:** expensive server / cheap sessions — OpenCode ~300 MB
-PSS base, ~0.7 MB per extra idle session; Codex ~95 MB base, ~15 MB per
-thread; Devin lightest (~27–90 MB). All four runtimes sleep to **0
-processes / 0 RAM** trivially — the question is resume fidelity, which
-all four pass for *idle* sessions. `waiting_input` is a sleep blocker
-everywhere (pending ask requests are transport-bound, not durable).
+**Resource interpretation:** OpenCode runtimes are expensive residents
+(post-turn PSS 650.8 / 572.5 MB vs Codex 225.8, Devin 51.2). Sleep/wake
+is therefore a **core resource-management feature**, not cosmetic. Per
+idle session cost is tiny for serve (+0.7 MB) and ACP; Devin is the
+cheapest resident overall. There is **no universal idle timeout** —
+`RuntimePolicy{warmGrace, coldResumeSupported, sleepBlockers}` is
+per-adapter/per-runtime, with defaults later derived from resident PSS,
+spawn latency, resume latency, and cold-prompt latency — not arbitrary
+constants.
 
 ## 5b. Runtime transport security (verified)
 
@@ -235,39 +256,99 @@ a no-auth request returns 401). If the runtime comes up `0.0.0.0` or
 unauthenticated, stop it and fail startup rather than accept the weaker
 configuration.
 
-## 6. Proposed canonical model (minimal)
+## 6. Final canonical model (accepted direction)
 
-- **RelayDaemon** — existing singleton control plane (keep).
+- **RelayDaemon** — one daemon per `${REPOSUITE_HOME}/relay` state root
+  (singleton/lifecycle semantics from ADR-003 retained; transport
+  superseded by ADR-006).
 - **HarnessRuntime** — replaces ActiveGeneration:
   `{runtimeID, harness, transport(stdio|unix|http+sse), processTree,
-  state: COLD|STARTING|WARM|ACTIVE|STOPPING, capabilities}`. One runtime
-  hosts N sessions where the protocol allows (all four do).
-- **HarnessAdapter** — per-harness protocol codec (codex JSON-RPC,
-  ACP for devin+opencode-acp, opencode HTTP+SSE).
-- **RelaySession** — `{key, sessionId, nativeSessionId, runtimeID|-,
-  state, config{model,mode}, transcriptCursor, createdAt}` — persistent
-  logical identity; does NOT require a live runtime.
-- **CanonicalEvent** (monotonic `seq` per session, for replay):
+  state: COLD|STARTING|WARM|ACTIVE|STOPPING, capabilities,
+  policy: RuntimePolicy}`. One runtime hosts N sessions (verified on all
+  four paths).
+- **HarnessAdapter** — per-harness protocol codec: Codex NDJSON/JSON-RPC,
+  shared ACP client for Devin + OpenCode acp, OpenCode HTTP+SSE.
+- **RelaySession** — durable logical identity:
+  `{key, sessionId, nativeSessionId, runtimeID|-, state,
+  config{model,mode}, transcriptCursor, createdAt}`. Survives TUI/Web
+  disconnect, runtime sleep/death, and relayd restart (where the native
+  store supports exact resume). Never resolved by last/newest/timestamp.
+- **RuntimePolicy** — per-adapter/per-runtime:
+  `{warmGrace, coldResumeSupported, sleepBlockers[]}`; defaults derived
+  from measured PSS + latencies, not constants.
+- **CanonicalEvent** — monotonic `seq` per session:
   `session.state`, `message.user`, `message.agent.delta`,
   `message.agent.completed`, `input.requested`, `input.resolved`,
-  `session.metrics`, `session.error`. Tool events kept native-internal.
+  `session.metrics`, `session.error`.
 - **RequestedInput** — `{requestId, questions[{id,header,question,
   options[]|null(free-text),multiple,custom,secret}], blocking}` —
-  responder-agnostic (human/planner/agent).
+  responder-agnostic (TUI/Web/Planner/lead agent/automation).
 - **SessionMetrics** — all optional: `{model, mode, contextUsed,
   contextLimit, tokens{in,out,reasoning,cache}, quota{used,limit,
-  resetAt}}`; footer degrades to whatever exists.
+  resetAt}}`; UI omits absent fields.
 
 ## 7. RuntimeSupervisor (design only)
 
 `internal/runtime` later: `EnsureAwake(runtimeID)` → spawn + ready-poll;
-`ResumeExact(nativeSessionId)`; `Dispatch(prompt)`; tracks
-`sessionsPerRuntime`; `SafeToSleep` = all bound sessions idle AND no
-pending input request AND no in-flight turn; `Stop` graceful; tree
-measurement via `/proc`. Sleep policy = per-runtime (never per-session);
-two-tier WARM-grace→COLD to be tuned from measured latency — no values
-hard-coded yet. UI attach must not wake; only native ops (prompt,
-model change, cancel) wake.
+`ResumeExact(nativeSessionId)`; `Dispatch(prompt)`; session↔runtime
+ownership tracking; `SafeToSleep`; graceful `Stop`; tree measurement via
+`/proc`. **Sleep authority is per-runtime** — one shared runtime stays
+awake while ANY bound session is unsafe (active turn, in-flight prompt
+or cancel, unresolved requested input). Two-tier WARM-grace→COLD
+evaluated later from measured data. UI attach must not wake; only
+native ops (prompt, model/mode change, cancel, resume) wake.
+
+## 7b. Relay-owned durable state (resolves the earlier contradiction)
+
+UI attach must not wake a COLD runtime → Relay needs its own store.
+
+- **Native harness store** — authoritative for: model context,
+  native session, native resume state. Relay never duplicates model
+  context.
+- **Relay store** — authoritative for: Relay session key/identity,
+  harness, exact `nativeSessionId` mapping, runtime reconstruction
+  metadata, last-known model/mode, Relay state, compact transcript,
+  event/reconnect cursor, relayd restart recovery.
+
+**Filesystem-first layout** (stdlib only; no SQLite/Bolt/event-store):
+
+```
+${REPOSUITE_HOME}/relay/sessions/<id>/
+    session.json       # identity, nativeSessionId, config, state
+    transcript.jsonl   # durable records
+    transcript.idx     # offset index -> bounded tail reads
+```
+
+Transcript tail access must be bounded — index/offset reads, never a
+full-file scan. Schema details intentionally unfrozen.
+
+## 7c. Live vs durable events
+
+- **Transient (never persisted as deltas):** `message.agent.delta`,
+  rapidly-changing metrics, streaming scratch state.
+- **Durable (transcript records):** `message.user`,
+  `message.agent.completed`, `input.requested`, `input.resolved`,
+  important `session.state` transitions, last-known config/metrics.
+- Goal: responsive streaming + compact durable transcript.
+
+## 7d. Event cutover (exact reconnect)
+
+Per-session monotonic `seq`. Attach = fetch transcript tail + current
+state → `throughSeq=N` → subscribe `after=N` → receive `N+1…` — no gap
+between hydration and live stream. Lost transient deltas converge via
+the durable completed message.
+
+## 7e. OpenCode adapter preference
+
+**OpenCode ACP is the preferred Relay integration path** — verified:
+stdio transport (no listener), exact `session/load` resume, multi-session
+process, mid-session model mutation (`session/set_config_option`),
+structured `session/update` streaming, lower spawn latency (1.73s) and
+post-turn PSS (572.5 vs 650.8) than serve. `opencode serve` remains a
+researched alternative — richer HTTP/OpenAPI/SSE surface, server-side
+question records, multi-client attach — justified later if product needs
+exceed ACP (e.g. multi-head attach, browser-direct access). Not claimed
+permanently superior.
 
 ## 8. xterm-go / creack/pty disposition
 
@@ -276,42 +357,96 @@ model change, cancel) wake.
   transport is structured protocol. (The fork stays published and
   history remains for reference.)
 - **`internal/pty` + `github.com/creack/pty` → REMOVE FROM RELAY CORE.**
-  No managed child needs a PTY — all three harnesses have structured
+  No managed child needs a PTY — all researched harnesses have structured
   transports (stdio JSON-RPC or HTTP).
-- Removal is a follow-up task (do not strip in this research commit);
-  docs label both "legacy spike, superseded by ADR-005".
+- Removal lands in Task A of the implementation train (§11); docs label
+  both "legacy spike, superseded by ADR-005".
 
 ## 9. Dependency policy
 
-stdlib-first: NDJSON/JSON-RPC over stdio+unix, HTTP+SSE via `net/http` —
-all hand-rollable small. **No new third-party deps are justified** for
-the adapter core. `golang.org/x/term` is the only plausible add — and
-only for the TUI task (raw mode), deferred until then. No Bubble Tea /
-Cobra / gRPC / vendor SDKs.
+stdlib-first: NDJSON/JSON-RPC over stdio+unix, HTTP+SSE via `net/http`,
+`encoding/json` — all hand-rollable small. **No new third-party deps are
+justified** for the adapter core or the local control plane. TUI:
+stdlib first; `golang.org/x/term` may be considered later for raw-mode
+handling only if justified. No Bubble Tea / Cobra / Viper / gRPC /
+generic event-bus / vendor SDKs.
 
-## 10. Human UI MVP (proposal)
+## 10. TUI — structured agent console (not a terminal emulator)
 
-Transcript viewport (user + agent text), prompt line, requested-input
-selector (choice list or free text), footer `{model | mode | ctx
-used/limit | quota%}` with graceful field omission, states
-starting/running/idle/waiting_input/error/stopped. Keys: Enter send,
-Ctrl+C cancel turn, Ctrl+M model, Ctrl+F mode, Ctrl+Q detach,
-PgUp/PgDn scroll. stdlib + `x/term` only.
+MVP: transcript viewport (prompts + agent output), prompt editor,
+requested-input choice/free-text, model selector, mode selector where
+supported, state indicator, footer `{harness | model | mode | context
+used/limit | quota/plan}`. Keys (proposed): Enter send, Ctrl+C cancel
+turn, Ctrl+M model, Ctrl+F mode, Ctrl+Q detach, PgUp/PgDn scroll.
+No PTY/xterm UI.
 
-## 11. Proposed next train
+**Bounded history policy (accepted):**
 
-A. **Core-model correction** — evolve daemon/session foundation:
-   `HarnessRuntime` + `RelaySession{nativeSessionId}` replace
-   ActiveGeneration; protocol keeps v1 shape, adds runtime ops.
-B. **Codex app-server adapter** — first vertical slice:
-   serve/status/stream/interrupt/resume via stdio JSON-RPC.
-C. **Canonical event stream** — seq-numbered events + transcript
-   cursor on the existing socket protocol.
-D. **Minimal TUI.**
-E. **Devin ACP adapter** (shares the ACP client), then OpenCode ACP.
-F. **OpenCode-serve adapter** + WSS/Gateway boundary.
+- Initial attach renders **~200 rows**; max retained scrollback
+  **~1000 rendered rows** (rows, not messages — width-dependent).
+- Attach fetches small recent record batches until ~200 rendered rows
+  are satisfied; never loads the full transcript.
+- Beyond 1000 rows: drop oldest presentation content (durable records
+  are never deleted).
+- Scrolling to top does NOT auto-fetch older history; widening does NOT
+  auto-backfill; narrowing re-renders retained content and re-trims.
+- Huge single messages get a bounded TUI representation.
+- Full history lives behind a separate API/path (Web Admin, history
+  command, search, export, audit) — not the interactive hot path.
 
-One vertical slice (Codex) before generalizing adapters.
+**Performance invariant:** TUI attach latency + working set are bounded
+by the presentation window, not transcript lifetime. A months-old 1M-
+record session attaches like a 100-record one — verified later via
+synthetic data (no model quota).
+
+## 10b. Local control plane & remote boundary (ADR-006)
+
+Local transport: loopback TCP `127.0.0.1:0` (ephemeral port), HTTP/JSON
+commands + streaming NDJSON events, stdlib `net/http`. Discovery via
+`${REPOSUITE_HOME}/relay/run/daemon.json` (protocol version, endpoint,
+PID). One protocol shared by CLI/TUI/Gateway; no WebSocket in relayd.
+Remote (Web Admin) is a separate layer: `relayd → Gateway → WSS` —
+Gateway owns TLS/auth/routing; harness runtimes stay private.
+Cross-platform target: Linux + macOS + Windows. See ADR-006.
+
+## 11. Implementation train (updated)
+
+A. **Core domain + persistence cleanup** — drop terminal-first
+   assumptions; remove xterm-go/creack/pty from core; `RelaySession` +
+   `HarnessRuntime` + `RuntimeSupervisor` boundaries; deterministic
+   fake harness; filesystem SessionStore/TranscriptStore with indexed
+   bounded tail; durable key→nativeSessionId map.
+B. **Cross-platform local control plane** — loopback HTTP/JSON, NDJSON
+   events, ephemeral port, `daemon.json`, client package; preserve
+   singleton/quiescence.
+C. **Codex app-server vertical slice** — stdio JSON-RPC; shared runtime;
+   start/resume exact thread; prompt; streaming; interrupt;
+   model/effort/tier; metrics/rate-limits; `approvalPolicy=never`;
+   sleep/wake/resume.
+D. **Canonical event cutover** — transient deltas vs durable records,
+   seq, bounded subscribers, `throughSeq→after`.
+E. **Minimal TUI** — ~200/~1000-row bounds, prompt, requested input,
+   model/mode, footer.
+F. **Devin ACP** adapter (shared ACP client).
+G. **OpenCode ACP** adapter (preferred OpenCode path).
+H. **OpenCode serve** — only if product requirements justify.
+I. **Gateway/WSS/Web Admin.**
+J. **Load/memory/long-lived-session hardening.**
+
+No adapter-bundling: one vertical slice (Codex) first.
+
+## 11b. Future load-test plan (synthetic, no quota)
+
+- **relayd:** idle RSS/PSS; 1/10/100/1000 sessions; very large
+  transcripts; restart with many sessions.
+- **TUI:** attach vs 100/10k/100k/1M-record histories; attach latency +
+  RSS; ≤~1000 rendered rows; hours of synthetic streaming without
+  unbounded growth.
+- **Event stream:** 1/10/100 subscribers; slow-subscriber handling;
+  bounded per-client queues; reconnect-by-seq.
+- **Persistence:** bounded tail latency independent of transcript size;
+  index rebuild/recovery; partial-tail/crash handling.
+- No brittle RSS thresholds before baselines exist.
 
 ## 12. Open questions / risks
 

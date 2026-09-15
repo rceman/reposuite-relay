@@ -1,6 +1,14 @@
 # ADR-001: Go runtime and terminal engine
 
-Status: Accepted (2026-09-14)
+Status: Accepted (2026-09-14) — partially superseded (2026-09-15)
+
+> **Supersession note.** The **Go runtime/toolchain decision stands**.
+> The following portions are superseded by ADR-005/ADR-006: the
+> Linux-only product target (cross-platform target is now Linux + macOS +
+> Windows), PTY as canonical runtime transport, and `xterm-go` as the
+> canonical terminal engine (no terminal emulation in Relay core; both
+> dependencies are scheduled for removal). The spike evidence below is
+> preserved as research history.
 
 ## Decision
 

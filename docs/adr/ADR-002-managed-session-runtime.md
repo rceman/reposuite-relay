@@ -1,7 +1,15 @@
 # ADR-002: Managed session runtime
 
-Status: Accepted (2026-09-14) — target architecture; implementation deferred
-to later tasks. See `docs/DOMAIN.md` for the shared vocabulary.
+Status: Superseded in part (2026-09-15) — see ADR-005.
+
+> **Supersession note.** The terminal-first mechanics of this record —
+> `ActiveGeneration` holding a PTY + harness process + `VirtualTerminal`,
+> terminal snapshot/attachment architecture — are superseded by ADR-005's
+> `HarnessRuntime`/`RelaySession` model over native structured protocols.
+> Still valid and carried forward: one daemon per state root, durable
+> logical session identity, zero-runtime-resources-when-hibernated,
+> exact native resume identity (never newest/`--last`), and the
+> observer-never-wakes rule.
 
 ## Decision
 
