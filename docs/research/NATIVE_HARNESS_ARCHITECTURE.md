@@ -182,17 +182,17 @@ for all — every runtime is just a child process we spawn).
 | fds | 56–73 | 24–34 | 36–41 | 28–29 |
 | spawn→ready | 0.25s | 2.06s | 1.73s | 0.19s |
 | exact cold resume | YES (`thread/resume`, ~0.3s; needs ≥1 turn materialized; ephemeral=opt-out) | YES (`GET /session/{ses_id}`, immediate) | YES (`session/load`, 0.55s) | YES (`session/load`, 0.13s) |
-| prompt→first event | 5.98s @ medium effort (2.59s/5.39s were xhigh) | ~3.7s (free model) | 2.07s (free model) | 2.88s fresh / 35.6s on resumed session (one sample, high variance) |
+| prompt→first event (fresh session, prompt `hey`) | 4.15s | 3.57s | 2.22s | 1.37s |
 | transcript survives | YES (items/turns on resumed thread) | YES (`/session/{id}/message`) | YES (same ses store) | YES (load replays) |
 | model cfg survives | YES (`gpt-5.6-luna`, effort incl. per-turn override — verified persists) | YES (session record) | YES | YES |
 | waiting_input survives restart | NO (server→client req bound to live transport; tool env-gated) | **NO — proven** (pending `que_` lost across restart; tool part stranded `running` forever) | NO (in-flight req dies with process) | NO (same) |
 | verdict | **COLD_RESUME_SUPPORTED** (idle sessions) | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** | **COLD_RESUME_SUPPORTED** |
 
-Real-quota turns consumed: Codex ×3 (xhigh PONG, post-resume xhigh, medium-effort PONG)
-+ one failed request_user_input probe; OpenCode serve ×2 (PONG +
-question-triggering turn, free `muse-spark-1.3-contributor-free`);
-OpenCode ACP ×1 (free model); Devin ACP ×2. All minimal single-turn
-prompts, no coding work.
+Measurement prompt: `hey` — a fresh native session per row, one turn.
+Real-quota turns consumed: Codex ×4, OpenCode serve ×4, OpenCode ACP ×2,
+Devin ACP ×3 — all minimal single-turn prompts, no coding work.
+(OpenCode turns used the free `muse-spark-1.3-contributor-free` model;
+earlier probe prompts were `Reply with exactly: PONG`.)
 
 **Interpretation:** expensive server / cheap sessions — OpenCode ~300 MB
 PSS base, ~0.7 MB per extra idle session; Codex ~95 MB base, ~15 MB per
