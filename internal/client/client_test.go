@@ -170,13 +170,11 @@ func TestInstanceMismatchFailsClosed(t *testing.T) {
 // replace the descriptor).
 func TestDeadEndpointSpawnsContender(t *testing.T) {
 	p := testPaths(t)
-	// Reserve a port then close it: guaranteed-dead loopback endpoint.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint := "http://" + ln.Addr().String()
-	ln.Close()
+	// Port 1 on loopback is never handed out by the kernel to another
+	// listener, so the connection stays refused for the life of the test.
+	// (A reserved-then-closed ephemeral port is not deterministic: a
+	// parallel test or daemon can claim it and answer instead.)
+	endpoint := "http://127.0.0.1:1"
 	writeDesc(t, p, validDescriptor(endpoint))
 
 	var spawned int32

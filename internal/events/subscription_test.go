@@ -19,17 +19,17 @@ func TestSlowSubscriberEvicted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Drain `fast` concurrently; never drain `slow`.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range fast.Events() {
-		}
-	}()
-	// More events than the slow queue can hold.
+	// Drain `fast` in lockstep so its queue never fills; never drain
+	// `slow`. Draining concurrently is not enough: under load the fast
+	// subscriber can fall behind and be evicted like the slow one.
 	for i := 0; i < SubscriberQueueSize+50; i++ {
 		if _, err := s.PublishTransient("t", payload(t, "x")); err != nil {
 			t.Fatal(err)
+		}
+		select {
+		case <-fast.Events():
+		case <-time.After(2 * time.Second):
+			t.Fatal("fast subscriber received no event")
 		}
 	}
 	// Slow was evicted with a deterministic reason.
@@ -48,7 +48,6 @@ func TestSlowSubscriberEvicted(t *testing.T) {
 		t.Fatalf("subscriber count = %d, want 1", s.SubscriberCount())
 	}
 	s.Unsubscribe(fast)
-	<-done
 }
 
 // TestRemoveClosesSubscribers: session teardown ends subscribers with
