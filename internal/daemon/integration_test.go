@@ -92,11 +92,13 @@ func serveKey(t *testing.T, home, root, key string) (daemonPID int, fields map[s
 	out := mustCLI(t, home, root, "serve", "fixture", "--key", key)
 	dp, _ := strconv.Atoi(field(t, out, "daemon_pid"))
 	return dp, map[string]string{
-		"pid":        field(t, out, "pid"),
-		"runtimeId":  field(t, out, "runtimeId"),
-		"generation": field(t, out, "generation"),
-		"state":      field(t, out, "state"),
-		"harness":    field(t, out, "harness"),
+		"pid":          field(t, out, "pid"),
+		"runtimeId":    field(t, out, "runtimeId"),
+		"sessionId":    field(t, out, "sessionId"),
+		"runtimeState": field(t, out, "runtimeState"),
+		"generation":   field(t, out, "generation"),
+		"state":        field(t, out, "state"),
+		"harness":      field(t, out, "harness"),
 	}
 }
 
@@ -421,8 +423,9 @@ func TestMalformedClient(t *testing.T) {
 	stopDaemon(t, home, root)
 }
 
-// TestDaemonShutdown: graceful stop kills all fixture children, removes
-// socket, and a later `list` autostarts a fresh empty daemon.
+// TestDaemonShutdown: graceful stop kills all fixture children and
+// removes the socket. Durable RelaySessions survive: a later `list`
+// autostarts a fresh daemon that restores them COLD (no runtime, no PID).
 func TestDaemonShutdown(t *testing.T) {
 	home, root := testRoot(t)
 	pids := []int{}
@@ -446,13 +449,19 @@ func TestDaemonShutdown(t *testing.T) {
 		t.Fatalf("daemon status after stop must fail: %s", out)
 	}
 
-	// Fresh daemon: empty registry (no persistence).
+	// Fresh daemon restores the durable sessions as COLD: all three keys
+	// present, no runtime/PID, count=3.
 	out := mustCLI(t, home, root, "list")
-	if strings.Contains(out, "key=") {
-		t.Fatalf("fresh daemon must be empty: %s", out)
+	for _, k := range []string{"s1", "s2", "s3"} {
+		if !strings.Contains(out, "key="+k+" ") {
+			t.Fatalf("restored session %s missing: %s", k, out)
+		}
+	}
+	if strings.Count(out, "runtimeState=cold") != 3 || strings.Count(out, " pid=0 ") != 3 {
+		t.Fatalf("restored sessions must be COLD: %s", out)
 	}
 	dp2, count := daemonStatus(t, home, root)
-	if dp2 == dp || count != 0 {
+	if dp2 == dp || count != 3 {
 		t.Fatalf("fresh daemon pid=%d count=%d (old %d)", dp2, count, dp)
 	}
 	stopDaemon(t, home, root)
@@ -565,7 +574,8 @@ func TestSmokeSequence(t *testing.T) {
 		t.Fatalf("list order/content: %s", out)
 	}
 	sa := mustCLI(t, home, root, "status", "alpha")
-	if field(t, sa, "state") != "running" || field(t, sa, "generation") != "1" {
+	if field(t, sa, "state") != "idle" || field(t, sa, "generation") != "1" ||
+		field(t, sa, "runtimeState") != "warm" {
 		t.Fatalf("status alpha: %s", sa)
 	}
 	mustCLI(t, home, root, "stop", "alpha")

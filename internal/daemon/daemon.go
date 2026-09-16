@@ -25,6 +25,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/protocol"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/store"
 )
 
 // LockName is the daemon singleton lock file inside the run directory.
@@ -50,8 +51,12 @@ type Options struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	SpawnFixture func(selfExe, cwd string) (*fixture.Child, error)
-	RandID       func() (string, error)
-	// WrapStop decorates each session's generation-stop function — the seam
+	// Separate identity seams: the durable RelaySession ID and the
+	// ephemeral HarnessRuntime ID are different semantics and never share
+	// one value.
+	RandSessionID func() (string, error)
+	RandRuntimeID func() (string, error)
+	// WrapStop decorates each session's runtime-stop function — the seam
 	// tests use to pause an in-flight stop under shutdown.
 	WrapStop func(stop func() error) func() error
 }
@@ -66,8 +71,11 @@ func (o Options) withDefaults() Options {
 	if o.SpawnFixture == nil {
 		o.SpawnFixture = fixture.Spawn
 	}
-	if o.RandID == nil {
-		o.RandID = session.NewRuntimeID
+	if o.RandSessionID == nil {
+		o.RandSessionID = session.NewSessionID
+	}
+	if o.RandRuntimeID == nil {
+		o.RandRuntimeID = session.NewRuntimeID
 	}
 	return o
 }
@@ -79,6 +87,7 @@ type Daemon struct {
 
 	started  time.Time
 	registry *session.Registry
+	store    *store.Sessions
 
 	lockFile *os.File
 	ln       net.Listener
@@ -104,9 +113,13 @@ func Run(p paths.Paths, selfExe string) error {
 	return d.Serve()
 }
 
-// Start performs singleton lock acquisition, stale-socket recovery, and the
-// socket bind, then returns a Daemon ready to Serve. Splitting Start/Serve
-// lets tests inject seams via Options before the accept loop begins.
+// Start performs singleton lock acquisition, durable-store load/recovery,
+// registry restore, stale-socket recovery, and the socket bind, then
+// returns a Daemon ready to Serve. Order preserves ownership safety: only
+// the singleton owner mutates or recovers the store, and any failure
+// releases the lock without leaving a listener behind. Splitting
+// Start/Serve lets tests inject seams via Options before the accept loop
+// begins.
 func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	if err := p.Ensure(); err != nil {
 		return nil, err
@@ -115,13 +128,29 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 		paths:    p,
 		opts:     opts.withDefaults(),
 		started:  time.Now(),
-		registry: session.NewRegistry(),
 		conns:    map[net.Conn]struct{}{},
 		shutdown: make(chan struct{}),
 	}
 	if err := d.acquireLock(); err != nil {
 		return nil, err
 	}
+	ss, err := store.OpenSessions(p.SessionsDir(), d.opts.RandSessionID)
+	if err != nil {
+		d.releaseLock()
+		return nil, err
+	}
+	loaded, err := ss.LoadAll()
+	if err != nil {
+		d.releaseLock()
+		return nil, fmt.Errorf("session store: %w", err)
+	}
+	reg, err := session.NewRestored(loaded)
+	if err != nil {
+		d.releaseLock()
+		return nil, fmt.Errorf("session store: %w", err)
+	}
+	d.store = ss
+	d.registry = reg
 	if err := d.bindSocket(); err != nil {
 		d.releaseLock()
 		return nil, err
@@ -130,7 +159,10 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 }
 
 // Serve runs the accept loop until shutdown or SIGTERM/SIGINT, then stops
-// every fixture generation, closes the listener, and removes the socket.
+// every live runtime, closes the listener, and removes the socket.
+// Shutdown stops runtimes only — durable RelaySessions are retained and
+// reload as COLD on the next start. A session belongs to Relay until
+// explicit deletion.
 //
 // Shutdown is a quiescence barrier, in order:
 //  1. mark shutting down (no new dispatch work)
@@ -182,8 +214,10 @@ func (d *Daemon) Serve() error {
 	}
 
 	for _, m := range d.registry.Drain() {
-		if err := m.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "relayd: stop %s: %v\n", m.Session.Key, err)
+		if m.Stop != nil {
+			if err := m.Stop(); err != nil {
+				fmt.Fprintf(os.Stderr, "relayd: stop %s: %v\n", m.Session.Key, err)
+			}
 		}
 	}
 	return nil
@@ -341,7 +375,7 @@ func (d *Daemon) dispatch(raw []byte) protocol.Response {
 	case protocol.OpListSessions:
 		r := protocol.Ok(d.info())
 		for _, m := range d.registry.List() {
-			r.Sessions = append(r.Sessions, m.Info())
+			r.Sessions = append(r.Sessions, sessionInfo(m))
 		}
 		return r
 	case protocol.OpSessionStatus:
@@ -370,9 +404,37 @@ func (d *Daemon) info() *protocol.DaemonInfo {
 	}
 }
 
+// sessionInfo projects a managed session into the wire DTO. The domain
+// package knows nothing about the protocol — projection lives here in the
+// control layer. A session with no runtime projects as COLD: runtimeId
+// "", pid 0, no generation start time.
+func sessionInfo(m *session.Managed) protocol.SessionInfo {
+	s := m.Session
+	info := protocol.SessionInfo{
+		Key:             s.Key,
+		SessionID:       s.ID,
+		NativeSessionID: s.NativeSessionID,
+		Harness:         s.Harness,
+		Cwd:             s.Cwd,
+		State:           s.State,
+		Generation:      s.Generation,
+		CreatedAt:       s.CreatedAt.UTC().Format(time.RFC3339),
+		RuntimeState:    session.RuntimeCold,
+	}
+	if rt := m.Runtime; rt != nil {
+		info.RuntimeID = rt.ID
+		info.RuntimeState = rt.State
+		info.PID = rt.PID
+		info.GenerationStartedAt = rt.StartedAt.UTC().Format(time.RFC3339)
+	}
+	return info
+}
+
 // serveFixture atomically reserves the key BEFORE spawning, so a duplicate
-// or racing request can never create a transient extra process. On any
-// failure the reservation is cancelled and nothing remains.
+// or racing request can never create a transient extra process. Order:
+// reserve → session ID → runtime ID → spawn → durable create → commit.
+// On any failure the reservation is cancelled, the child is reaped, and
+// nothing durable remains.
 func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if !session.ValidKey(req.Key) {
 		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
@@ -388,7 +450,11 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 		d.registry.Cancel(req.Key)
 		return r
 	}
-	runtimeID, err := d.opts.RandID()
+	sessionID, err := d.opts.RandSessionID()
+	if err != nil {
+		return fail(protocol.Fail(protocol.ErrInternal, "session id: "+err.Error()))
+	}
+	runtimeID, err := d.opts.RandRuntimeID()
 	if err != nil {
 		return fail(protocol.Fail(protocol.ErrInternal, "runtime id: "+err.Error()))
 	}
@@ -396,32 +462,47 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if err != nil {
 		return fail(protocol.Fail(protocol.ErrFixtureStart, err.Error()))
 	}
+	now := time.Now()
+	rs := &session.RelaySession{
+		ID:         sessionID,
+		Key:        req.Key,
+		Harness:    session.HarnessFixture,
+		Cwd:        cwd,
+		State:      session.StateIdle,
+		Generation: 1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := d.store.Create(rs); err != nil {
+		// Persistence failed: no durable session — reap the runtime too.
+		_ = child.Stop()
+		return fail(protocol.Fail(protocol.ErrInternal, "persist session: "+err.Error()))
+	}
 	stop := child.Stop
 	if d.opts.WrapStop != nil {
 		stop = d.opts.WrapStop(stop)
 	}
-	now := time.Now()
 	m := &session.Managed{
-		Session: &session.Session{
-			Key:        req.Key,
-			RuntimeID:  runtimeID,
-			Harness:    session.HarnessFixture,
-			Cwd:        cwd,
-			State:      session.StateRunning,
-			CreatedAt:  now,
+		Session: rs,
+		Runtime: &session.HarnessRuntime{
+			ID:         runtimeID,
 			Generation: 1,
+			State:      session.RuntimeWarm,
+			PID:        child.PID(),
+			StartedAt:  now,
 		},
-		Generation: &session.ActiveGeneration{PID: child.PID(), StartedAt: now},
-		Stop:       stop,
+		Stop: stop,
 	}
 	if !d.registry.Commit(req.Key, m) {
-		// Reservation lost — should be unreachable; never leak the child.
+		// Reservation lost — should be unreachable; never leak the child
+		// or a dangling durable session.
 		_ = child.Stop()
+		_ = d.store.Delete(rs.ID)
 		d.registry.Cancel(req.Key)
 		return protocol.Fail(protocol.ErrInternal, "lost key reservation")
 	}
 	r := protocol.Ok(d.info())
-	r.Session = ptr(m.Info())
+	r.Session = ptr(sessionInfo(m))
 	return r
 }
 
@@ -434,14 +515,16 @@ func (d *Daemon) sessionStatus(req protocol.Request) protocol.Response {
 		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
 	}
 	r := protocol.Ok(d.info())
-	r.Session = ptr(m.Info())
+	r.Session = ptr(sessionInfo(m))
 	return r
 }
 
-// stopSession takes exclusive stop ownership (BeginStop), stops the
-// generation, and only then removes the session (CommitStop). A failed Stop
-// keeps the session in the registry (AbortStop) — the daemon never loses
-// authority over a still-running generation.
+// stopSession takes exclusive stop ownership (BeginStop), stops and
+// detaches the runtime if one exists (ClearRuntime → COLD), durably
+// deletes the session, then removes it (CommitStop). A failed runtime
+// stop keeps the session as-is (AbortStop); a failed durable delete after
+// a confirmed runtime stop keeps the session managed but COLD — the
+// daemon never loses authority and never retains a dead PID.
 func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
 	if !session.ValidKey(req.Key) {
 		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
@@ -450,9 +533,16 @@ func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
 	if !ok {
 		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
 	}
-	if err := m.Stop(); err != nil {
+	if m.Runtime != nil {
+		if err := m.Stop(); err != nil {
+			d.registry.AbortStop(req.Key)
+			return protocol.Fail(protocol.ErrInternal, "stop runtime: "+err.Error())
+		}
+		d.registry.ClearRuntime(req.Key)
+	}
+	if err := d.store.Delete(m.Session.ID); err != nil {
 		d.registry.AbortStop(req.Key)
-		return protocol.Fail(protocol.ErrInternal, "stop fixture: "+err.Error())
+		return protocol.Fail(protocol.ErrInternal, "delete session: "+err.Error())
 	}
 	d.registry.CommitStop(req.Key)
 	return protocol.Ok(d.info())

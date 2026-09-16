@@ -26,22 +26,17 @@ core.
 
 ## Sessions
 
-**RelaySession** *(target)* — the durable logical Relay session identity:
-key, harness, `NativeSessionID`, runtime binding or none, state,
-model/mode config, transcript cursor, timestamps. It survives TUI/web
-disconnect, harness runtime sleep/death, and relayd restart where the
-native harness supports exact resume.
+**RelaySession** *(current)* — the durable logical Relay session
+identity: ID, key, harness, `NativeSessionID`, state, model/mode,
+generation, timestamps. It survives TUI/web disconnect, harness runtime
+sleep/death, and relayd restart — persisted under
+`sessions/<id>/session.json` by `internal/store`.
 
-**Logical session** *(current)* — the in-memory registry entry today's
-daemon owns; durable `RelaySession` persistence is the next core step
-(Task A2).
-
-**HarnessRuntime** *(target)* — the ephemeral owned runtime for one
-harness: a process tree, transport, state
-(`COLD|STARTING|WARM|ACTIVE|STOPPING`), capabilities, and
-`RuntimePolicy`. One runtime may host multiple sessions; sleep authority
-is per-runtime. A runtime may be completely absent while its
-`RelaySession`s remain managed.
+**HarnessRuntime** *(current)* — the ephemeral owned runtime for one
+harness generation: ID, generation, state
+(`STARTING|WARM|ACTIVE|STOPPING`), PID, start time. Daemon-memory only —
+never persisted; its absence IS `COLD`. One runtime may host multiple
+sessions (target); sleep authority is per-runtime (target).
 
 **HarnessAdapter** *(target)* — the protocol-specific bridge between a
 native harness protocol (Codex app-server, OpenCode ACP/serve, Devin
@@ -52,10 +47,10 @@ implemented yet.
 ensure-awake, protocol init, exact native resume, prompt dispatch,
 per-runtime `SafeToSleep`, stop, and process-tree accounting.
 
-**NativeSessionID** *(target)* — the exact harness-native resume
-identity (e.g., a Codex thread UUID, an OpenCode ACP session ID). Resume
-always uses the exact identity — never "newest", `--last`, timestamps,
-or implicit current session.
+**NativeSessionID** *(current)* — the exact harness-native resume
+identity stored on `RelaySession` (empty for fixture, which has no
+native durable identity). Resume always uses the exact identity — never
+"newest", `--last`, timestamps, or implicit current session.
 
 **RuntimePolicy** *(target)* — per-adapter/runtime sleep policy:
 conceptually `warmGrace`, `coldResumeSupported`, `sleepBlockers`. No
@@ -85,11 +80,12 @@ session transcript; transient deltas (streaming, fast-changing metrics)
 are live-only. Reconnect cutover is `throughSeq` (hydration) →
 `afterSeq` (live subscription).
 
-**Transcript** *(target)* — Relay-owned compact durable event history
+**Transcript** *(current)* — Relay-owned compact durable event history
 per session, filesystem-first
 (`sessions/<id>/{session.json,transcript.jsonl,transcript.idx}`) with
-indexed bounded-tail reads. Relay never duplicates model context; the
-native store stays authoritative for that.
+indexed bounded-tail reads — implemented by `internal/store`. Relay
+never duplicates model context; the native store stays authoritative
+for that.
 
 ## Attachments
 

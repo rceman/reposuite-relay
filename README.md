@@ -35,20 +35,23 @@ $ reposuite-relay daemon stop                # graceful shutdown
 ```
 
 A single persistent daemon (Linux: Unix socket
-`~/.reposuite/relay/run/relayd.sock`, singleton-locked) owns in-memory
-logical sessions. The `fixture` harness is a deterministic
-development/test child — **not** a real agent harness.
+`~/.reposuite/relay/run/relayd.sock`, singleton-locked) owns durable
+`RelaySession`s under `~/.reposuite/relay/sessions/<id>/` — sessions
+survive daemon restarts and reload COLD (no process, no runtime). The
+`fixture` harness is a deterministic development/test child — **not** a
+real agent harness.
 
-**Not yet implemented:** native harness adapters (Codex/OpenCode/Devin),
-durable session persistence (`RelaySession`), the ADR-006 loopback
+**Not yet implemented:** native harness adapters (Codex/OpenCode/Devin)
+with exact native resume, runtime wake from COLD, the ADR-006 loopback
 HTTP/JSON + NDJSON control plane (the current Linux Unix socket remains
-until that migration), hibernation/sleep-wake, attach, TUI.
+until that migration), attach, TUI.
 
 ## Layout
 
 - `cmd/reposuite-relay` — CLI
 - `internal/daemon` — daemon lifecycle, socket server, control dispatch
-- `internal/session` — logical session registry
+- `internal/session` — `RelaySession`/`HarnessRuntime` domain + registry
+- `internal/store` — durable session/transcript filesystem store
 - `internal/fixture` — deterministic fixture harness child
 - `internal/protocol` — bounded JSON control protocol
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract

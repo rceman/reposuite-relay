@@ -56,11 +56,16 @@ type DaemonInfo struct {
 	SessionCount    int     `json:"sessionCount"`
 }
 
-// SessionInfo is the wire view of a logical session plus its active
-// generation metadata. Process handles are never exposed.
+// SessionInfo is the wire view of a durable RelaySession plus its
+// optional live HarnessRuntime. Process handles are never exposed. For a
+// COLD restored session runtimeId is "", pid 0, generationStartedAt "",
+// and runtimeState "cold".
 type SessionInfo struct {
 	Key                 string `json:"key"`
+	SessionID           string `json:"sessionId"`
 	RuntimeID           string `json:"runtimeId"`
+	RuntimeState        string `json:"runtimeState"`
+	NativeSessionID     string `json:"nativeSessionId,omitempty"`
 	Harness             string `json:"harness"`
 	Cwd                 string `json:"cwd"`
 	State               string `json:"state"`

@@ -7,6 +7,7 @@
 //	Run directory    = <Relay root>/run
 //	Daemon socket    = <Run dir>/relayd.sock   (future; not created here)
 //	Log directory    = <Relay root>/logs
+//	Sessions store   = <Relay root>/sessions/<session-id>/
 //
 // Safety invariant: Relay state never lives under ~/.airelay and never
 // reads AIRELAY_*. A configured RepoSuite root equal to, or contained in,
@@ -90,6 +91,10 @@ func (p Paths) DaemonSocket() string { return filepath.Join(p.RunDir(), "relayd.
 
 // LogDir holds Relay logs.
 func (p Paths) LogDir() string { return filepath.Join(p.RelayRoot(), "logs") }
+
+// SessionsDir is the durable session store root: one canonical directory
+// per RelaySession ID. Per-session file layout is owned by internal/store.
+func (p Paths) SessionsDir() string { return filepath.Join(p.RelayRoot(), "sessions") }
 
 // Ensure creates the Relay state directories (relay, run, logs) with
 // user-private permissions. It never modifies pre-existing entries' modes

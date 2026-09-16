@@ -17,6 +17,7 @@ toolchain: exactly **go1.27.1**.
 | 8 | Dependency shape | go.mod has **no third-party `require`**; no `replace`; no `github.com/creack/pty`, `github.com/rceman/xterm-go`, or `github.com/gitpod-io/xterm-go` anywhere in Go code or the module; no `AIRELAY_`/`~/.airelay` usage |
 | 9 | CLI | `reposuite-relay version` and `reposuite-relay help` succeed; unknown command fails non-zero |
 | 10 | Daemon regression | covered by gate 5 — singleton race, two-session isolation, duplicate key, stale socket, malformed client, shutdown quiescence, create/stop-vs-shutdown, forced-kill stop, orphan cleanup, permissions, churn |
+| 11 | Persistence regression | covered by gate 5 — durable session reload across daemon restart (COLD, same RelaySession ID), atomic store create/delete + temp/tombstone recovery, transcript index/rebuild/tail, explicit stop deletion, corrupt-store startup refusal, persisted-session count |
 
 ## Notes
 

@@ -1,9 +1,14 @@
-// Package session holds the logical session model and the daemon's
-// in-memory registry.
+// Package session holds the canonical session domain model and the
+// daemon's in-memory registry.
 //
-// Authority: the registry is daemon-memory only. A daemon restart loses all
-// sessions — durable metadata and crash recovery are deliberately deferred
-// to a later milestone (see docs/adr/ADR-002).
+// RelaySession is the durable logical identity (persisted by
+// internal/store); HarnessRuntime is the ephemeral harness process/
+// generation owned by the daemon. They are distinct (ADR-005): a session
+// restored after a daemon restart has a RelaySession and NO runtime — the
+// absent runtime IS the COLD state, not a fake process object.
+//
+// The domain knows nothing about the wire protocol: projection to
+// protocol DTOs lives in internal/daemon.
 package session
 
 import (
@@ -14,30 +19,47 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/rceman/reposuite-relay/internal/protocol"
 )
 
-// HarnessFixture is the only built-in harness profile in this milestone: a
-// deterministic same-binary child used to prove daemon/session ownership.
-// It executes no client-supplied command.
+// HarnessFixture is the only built-in harness today: a deterministic
+// same-binary child used to prove daemon/session ownership. It executes
+// no client-supplied command and has no native durable identity.
 const HarnessFixture = "fixture"
 
-// StateRunning is the only state a session can be in until hibernation and
-// resume are implemented in a later milestone.
-const StateRunning = "running"
+// StateIdle is the logical session state for a session with no in-flight
+// work. Logical state is NOT process state: a session stays "idle"
+// whether its runtime is warm or entirely absent.
+const StateIdle = "idle"
 
-var keyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+// HarnessRuntime states (ephemeral, never persisted).
+const (
+	RuntimeStarting = "starting"
+	RuntimeWarm     = "warm"
+	RuntimeActive   = "active"
+	RuntimeStopping = "stopping"
+	// RuntimeCold is the projected runtime state when a session has no
+	// runtime at all — zero harness resources.
+	RuntimeCold = "cold"
+)
+
+var (
+	keyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	idRe  = regexp.MustCompile(`^[0-9a-f]{32}$`)
+)
 
 // ValidKey reports whether k is a safe session key: 1-64 chars of
 // [A-Za-z0-9._-], first char alphanumeric.
 func ValidKey(k string) bool { return keyRe.MatchString(k) }
 
-// NewRuntimeID returns a collision-safe session runtime identity
-// (128 bits of crypto/rand, hex-encoded). Not derived from PID or time.
+// ValidID reports whether id is a well-formed Relay session or runtime
+// ID: 32 lowercase hex chars (128 bits).
+func ValidID(id string) bool { return idRe.MatchString(id) }
+
+// newID returns a collision-safe identity: 128 bits of crypto/rand,
+// hex-encoded. Not derived from PID, clock, key, cwd, or native identity.
 // Errors are returned, never panicked — a caller must be able to abort
 // session creation cleanly when secure randomness is unavailable.
-func NewRuntimeID() (string, error) {
+func newID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("crypto/rand: %w", err)
@@ -45,62 +67,65 @@ func NewRuntimeID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Session is one lightweight logical record per managed session. It is
-// created once when `serve` accepts a new key and is stable for the life of
-// the logical session.
-type Session struct {
-	Key        string
-	RuntimeID  string
-	Harness    string
-	Cwd        string
-	State      string
-	CreatedAt  time.Time
-	Generation int
+// NewSessionID returns a fresh durable RelaySession identity. Stable for
+// the lifetime of the session and safe as a directory name.
+func NewSessionID() (string, error) { return newID() }
+
+// NewRuntimeID returns a fresh ephemeral HarnessRuntime identity. It is a
+// separate semantic from the session ID — a runtime dies with its daemon
+// and is never persisted.
+func NewRuntimeID() (string, error) { return newID() }
+
+// RelaySession is the canonical durable logical session. It survives TUI
+// disconnects, runtime sleep/death, and relayd restart. Generation counts
+// how many runtimes have ever been established for it (restart alone does
+// not increment it).
+type RelaySession struct {
+	ID              string    // stable Relay-owned session ID (crypto/rand)
+	Key             string    // human/client session key
+	Harness         string    // fixture today; codex/devin/opencode later
+	Cwd             string    // absolute client working directory
+	NativeSessionID string    // exact native resume identity; "" for fixture
+	State           string    // durable logical state (e.g. StateIdle)
+	Model           string    // optional last-known model; "" = unset
+	Mode            string    // optional last-known mode; "" = unset
+	Generation      int       // runtimes ever established (0 = never awake)
+	CreatedAt       time.Time // session creation
+	UpdatedAt       time.Time // last durable metadata change
 }
 
-// ActiveGeneration is the ephemeral owned runtime for one awake generation.
-// In this milestone a generation owns exactly one fixture child process.
-// ADR-005 supersedes this concept: HarnessRuntime/RelaySession arrive in A2.
-type ActiveGeneration struct {
-	PID       int
-	StartedAt time.Time
+// HarnessRuntime is the ephemeral owned runtime for one awake harness
+// generation. It is daemon-memory only and never persisted: after a
+// daemon restart every session's runtime is simply absent.
+type HarnessRuntime struct {
+	ID         string    // ephemeral runtime identity
+	Generation int       // which session generation this runtime is
+	State      string    // Runtime* constant; fixture spawns as RuntimeWarm
+	PID        int       // OS process id of the harness child
+	StartedAt  time.Time // when this runtime generation started
 }
 
-// Managed pairs a logical session with its active generation and the
-// daemon-owned stop hook. Stop is set by the daemon and is never marshalled.
+// Managed pairs a durable RelaySession with its optional HarnessRuntime
+// and the daemon-owned stop hook. Stop is set by the daemon only while a
+// runtime exists; it is never marshalled or persisted.
 type Managed struct {
-	Session    *Session
-	Generation *ActiveGeneration
-	Stop       func() error
+	Session *RelaySession
+	Runtime *HarnessRuntime // nil = COLD: no harness resources
+	Stop    func() error    // nil when Runtime is nil
 }
 
-// Info projects a Managed into the wire DTO.
-func (m *Managed) Info() protocol.SessionInfo {
-	s, g := m.Session, m.Generation
-	return protocol.SessionInfo{
-		Key:                 s.Key,
-		RuntimeID:           s.RuntimeID,
-		Harness:             s.Harness,
-		Cwd:                 s.Cwd,
-		State:               s.State,
-		Generation:          s.Generation,
-		PID:                 g.PID,
-		CreatedAt:           s.CreatedAt.UTC().Format(time.RFC3339),
-		GenerationStartedAt: g.StartedAt.UTC().Format(time.RFC3339),
-	}
-}
-
-// Registry is the daemon-memory session authority: a mutex-guarded map.
-// Deliberately not durable (no SQLite/JSON store/event log).
+// Registry is the daemon-memory session authority: a mutex-guarded map
+// keyed by session Key. Durable identity lives in the store; the registry
+// holds the live view (sessions + optional runtimes).
 //
-// Besides the committed sessions it tracks two internal key holds that keep
-// the public state model (running/absent) intact:
+// Besides the committed sessions it tracks two internal key holds that
+// keep the public state model intact:
 //
 //	reserved — a creator holds the key between conflict check and spawn
-//	stopping — a stop owner holds the key until the child is reaped
+//	stopping — a stop owner holds the key until deletion completes
 //
-// Both are invisible to clients: a reserved key is not yet a session and a
-// stopping key still is one.
+// Both are invisible to clients: a reserved key is not yet a session and
+// a stopping key still is one.
 type Registry struct {
 	mu       sync.Mutex
 	byKey    map[string]*Managed
@@ -116,6 +141,36 @@ func NewRegistry() *Registry {
 		reserved: map[string]struct{}{},
 		stopping: map[string]struct{}{},
 	}
+}
+
+// NewRestored builds a registry from persisted RelaySessions loaded at
+// daemon startup. Every restored session is valid and queryable with
+// runtime=nil (COLD) — daemon restart never fabricates a runtime or a
+// native identity. Duplicate keys or IDs, or malformed records, are a
+// startup error: canonical durable sessions are never silently dropped.
+func NewRestored(sessions []*RelaySession) (*Registry, error) {
+	r := NewRegistry()
+	ids := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		if s == nil {
+			return nil, fmt.Errorf("restored session is nil")
+		}
+		if !ValidID(s.ID) {
+			return nil, fmt.Errorf("restored session %q: invalid session id", s.Key)
+		}
+		if !ValidKey(s.Key) {
+			return nil, fmt.Errorf("restored session %s: invalid key %q", s.ID, s.Key)
+		}
+		if prev, ok := ids[s.ID]; ok {
+			return nil, fmt.Errorf("duplicate session id %s (keys %q and %q)", s.ID, prev, s.Key)
+		}
+		if _, ok := r.byKey[s.Key]; ok {
+			return nil, fmt.Errorf("duplicate session key %q", s.Key)
+		}
+		ids[s.ID] = s.Key
+		r.byKey[s.Key] = &Managed{Session: s}
+	}
+	return r, nil
 }
 
 // Reserve atomically claims key for creation BEFORE any process spawn.
@@ -147,7 +202,7 @@ func (r *Registry) Cancel(key string) {
 	delete(r.reserved, key)
 }
 
-// Commit atomically turns the caller's reservation into the running managed
+// Commit atomically turns the caller's reservation into the managed
 // session. False if the caller does not hold the reservation.
 func (r *Registry) Commit(key string, m *Managed) bool {
 	r.mu.Lock()
@@ -162,8 +217,8 @@ func (r *Registry) Commit(key string, m *Managed) bool {
 
 // BeginStop returns the managed session plus exclusive stop ownership, or
 // false when the key is absent, reserved, or already being stopped (losers
-// must not call Stop on the same generation). The session remains queryable
-// until CommitStop — it is still running until confirmed stopped.
+// must not call Stop on the same runtime). The session remains queryable
+// until CommitStop — it still exists until confirmed deleted.
 func (r *Registry) BeginStop(key string) (*Managed, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -184,7 +239,25 @@ func (r *Registry) BeginStop(key string) (*Managed, bool) {
 	return m, true
 }
 
-// CommitStop removes the session after its generation is confirmed stopped.
+// ClearRuntime detaches a confirmed-stopped runtime from the managed
+// session under the caller's exclusive stop ownership: the session stays
+// managed and becomes COLD (runtime nil, stop hook nil). Call between
+// confirmed runtime termination and durable deletion so a failed delete
+// never leaves a dead HarnessRuntime/PID attached.
+func (r *Registry) ClearRuntime(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, owned := r.stopping[key]; !owned {
+		return // only the stop owner may transition runtime -> COLD
+	}
+	if m, ok := r.byKey[key]; ok {
+		m.Runtime = nil
+		m.Stop = nil
+	}
+}
+
+// CommitStop removes the session after its runtime is confirmed stopped
+// and its durable record is deleted.
 func (r *Registry) CommitStop(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -192,17 +265,17 @@ func (r *Registry) CommitStop(key string) {
 	delete(r.byKey, key)
 }
 
-// AbortStop releases stop ownership after a failed Stop: the session stays
-// in the registry — the daemon retains authority over the still-running
-// generation instead of losing it.
+// AbortStop releases stop ownership after a failed stop/delete: the
+// session stays in the registry (possibly COLD after ClearRuntime) — the
+// daemon retains authority instead of losing the managed entry.
 func (r *Registry) AbortStop(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.stopping, key)
 }
 
-// Get returns the managed session for key — including one mid-stop (it is
-// still running until CommitStop confirms).
+// Get returns the managed session for key — including one mid-stop (it
+// still exists until CommitStop confirms).
 func (r *Registry) Get(key string) (*Managed, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -222,7 +295,8 @@ func (r *Registry) List() []*Managed {
 	return out
 }
 
-// Len returns the number of managed sessions.
+// Len returns the number of managed sessions — durable COLD sessions
+// count exactly like sessions with a live runtime.
 func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -234,7 +308,8 @@ func (r *Registry) Len() int {
 // daemon only calls it once all lifecycle handlers are quiescent, so no
 // Commit can create a session and no other goroutine holds stop ownership
 // while it runs. In-flight reservations/stop-holds are discarded: their
-// owners have already exited or will find the key gone.
+// owners have already exited or will find the key gone. Drained sessions
+// keep their durable records — shutdown stops runtimes only.
 func (r *Registry) Drain() []*Managed {
 	r.mu.Lock()
 	defer r.mu.Unlock()

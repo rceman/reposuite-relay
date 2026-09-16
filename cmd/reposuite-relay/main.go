@@ -198,9 +198,9 @@ func cmdManaged(selfExe, op, key string) int {
 }
 
 func printSession(s *protocol.SessionInfo) {
-	fmt.Printf("key=%s runtimeId=%s harness=%s state=%s generation=%d pid=%d cwd=%s createdAt=%s generationStartedAt=%s\n",
-		s.Key, s.RuntimeID, s.Harness, s.State, s.Generation, s.PID,
-		s.Cwd, s.CreatedAt, s.GenerationStartedAt)
+	fmt.Printf("key=%s sessionId=%s runtimeId=%s runtimeState=%s harness=%s state=%s generation=%d pid=%d cwd=%s createdAt=%s generationStartedAt=%s\n",
+		s.Key, s.SessionID, s.RuntimeID, s.RuntimeState, s.Harness, s.State,
+		s.Generation, s.PID, s.Cwd, s.CreatedAt, s.GenerationStartedAt)
 }
 
 // cmdDaemon implements `daemon status|stop` — neither auto-starts a daemon.

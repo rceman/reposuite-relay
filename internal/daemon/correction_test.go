@@ -215,9 +215,9 @@ func TestStopOwnershipSingleInvocation(t *testing.T) {
 	var stopCalls int32
 	now := time.Now()
 	m := &session.Managed{
-		Session:    &session.Session{Key: "k", RuntimeID: "x", Harness: session.HarnessFixture, State: session.StateRunning, CreatedAt: now, Generation: 1},
-		Generation: &session.ActiveGeneration{PID: 1, StartedAt: now},
-		Stop:       func() error { atomic.AddInt32(&stopCalls, 1); return nil },
+		Session: &session.RelaySession{ID: "abc", Key: "k", Harness: session.HarnessFixture, State: session.StateIdle, CreatedAt: now, Generation: 1},
+		Runtime: &session.HarnessRuntime{ID: "x", Generation: 1, State: session.RuntimeWarm, PID: 1, StartedAt: now},
+		Stop:    func() error { atomic.AddInt32(&stopCalls, 1); return nil },
 	}
 	if !r.Reserve("k") || !r.Commit("k", m) {
 		t.Fatal("setup")
@@ -254,11 +254,11 @@ func TestRuntimeIDFailure(t *testing.T) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
 		}
-		o.RandID = func() (string, error) {
+		o.RandSessionID = func() (string, error) {
 			if atomic.LoadInt32(&randFails) == 1 {
 				return "", failRand
 			}
-			return session.NewRuntimeID()
+			return session.NewSessionID()
 		}
 	})
 

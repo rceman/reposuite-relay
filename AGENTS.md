@@ -28,11 +28,17 @@ no terminal emulator, no xterm dependency in the production core.
 
 - The daemon/session lifecycle foundation (ADR-003) and the fixture
   harness exist and pass gates.
+- **Durable RelaySession persistence is implemented** (Task A2):
+  `internal/store` — `sessions/<id>/{session.json,transcript.jsonl,
+  transcript.idx}`, atomic create/delete, indexed bounded tail reads,
+  daemon-restart COLD recovery. The registry's `RelaySession` /
+  `HarnessRuntime` split is live; fixture sessions persist and restore.
 - The current control plane is still the **existing Linux Unix-socket**
   implementation pending the ADR-006 migration; platform-specific
   locking (`flock`) is an implementation detail, not an invariant —
   the invariant is exactly one relayd per state root, fail-closed.
-- Native harness adapters, durable persistence, TUI: **not implemented**.
+- Native harness adapters, runtime wake from COLD, TUI: **not
+  implemented**.
 
 ## Scope
 
@@ -77,8 +83,9 @@ report each as PASS/FAIL/N/A with evidence.
 - The control protocol is versioned bounded JSON; it never carries
   client-supplied commands. The daemon only runs the built-in `fixture`
   harness today.
-- Relay-owned durable session metadata is the canonical direction (A2);
-  the in-memory registry is current implementation, not the target.
+- Relay-owned durable session metadata is canonical: `internal/store`
+  persists `RelaySession`; `HarnessRuntime` is daemon-memory only and
+  must never be persisted (no PID/RuntimeID/credentials on disk).
 - "Cold" session means **zero** harness runtime resources.
 - Do not casually modify immutable spike branches (`spike/*` are
   immutable research references).
