@@ -18,11 +18,12 @@ core.
 - Daemon: one `relayd` per RepoSuite state root — currently realized as
   the hidden `reposuite-relay __daemon` mode of the same binary (the
   `reposuite-relayd` name remains the future packaged form).
-  - *Current:* Unix socket `${REPOSUITE_HOME}/relay/run/relayd.sock`,
-    singleton via `flock` on `run/relayd.lock` (Linux).
-  - *Target (ADR-006):* loopback TCP `127.0.0.1:0`, HTTP/JSON commands,
-    streaming NDJSON events, `run/daemon.json` descriptor; singleton via
-    platform-appropriate exclusive lock on Linux/macOS/Windows.
+  - *Current:* loopback TCP `127.0.0.1:0` with HTTP/JSON commands,
+    streaming NDJSON events, and a `0600`
+    `${REPOSUITE_HOME}/relay/run/daemon.json` descriptor carrying
+    endpoint + instance ID + per-generation bearer token. Singleton via
+    `flock` on `run/relayd.lock` (Linux; platform-appropriate locking on
+    macOS/Windows is *target*).
 
 ## Sessions
 
@@ -72,13 +73,28 @@ resumable).
 
 ## Events
 
-**Canonical events** *(target)* — sequence-numbered per session:
-`session.state`, `message.user`, `message.agent.delta`,
+**Canonical events** *(current foundation)* — sequence-numbered per
+session: `session.state`, `message.user`, `message.agent.delta`,
 `message.agent.completed`, `input.requested`, `input.resolved`,
 `session.metrics`, `session.error`. Durable records persist to the
 session transcript; transient deltas (streaming, fast-changing metrics)
-are live-only. Reconnect cutover is `throughSeq` (hydration) →
-`afterSeq` (live subscription).
+are live-only. The sequence allocator, replay ring, subscriptions, and
+NDJSON streaming are implemented by `internal/events`; no harness
+adapter publishes real events yet.
+
+**Event sequence (`seq`)** *(current)* — a per-session strictly
+monotonic uint64 assigned under the session lock. Durable events are
+appended to the transcript **before** the seq is observable to any
+subscriber. Transient events consume seq without being persisted, so a
+restarted daemon cannot recompute the next seq from the transcript.
+
+**SeqHighWatermark** *(current)* — durable reservation of sequence
+space on `RelaySession` (persisted in `session.json`). A daemon reserves
+a block of sequence numbers (watermark update is committed **before**
+any seq in the block is exposed); every seq ≤ the watermark is
+permanently consumed — allocated, transient, or never used. Restart
+resumes strictly above the watermark. A transcript record above the
+watermark is canonical corruption and fails session startup.
 
 **Transcript** *(current)* — Relay-owned compact durable event history
 per session, filesystem-first
@@ -86,6 +102,13 @@ per session, filesystem-first
 indexed bounded-tail reads — implemented by `internal/store`. Relay
 never duplicates model context; the native store stays authoritative
 for that.
+
+**Reconnect cutover** *(current)* — hydrate from the transcript
+(`throughSeq`), then subscribe with `after=<throughSeq>`: the stream
+replays everything after that seq from the bounded ring, then continues
+live, so no event is lost or duplicated across the cutover. A cursor
+older than the ring is refused with `CURSOR_TOO_OLD` rather than
+silently returning an incomplete stream.
 
 ## Attachments
 

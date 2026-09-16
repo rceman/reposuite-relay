@@ -3,8 +3,9 @@
 A persistent structured agent-session daemon with native harness
 adapters, implemented in Go.
 
-**Status: early development** — architecture transition to ADR-005/006
-(native harness-first) is in progress.
+**Status: early development** — the ADR-006 local control plane and the
+canonical event-stream foundation are implemented; native harness
+adapters are next.
 
 RepoSuite Relay keeps agent sessions alive independently of any viewer:
 a persistent per-user daemon owns durable session identities
@@ -34,26 +35,39 @@ $ reposuite-relay daemon status              # daemon liveness (no autostart)
 $ reposuite-relay daemon stop                # graceful shutdown
 ```
 
-A single persistent daemon (Linux: Unix socket
-`~/.reposuite/relay/run/relayd.sock`, singleton-locked) owns durable
-`RelaySession`s under `~/.reposuite/relay/sessions/<id>/` — sessions
-survive daemon restarts and reload COLD (no process, no runtime). The
-`fixture` harness is a deterministic development/test child — **not** a
-real agent harness.
+A single persistent daemon owns durable `RelaySession`s under
+`~/.reposuite/relay/sessions/<id>/` — sessions survive daemon restarts
+and reload COLD (no process, no runtime). Clients talk to it over the
+ADR-006 **local HTTP control plane**: the daemon binds an ephemeral
+loopback port (`127.0.0.1:0`), publishes a user-private `0600`
+`~/.reposuite/relay/run/daemon.json` descriptor (endpoint, instance ID,
+rotating 256-bit bearer token), and authenticates every endpoint. The
+CLI auto-starts the daemon when genuinely absent; `daemon status` and
+`daemon stop` never do. The `fixture` harness is a deterministic
+development/test child — **not** a real agent harness.
+
+The canonical event-stream foundation is in place: per-session monotonic
+sequence numbers with durable block reservation (`SeqHighWatermark`),
+a bounded replay ring, bounded subscribers with deterministic eviction,
+`GET /v1/sessions/{key}/events?after=N` NDJSON streaming, and
+`GET /v1/sessions/{key}/transcript?limit=N` durable history. No harness
+adapter publishes real events yet — the broker is exercised synthetically
+in tests.
 
 **Not yet implemented:** native harness adapters (Codex/OpenCode/Devin)
-with exact native resume, runtime wake from COLD, the ADR-006 loopback
-HTTP/JSON + NDJSON control plane (the current Linux Unix socket remains
-until that migration), attach, TUI.
+with exact native resume, real agent-message publication, runtime wake
+from COLD, TUI, Gateway/WSS, cross-platform singleton locking.
 
 ## Layout
 
-- `cmd/reposuite-relay` — CLI
-- `internal/daemon` — daemon lifecycle, socket server, control dispatch
+- `cmd/reposuite-relay` — CLI (a local HTTP client of relayd)
+- `internal/daemon` — daemon lifecycle, HTTP control plane, descriptor
+- `internal/client` — the single local client (descriptor + auth + API)
+- `internal/api` — local API v1 wire contract (DTOs, error codes)
+- `internal/events` — canonical event broker (seq reservation, ring, subs)
 - `internal/session` — `RelaySession`/`HarnessRuntime` domain + registry
 - `internal/store` — durable session/transcript filesystem store
 - `internal/fixture` — deterministic fixture harness child
-- `internal/protocol` — bounded JSON control protocol
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
 - `docs/` — domain vocabulary, ADRs, feasibility research
 - `testdata/` — historical captured research data (terminal spike)

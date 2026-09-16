@@ -15,30 +15,50 @@ no terminal emulator, no xterm dependency in the production core.
   "newest"/`--last`/implicit.
 - An idle `HarnessRuntime` may be fully stopped; `waiting_input`
   (unresolved native input request) blocks runtime sleep.
-- Relay owns durable metadata + compact transcript (next core step, A2);
-  native stores remain authoritative for model context.
+- Relay owns durable metadata + compact transcript; native stores remain
+  authoritative for model context.
 - Native harness servers are **private to relayd** — never exposed to
   clients.
 - Canonical local protocol (ADR-006): loopback TCP `127.0.0.1:0`,
   HTTP/JSON commands, streaming NDJSON events, `run/daemon.json`
-  descriptor.
+  descriptor, per-daemon bearer token.
+- Canonical session events carry a per-session monotonic uint64 seq;
+  transient events consume seq without being persisted, so sequence
+  space is durably reserved in blocks (`SeqHighWatermark`).
 - Product target: **Linux, macOS, Windows**.
 
-## Current implementation status (transition)
+## Current implementation status
 
-- The daemon/session lifecycle foundation (ADR-003) and the fixture
-  harness exist and pass gates.
-- **Durable RelaySession persistence is implemented** (Task A2):
-  `internal/store` — `sessions/<id>/{session.json,transcript.jsonl,
-  transcript.idx}`, atomic create/delete, indexed bounded tail reads,
-  daemon-restart COLD recovery. The registry's `RelaySession` /
-  `HarnessRuntime` split is live; fixture sessions persist and restore.
-- The current control plane is still the **existing Linux Unix-socket**
-  implementation pending the ADR-006 migration; platform-specific
-  locking (`flock`) is an implementation detail, not an invariant —
-  the invariant is exactly one relayd per state root, fail-closed.
-- Native harness adapters, runtime wake from COLD, TUI: **not
-  implemented**.
+IMPLEMENTED:
+
+- Durable `RelaySession` persistence: `internal/store` —
+  `sessions/<id>/{session.json,transcript.jsonl,transcript.idx}`, atomic
+  create/save/delete with explicit commit points, indexed bounded tail
+  reads, daemon-restart COLD recovery.
+- `RelaySession` ≠ `HarnessRuntime`: runtime is daemon-memory only and
+  never persisted; restart reloads sessions COLD.
+- Loopback HTTP/JSON control plane (ADR-006): `internal/client` +
+  `internal/daemon` — `/v1/daemon`, `/v1/sessions[...]`, transcript, and
+  NDJSON event endpoints on `127.0.0.1:0`.
+- `run/daemon.json` descriptor discovery: atomic 0600 publication,
+  instance ID + 256-bit bearer token rotated per daemon generation,
+  fail-closed client validation, owner-only removal.
+- Per-daemon Bearer auth on every endpoint (constant-time compare).
+- NDJSON canonical event-stream foundation (`internal/events`):
+  per-session seq allocator with durable block reservation, bounded
+  replay ring, bounded subscribers with deterministic eviction,
+  `after=N` replay, explicit `CURSOR_TOO_OLD`.
+- Transcript history endpoint with server-side limit bounds.
+
+NOT YET IMPLEMENTED:
+
+- Codex adapter (app-server), Devin/OpenCode adapters.
+- Real agent-message publication (no harness produces canonical events
+  yet; the broker is exercised synthetically in tests).
+- TUI, Gateway/WSS bridge.
+- Runtime wake from COLD, RuntimeSupervisor policy.
+- Cross-platform singleton locking (currently Linux `flock`; the
+  invariant is one relayd per state root, fail-closed).
 
 ## Scope
 
@@ -80,9 +100,17 @@ report each as PASS/FAIL/N/A with evidence.
 - One daemon per RepoSuite state root; exclusive singleton ownership with
   fail-closed competing startup (flock on Linux; platform-equivalent
   elsewhere per ADR-006).
-- The control protocol is versioned bounded JSON; it never carries
+- The control plane is the versioned local HTTP API (`/v1`, API version
+  in the descriptor) with bounded JSON bodies; it never carries
   client-supplied commands. The daemon only runs the built-in `fixture`
   harness today.
+- The descriptor is local authority: clients validate it strictly
+  (loopback 127.0.0.1, http, supported version, well-formed token) and
+  fail closed on any incompatible peer — they never auto-start against
+  one and never delete stale descriptors (the lock owner replaces them).
+- Store operations have explicit commit points; a post-commit failure is
+  never reported as a clean rollback (`UncertainError` fails the daemon
+  closed, `CleanupError` applies the committed outcome).
 - Relay-owned durable session metadata is canonical: `internal/store`
   persists `RelaySession`; `HarnessRuntime` is daemon-memory only and
   must never be persisted (no PID/RuntimeID/credentials on disk).

@@ -1,8 +1,18 @@
 # ADR-006: Cross-platform local control plane
 
-Status: **Accepted** (2026-09-15) — supersedes only ADR-003's
-Unix-socket transport decision; ADR-003's singleton, lifecycle,
-quiescence, and bounded-protocol semantics remain in force.
+Status: **Accepted and implemented** (2026-09-16) — supersedes only
+ADR-003's Unix-socket transport decision; ADR-003's singleton,
+lifecycle, quiescence, and bounded-protocol semantics remain in force.
+
+> **Implementation note (2026-09-16).** The cutover is complete:
+> `internal/protocol` and the socket client are deleted; `relayd` serves
+> HTTP/JSON + NDJSON on `127.0.0.1:0`; the `0600` descriptor carries
+> protocol version, endpoint, instance ID, PID, and a per-daemon 256-bit
+> bearer token (constant-time comparison on every endpoint); clients
+> fail closed on malformed, foreign, or non-loopback descriptors. The
+> singleton lock is still Linux `flock` — platform-equivalent locking
+> for macOS/Windows remains future work, as does the Gateway/WSS
+> boundary.
 
 ## Context
 
