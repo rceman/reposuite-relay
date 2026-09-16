@@ -33,6 +33,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
+	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
 )
@@ -59,7 +60,7 @@ type Options struct {
 	SelfExe      string // path used to spawn __fixture children
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
-	SpawnFixture func(selfExe, cwd string) (*fixture.Child, error)
+	SpawnFixture func(selfExe, cwd string) (runtime.Harness, error)
 	// Separate identity seams: the durable RelaySession ID and the
 	// ephemeral HarnessRuntime ID are different semantics and never share
 	// one value.
@@ -81,7 +82,9 @@ func (o Options) withDefaults() Options {
 		o.WriteTimeout = WriteTimeout
 	}
 	if o.SpawnFixture == nil {
-		o.SpawnFixture = fixture.Spawn
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
+			return fixture.Spawn(selfExe, cwd)
+		}
 	}
 	if o.RandSessionID == nil {
 		o.RandSessionID = session.NewSessionID
@@ -102,6 +105,7 @@ type Daemon struct {
 	registry   *session.Registry
 	store      *store.Sessions
 	broker     *events.Broker
+	supervisor *runtime.Supervisor
 	instanceID string
 	token      string
 
@@ -173,6 +177,7 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	d.store = ss
 	d.registry = reg
 	d.broker = events.NewBroker(ss)
+	d.supervisor = runtime.New()
 	// Event state for every restored session: open transcripts via the
 	// healthy O(1) path and validate the durable seq watermark.
 	for _, m := range reg.List() {
@@ -290,12 +295,11 @@ func (d *Daemon) Serve() error {
 		return qerr
 	}
 
-	for _, m := range d.registry.Drain() {
-		if m.Stop != nil {
-			if err := m.Stop(); err != nil {
-				fmt.Fprintf(os.Stderr, "relayd: stop %s: %v\n", m.Session.Key, err)
-			}
-		}
+	d.registry.Drain()
+	// Runtime authority: stop every harness process tree (dedicated and
+	// shared) with bounded, confirmed reaping. Durable RelaySessions stay.
+	if err := d.supervisor.StopAll(); err != nil {
+		fmt.Fprintf(os.Stderr, "relayd: stop runtimes: %v\n", err)
 	}
 	return nil
 }
@@ -546,16 +550,18 @@ func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleList(w http.ResponseWriter, r *http.Request) {
 	resp := api.SessionList{Daemon: d.info()}
 	for _, m := range d.registry.List() {
-		resp.Sessions = append(resp.Sessions, sessionInfo(m))
+		resp.Sessions = append(resp.Sessions, d.sessionInfo(m))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // sessionInfo projects a managed session into the wire DTO. The domain
 // package knows nothing about the API — projection lives here in the
-// control layer. A session with no runtime projects as COLD: runtimeId
-// "", pid 0, no generation start time.
-func sessionInfo(m *session.Managed) api.SessionInfo {
+// control layer. Runtime state comes from the RuntimeSupervisor; a
+// session with no binding projects as COLD: runtimeId "", pid 0, no
+// generation start time. Several sessions may legitimately share one
+// runtime ID/PID/start time (a shared Codex app-server).
+func (d *Daemon) sessionInfo(m *session.Managed) api.SessionInfo {
 	s := m.Session
 	info := api.SessionInfo{
 		Key:             s.Key,
@@ -565,14 +571,18 @@ func sessionInfo(m *session.Managed) api.SessionInfo {
 		Cwd:             s.Cwd,
 		State:           s.State,
 		Generation:      s.Generation,
+		Model:           s.Model,
+		Mode:            s.Mode,
 		CreatedAt:       s.CreatedAt.UTC().Format(time.RFC3339),
 		RuntimeState:    session.RuntimeCold,
+		Activity:        runtime.ActivityIdle,
 	}
-	if rt := m.Runtime; rt != nil {
-		info.RuntimeID = rt.ID
-		info.RuntimeState = rt.State
-		info.PID = rt.PID
-		info.GenerationStartedAt = rt.StartedAt.UTC().Format(time.RFC3339)
+	if v, ok := d.supervisor.View(s.ID); ok {
+		info.RuntimeID = v.RuntimeID
+		info.RuntimeState = v.State
+		info.PID = v.PID
+		info.GenerationStartedAt = v.StartedAt.UTC().Format(time.RFC3339)
+		info.Activity = v.Activity
 	}
 	return info
 }
@@ -614,8 +624,31 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 		fail(http.StatusInternalServerError, api.ErrInternal, "runtime id: "+err.Error())
 		return
 	}
-	child, err := d.opts.SpawnFixture(d.opts.SelfExe, req.Cwd)
+	rtKey := fixtureRuntimeKey(sessionID)
+	rt, err := d.supervisor.Ensure(rtKey, session.HarnessFixture, runtimeID, false,
+		func() (runtime.Harness, error) {
+			h, err := d.opts.SpawnFixture(d.opts.SelfExe, req.Cwd)
+			if err != nil {
+				return nil, err
+			}
+			if d.opts.WrapStop != nil {
+				return &wrappedHarness{Harness: h, stop: d.opts.WrapStop(h.Stop)}, nil
+			}
+			return h, nil
+		})
 	if err != nil {
+		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
+	}
+	// A fixture runtime is ready as soon as the process is spawned (no
+	// initialization handshake), and it is dedicated: one per session.
+	if err := d.supervisor.MarkReady(rt.Key); err != nil {
+		_ = d.supervisor.Stop(rt.Key)
+		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
+	}
+	if err := d.supervisor.Bind(rt.Key, sessionID); err != nil {
+		_ = d.supervisor.Stop(rt.Key)
 		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
 		return
 	}
@@ -632,7 +665,7 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 	}
 	if err := d.store.Create(rs); err != nil {
 		// Persistence failed: no durable session — reap the runtime too.
-		_ = child.Stop()
+		_ = d.supervisor.Stop(rt.Key)
 		var ue *store.UncertainError
 		if errors.As(err, &ue) {
 			// The canonical create commit point may have passed — the
@@ -646,25 +679,11 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 		fail(http.StatusInternalServerError, api.ErrInternal, "persist session: "+err.Error())
 		return
 	}
-	stop := child.Stop
-	if d.opts.WrapStop != nil {
-		stop = d.opts.WrapStop(stop)
-	}
-	m := &session.Managed{
-		Session: rs,
-		Runtime: &session.HarnessRuntime{
-			ID:         runtimeID,
-			Generation: 1,
-			State:      session.RuntimeWarm,
-			PID:        child.PID(),
-			StartedAt:  now,
-		},
-		Stop: stop,
-	}
+	m := &session.Managed{Session: rs}
 	if !d.registry.Commit(req.Key, m) {
 		// Reservation lost — should be unreachable; never leak the child
 		// or a dangling durable session.
-		_ = child.Stop()
+		_ = d.supervisor.Stop(rt.Key)
 		_ = d.store.Delete(rs.ID)
 		d.registry.Cancel(req.Key)
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "lost key reservation")
@@ -678,8 +697,21 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "event state: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: sessionInfo(m)})
+	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
+
+// fixtureRuntimeKey is the supervisor key of a fixture session's dedicated
+// runtime: one process per session, never shared.
+func fixtureRuntimeKey(sessionID string) string { return "fixture/" + sessionID }
+
+// wrappedHarness decorates a harness's stop path — the seam tests use to
+// pause an in-flight stop under shutdown.
+type wrappedHarness struct {
+	runtime.Harness
+	stop func() error
+}
+
+func (w *wrappedHarness) Stop() error { return w.stop() }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request, key string) {
 	if !session.ValidKey(key) {
@@ -691,7 +723,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request, key string
 		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
 		return
 	}
-	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: sessionInfo(m)})
+	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
 
 // handleStop takes exclusive stop ownership (BeginStop), stops and
@@ -711,13 +743,13 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
 		return
 	}
-	if m.Runtime != nil {
-		if err := m.Stop(); err != nil {
-			d.registry.AbortStop(key)
-			writeErr(w, http.StatusInternalServerError, api.ErrInternal, "stop runtime: "+err.Error())
-			return
-		}
-		d.registry.ClearRuntime(key)
+	// Runtime ownership: a dedicated runtime (fixture) is stopped and
+	// reaped; a shared runtime (Codex) is only detached — deleting one
+	// session never kills a runtime other sessions still use.
+	if err := d.supervisor.StopSession(m.Session.ID); err != nil {
+		d.registry.AbortStop(key)
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "stop runtime: "+err.Error())
+		return
 	}
 	if err := d.store.Delete(m.Session.ID); err != nil {
 		var ce *store.CleanupError

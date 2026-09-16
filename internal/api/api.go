@@ -93,14 +93,19 @@ type DaemonInfo struct {
 // live HarnessRuntime. For a COLD session runtimeId is "", pid 0,
 // generationStartedAt "", runtimeState "cold". Credentials are never here.
 type SessionInfo struct {
-	Key                 string `json:"key"`
-	SessionID           string `json:"sessionId"`
-	RuntimeID           string `json:"runtimeId"`
-	RuntimeState        string `json:"runtimeState"`
-	NativeSessionID     string `json:"nativeSessionId,omitempty"`
-	Harness             string `json:"harness"`
-	Cwd                 string `json:"cwd"`
-	State               string `json:"state"`
+	Key             string `json:"key"`
+	SessionID       string `json:"sessionId"`
+	RuntimeID       string `json:"runtimeId"`
+	RuntimeState    string `json:"runtimeState"`
+	NativeSessionID string `json:"nativeSessionId,omitempty"`
+	Harness         string `json:"harness"`
+	Cwd             string `json:"cwd"`
+	State           string `json:"state"`
+	// Activity is the per-session turn state (idle/active/waiting_input) —
+	// separate from the possibly shared runtime process state.
+	Activity            string `json:"activity"`
+	Model               string `json:"model,omitempty"`
+	Mode                string `json:"mode,omitempty"`
 	Generation          int    `json:"generation"`
 	PID                 int    `json:"pid"`
 	CreatedAt           string `json:"createdAt"`

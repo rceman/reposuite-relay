@@ -24,8 +24,19 @@ import (
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
+	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
+
+// testBinary returns the production binary built by TestMain (published
+// through REPOSUITE_TEST_BIN), which implements the `__fixture` child mode.
+func testBinary() string {
+	p := os.Getenv("REPOSUITE_TEST_BIN")
+	if p == "" {
+		panic("REPOSUITE_TEST_BIN not set — TestMain must build the production binary first")
+	}
+	return p
+}
 
 // startInProcess brings up a daemon on an isolated root with the given
 // option overrides. It is Serve'd in a goroutine (result on `served`) and
@@ -44,7 +55,11 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := Options{SelfExe: "/bin/true"} // fixture spawn is overridden in tests
+	// The production binary implements `__fixture`, so the default spawn
+	// path is the real one; tests that need controlled/stubborn children
+	// override SpawnFixture. The binary is built once by TestMain in the
+	// external test package.
+	opts := Options{SelfExe: testBinary()}
 	if mutate != nil {
 		mutate(&opts)
 	}
@@ -104,7 +119,7 @@ func wantAPIErr(t *testing.T, err error, code string) {
 func TestDuplicateKeyNoSpawn(t *testing.T) {
 	var spawns int32
 	_, _, c, _ := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
 		}
@@ -125,7 +140,7 @@ func TestDuplicateKeyNoSpawn(t *testing.T) {
 func TestSameKeyCreateRace(t *testing.T) {
 	var spawns int32
 	_, _, c, _ := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
 		}
@@ -235,19 +250,46 @@ func TestSameKeyStopRace(t *testing.T) {
 	}
 }
 
-// TestStopOwnershipSingleInvocation — registry-level proof that only one
-// BeginStop caller can invoke Stop on a generation.
-func TestStopOwnershipSingleInvocation(t *testing.T) {
-	r := session.NewRegistry()
-	var stopCalls int32
-	now := time.Now()
-	m := &session.Managed{
-		Session: &session.RelaySession{ID: "abc", Key: "k", Harness: session.HarnessFixture, State: session.StateIdle, CreatedAt: now, Generation: 1},
-		Runtime: &session.HarnessRuntime{ID: "x", Generation: 1, State: session.RuntimeWarm, PID: 1, StartedAt: now},
-		Stop:    func() error { atomic.AddInt32(&stopCalls, 1); return nil },
+// fakeHarness is a controlled in-memory runtime process for supervisor
+// tests: no OS process, deterministic stop accounting.
+type fakeHarness struct {
+	pid     int
+	stopped int32
+	stopErr error
+	done    chan struct{}
+}
+
+func newFakeHarness(pid int) *fakeHarness {
+	return &fakeHarness{pid: pid, done: make(chan struct{})}
+}
+
+func (f *fakeHarness) PID() int              { return f.pid }
+func (f *fakeHarness) Wait() <-chan struct{} { return f.done }
+func (f *fakeHarness) Stop() error {
+	atomic.AddInt32(&f.stopped, 1)
+	select {
+	case <-f.done:
+	default:
+		close(f.done)
 	}
-	if !r.Reserve("k") || !r.Commit("k", m) {
-		t.Fatal("setup")
+	return f.stopErr
+}
+
+// TestStopOwnershipSingleInvocation — supervisor-level proof that
+// concurrent session deletion stops a dedicated runtime exactly once.
+func TestStopOwnershipSingleInvocation(t *testing.T) {
+	sup := runtime.New()
+	fake := newFakeHarness(4242)
+	rt, err := sup.Ensure("fixture/abc", session.HarnessFixture, "x", false,
+		func() (runtime.Harness, error) { return fake, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.MarkReady(rt.Key); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.Bind(rt.Key, "abc"); err != nil {
+		t.Fatal(err)
 	}
 	const n = 8
 	var wg sync.WaitGroup
@@ -255,18 +297,18 @@ func TestStopOwnershipSingleInvocation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if got, ok := r.BeginStop("k"); ok {
-				_ = got.Stop()
-				r.CommitStop("k")
-			}
+			_ = sup.StopSession("abc")
 		}()
 	}
 	wg.Wait()
-	if n := atomic.LoadInt32(&stopCalls); n != 1 {
-		t.Fatalf("Stop invoked %d times, want 1", n)
+	if got := atomic.LoadInt32(&fake.stopped); got != 1 {
+		t.Fatalf("runtime Stop invoked %d times, want 1", got)
 	}
-	if r.Len() != 0 {
-		t.Fatal("session must be gone")
+	if sup.Len() != 0 {
+		t.Fatal("runtime must be gone")
+	}
+	if _, ok := sup.View("abc"); ok {
+		t.Fatal("session must project COLD after runtime stop")
 	}
 }
 
@@ -277,7 +319,7 @@ func TestRuntimeIDFailure(t *testing.T) {
 	failRand := errors.New("no entropy")
 	var randFails int32 = 1
 	_, _, c, _ := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			atomic.AddInt32(&spawns, 1)
 			return fixture.Spawn(selfExe, cwd)
 		}
@@ -311,7 +353,7 @@ func TestRuntimeIDFailure(t *testing.T) {
 func TestSpawnFailure(t *testing.T) {
 	var failSpawn int32 = 1
 	_, _, c, _ := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			if atomic.LoadInt32(&failSpawn) == 1 {
 				return nil, errors.New("spawn broke")
 			}
@@ -426,7 +468,7 @@ func TestCreateVsShutdown(t *testing.T) {
 	var spawns int32
 
 	d, _, c, served := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			atomic.AddInt32(&spawns, 1)
 			close(spawnGate) // key reserved, spawn in flight
 			<-spawnRelease   // hold the handler inside the lifecycle op
@@ -606,7 +648,7 @@ func TestShutdownWithIdleConn(t *testing.T) {
 func TestStopSessionForcedKill(t *testing.T) {
 	var childPID int32
 	_, _, c, _ := startInProcess(t, func(o *Options) {
-		o.SpawnFixture = func(selfExe, cwd string) (*fixture.Child, error) {
+		o.SpawnFixture = func(selfExe, cwd string) (runtime.Harness, error) {
 			// /bin/sleep ignores stdin and never exits on EOF — exercises
 			// the real forced-kill path through fixture.Child.Stop.
 			cmd := exec.Command("sleep", "600")

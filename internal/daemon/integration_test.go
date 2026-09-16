@@ -38,6 +38,9 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(fmt.Sprintf("build test binary: %v\n%s", err, out))
 	}
+	// The same-package tests share this test binary but cannot see this
+	// variable — publish the path through the environment instead.
+	os.Setenv("REPOSUITE_TEST_BIN", testBin)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

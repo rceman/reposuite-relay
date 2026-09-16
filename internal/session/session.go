@@ -101,30 +101,19 @@ type RelaySession struct {
 	UpdatedAt        time.Time // last durable metadata change
 }
 
-// HarnessRuntime is the ephemeral owned runtime for one awake harness
-// generation. It is daemon-memory only and never persisted: after a
-// daemon restart every session's runtime is simply absent.
-type HarnessRuntime struct {
-	ID         string    // ephemeral runtime identity
-	Generation int       // which session generation this runtime is
-	State      string    // Runtime* constant; fixture spawns as RuntimeWarm
-	PID        int       // OS process id of the harness child
-	StartedAt  time.Time // when this runtime generation started
-}
-
-// Managed pairs a durable RelaySession with its optional HarnessRuntime
-// and the daemon-owned stop hook. Stop is set by the daemon only while a
-// runtime exists; it is never marshalled or persisted.
+// Managed is a durable RelaySession plus its daemon-side synchronization.
+// It deliberately owns NO process state: harness processes belong to the
+// RuntimeSupervisor (internal/runtime), which may host several sessions on
+// one shared runtime. A managed session with no supervisor binding is
+// COLD — zero harness resources.
 type Managed struct {
 	Session *RelaySession
-	Runtime *HarnessRuntime // nil = COLD: no harness resources
-	Stop    func() error    // nil when Runtime is nil
 
 	// MetaMu serializes durable metadata mutation (session.json replace)
-	// for this session: seq-block reservation today, future model/mode/
-	// nativeSessionId/generation/state updates. Lock order: MetaMu may be
-	// taken under the events broker's per-session lock and must never be
-	// taken while holding Registry.mu.
+	// for this session: seq-block reservation, model/mode, nativeSessionId,
+	// generation, state updates. Lock order: MetaMu may be taken under the
+	// events broker's per-session lock and must never be taken while
+	// holding Registry.mu.
 	MetaMu sync.Mutex
 }
 
@@ -251,23 +240,6 @@ func (r *Registry) BeginStop(key string) (*Managed, bool) {
 	}
 	r.stopping[key] = struct{}{}
 	return m, true
-}
-
-// ClearRuntime detaches a confirmed-stopped runtime from the managed
-// session under the caller's exclusive stop ownership: the session stays
-// managed and becomes COLD (runtime nil, stop hook nil). Call between
-// confirmed runtime termination and durable deletion so a failed delete
-// never leaves a dead HarnessRuntime/PID attached.
-func (r *Registry) ClearRuntime(key string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, owned := r.stopping[key]; !owned {
-		return // only the stop owner may transition runtime -> COLD
-	}
-	if m, ok := r.byKey[key]; ok {
-		m.Runtime = nil
-		m.Stop = nil
-	}
 }
 
 // CommitStop removes the session after its runtime is confirmed stopped

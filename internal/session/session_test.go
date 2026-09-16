@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"testing"
 	"time"
 )
@@ -63,13 +62,7 @@ func mkRelay(key string) *RelaySession {
 }
 
 func mkManaged(k string) *Managed {
-	now := time.Now()
-	rid, _ := NewRuntimeID()
-	return &Managed{
-		Session: mkRelay(k),
-		Runtime: &HarnessRuntime{ID: rid, Generation: 1, State: RuntimeWarm,
-			PID: 100 + len(k), StartedAt: now},
-	}
+	return &Managed{Session: mkRelay(k)}
 }
 
 func TestRegistryReserveCommitCancel(t *testing.T) {
@@ -135,19 +128,12 @@ func TestRegistryStopOwnership(t *testing.T) {
 	_ = m
 }
 
-// TestStopFailureRetainsAuthority: a failed Stop must NOT erase the
-// logical session — the daemon keeps authority over the still-running
-// runtime.
+// TestStopFailureRetainsAuthority: a failed runtime stop (reported by the
+// supervisor) must NOT erase the logical session — the registry keeps
+// authority, and a retry can complete.
 func TestStopFailureRetainsAuthority(t *testing.T) {
 	r := NewRegistry()
 	m := mkManaged("victim")
-	stopped := false
-	m.Stop = func() error {
-		if !stopped {
-			return errors.New("stop failed")
-		}
-		return nil
-	}
 	if !r.Reserve("victim") || !r.Commit("victim", m) {
 		t.Fatal("setup failed")
 	}
@@ -155,46 +141,22 @@ func TestStopFailureRetainsAuthority(t *testing.T) {
 	if !ok {
 		t.Fatal("BeginStop failed")
 	}
-	if err := got.Stop(); err == nil {
-		t.Fatal("injected stop must fail")
-	}
+	// The stop owner reports a failed runtime stop.
 	r.AbortStop("victim")
-	// Authority retained: same session/runtime still queryable.
+	// Authority retained: same session still queryable.
 	g, ok := r.Get("victim")
-	if !ok || g.Session.ID != m.Session.ID || g.Runtime == nil || g.Runtime.ID != m.Runtime.ID {
+	if !ok || g.Session.ID != m.Session.ID {
 		t.Fatal("session authority lost after failed stop")
 	}
-	// Retry succeeds: runtime stopped, cleared to COLD, then removed.
-	got, ok = r.BeginStop("victim")
-	if !ok {
+	// Retry succeeds.
+	if _, ok = r.BeginStop("victim"); !ok {
 		t.Fatal("second BeginStop failed")
-	}
-	stopped = true
-	if err := got.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	r.ClearRuntime("victim")
-	if g, ok := r.Get("victim"); !ok || g.Runtime != nil || g.Stop != nil {
-		t.Fatal("ClearRuntime must detach runtime and stop hook")
 	}
 	r.CommitStop("victim")
 	if _, ok := r.Get("victim"); ok {
 		t.Fatal("session must be gone after successful stop")
 	}
-}
-
-// TestClearRuntimeRequiresOwnership: only the stop owner may transition a
-// session to COLD — a plain Get must not be able to detach the runtime.
-func TestClearRuntimeRequiresOwnership(t *testing.T) {
-	r := NewRegistry()
-	m := mkManaged("k")
-	if !r.Reserve("k") || !r.Commit("k", m) {
-		t.Fatal("setup failed")
-	}
-	r.ClearRuntime("k") // no stop ownership — must be a no-op
-	if g, _ := r.Get("k"); g.Runtime == nil {
-		t.Fatal("ClearRuntime without ownership must not detach runtime")
-	}
+	_ = got
 }
 
 func TestRegistryOps(t *testing.T) {
@@ -209,7 +171,7 @@ func TestRegistryOps(t *testing.T) {
 		t.Fatalf("list not sorted: %+v", list)
 	}
 	m, ok := r.Get("a")
-	if !ok || m.Session.ID == "" || m.Runtime == nil || m.Runtime.PID == 0 {
+	if !ok || m.Session.ID == "" {
 		t.Fatal("get a failed")
 	}
 	if _, ok := r.Get("zzz"); ok {
@@ -232,7 +194,7 @@ func TestRegistryOps(t *testing.T) {
 }
 
 // TestNewRestoredCold: persisted sessions restore as managed COLD
-// entries — queryable, countable, with no runtime and no stop hook.
+// entries — queryable, countable, with no process state of any kind.
 func TestNewRestoredCold(t *testing.T) {
 	sessions := []*RelaySession{mkRelay("a"), mkRelay("b")}
 	r, err := NewRestored(sessions)
@@ -245,9 +207,6 @@ func TestNewRestoredCold(t *testing.T) {
 	m, ok := r.Get("a")
 	if !ok || m.Session.ID != sessions[0].ID {
 		t.Fatal("restored session a missing")
-	}
-	if m.Runtime != nil || m.Stop != nil {
-		t.Fatal("restored session must be COLD (no runtime, no stop hook)")
 	}
 	// A COLD session's key is still owned — no duplicate create.
 	if r.Reserve("a") {

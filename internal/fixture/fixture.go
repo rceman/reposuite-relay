@@ -7,123 +7,37 @@
 // reason (the kernel closes the pipe's write end). Fixture processes can
 // therefore never outlive their daemon.
 //
-// It executes no client-supplied command, needs no PTY, and needs no
-// terminal model.
+// Process ownership lives in internal/runtime (the RuntimeSupervisor's
+// process primitive): the fixture is a dedicated, one-process-per-session
+// harness with its own process group and a bounded stop path. It executes
+// no client-supplied command, needs no PTY, and needs no terminal model.
 package fixture
 
 import (
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"time"
+
+	"github.com/rceman/reposuite-relay/internal/runtime"
 )
-
-// StopTimeout bounds the graceful wait after the child's stdin pipe is
-// closed before SIGKILL; KillTimeout bounds the reap wait after SIGKILL.
-// Neither wait is unbounded.
-const (
-	StopTimeout = 3 * time.Second
-	KillTimeout = 3 * time.Second
-)
-
-// Child is a daemon-owned fixture process.
-type Child struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	wait  chan error
-	kill  func() error // test seam; defaults to cmd.Process.Kill
-
-	stopTimeout time.Duration
-	killTimeout time.Duration
-}
 
 // Spawn starts `selfExe __fixture` in cwd with a daemon-owned stdin pipe.
-// The child is started detached from the daemon's controlling-tty signals:
-// it is in the daemon's session, and its stdin is our pipe.
-func Spawn(selfExe, cwd string) (*Child, error) {
-	cmd := exec.Command(selfExe, "__fixture")
-	cmd.Dir = cwd
-	return SpawnCmd(cmd)
+// The child is a direct exec (never a shell) in its own process group.
+func Spawn(selfExe, cwd string) (*runtime.Process, error) {
+	return runtime.Spawn(runtime.Spec{
+		Path:      selfExe,
+		Args:      []string{"__fixture"},
+		Dir:       cwd,
+		StdinPipe: true,
+	})
 }
 
-// SpawnCmd starts an already-prepared *exec.Cmd as a fixture child — the
-// seam tests use to prove forced-kill semantics with a controlled stubborn
-// process. cmd's StdinPipe is taken over; Dir/Env are the caller's.
-func SpawnCmd(cmd *exec.Cmd) (*Child, error) {
-	cmd.Stdout = nil // /dev/null
-	cmd.Stderr = nil // /dev/null
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("fixture stdin pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("fixture start: %w", err)
-	}
-	c := &Child{
-		cmd:         cmd,
-		stdin:       stdin,
-		wait:        make(chan error, 1),
-		stopTimeout: StopTimeout,
-		killTimeout: KillTimeout,
-	}
-	c.kill = func() error { return cmd.Process.Kill() }
-	go func() { c.wait <- cmd.Wait() }()
-	return c, nil
-}
-
-// PID is the fixture child's process id.
-func (c *Child) PID() int { return c.cmd.Process.Pid }
-
-// Stop closes the child's stdin (its exit signal), waits up to stopTimeout,
-// then SIGKILLs and waits up to killTimeout for reaping.
-//
-// Stop success means the process is CONFIRMED terminated and reaped —
-// regardless of exit status (exit 0, non-zero, signal, SIGKILL). It only
-// returns an error when termination/reaping cannot be confirmed, e.g. the
-// kill fails while the child is still un-reaped. A non-zero
-// *exec.ExitError is therefore a successful stop, not a lifecycle failure.
-func (c *Child) Stop() error {
-	_ = c.stdin.Close()
-	if err := c.waitReaped(c.stopTimeout); err == nil {
-		return nil
-	}
-	// Graceful window expired — bounded SIGKILL fallback. A kill error
-	// (including os.ErrProcessDone) may race a concurrent natural exit, so
-	// we still give reaping one bounded chance to confirm termination.
-	killErr := c.kill()
-	reapErr := c.waitReaped(c.killTimeout)
-	if reapErr == nil {
-		return nil // terminated + reaped, regardless of killErr
-	}
-	if killErr != nil {
-		return fmt.Errorf("fixture kill pid=%d: %w (reap unconfirmed: %v)", c.PID(), killErr, reapErr)
-	}
-	return reapErr
-}
-
-// waitReaped waits up to timeout for cmd.Wait() to finish, then maps the
-// result through confirmed(). Every receive on c.wait goes through here —
-// no unbounded reap wait exists on any Stop path.
-func (c *Child) waitReaped(timeout time.Duration) error {
-	select {
-	case err := <-c.wait:
-		return confirmed(err)
-	case <-time.After(timeout):
-		return fmt.Errorf("fixture pid=%d not reaped within %s", c.PID(), timeout)
-	}
-}
-
-// confirmed turns a cmd.Wait result into lifecycle truth: an ExitError
-// means the process exited (non-zero status or signal) — termination is
-// confirmed, so Stop succeeded. Only a non-ExitError wait failure is real.
-func confirmed(err error) error {
-	var ee *exec.ExitError
-	if err != nil && !errors.As(err, &ee) {
-		return fmt.Errorf("fixture wait: %w", err)
-	}
-	return nil
+// SpawnCmd adopts an already-prepared *exec.Cmd as a fixture child — the
+// seam tests use to prove forced-kill semantics with a controlled
+// stubborn process. cmd's StdinPipe is taken over; Dir/Env are the
+// caller's.
+func SpawnCmd(cmd *exec.Cmd) (*runtime.Process, error) {
+	return runtime.Adopt(cmd)
 }
 
 // RunChild is the `__fixture` child entry point: block on stdin until EOF,
