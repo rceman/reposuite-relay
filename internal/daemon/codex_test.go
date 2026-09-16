@@ -7,9 +7,12 @@ package daemon
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -807,4 +810,106 @@ func dialClient(t *testing.T, p paths.Paths) *client.Client {
 	}
 	t.Fatal("daemon did not become reachable")
 	return nil
+}
+
+// listeningPorts returns every listening TCP port visible in this network
+// namespace (Linux /proc). Used to prove the native app-server never opens
+// a listener: it is a stdio child of relayd only.
+func listeningPorts(t *testing.T) map[int]bool {
+	t.Helper()
+	out := map[int]bool{}
+	for _, f := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Skipf("cannot read %s: %v", f, err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[3] != "0A" { // 0A = LISTEN
+				continue
+			}
+			_, portHex, ok := strings.Cut(fields[1], ":")
+			if !ok {
+				continue
+			}
+			port, err := strconv.ParseInt(portHex, 16, 32)
+			if err == nil {
+				out[int(port)] = true
+			}
+		}
+	}
+	return out
+}
+
+// TestCodexNativeServerNotExposed: the app-server is private to relayd.
+// Driving a real turn must not open any new listening socket, the session
+// DTO must carry no harness transport field, and there is no API route
+// that proxies the native server.
+func TestCodexNativeServerNotExposed(t *testing.T) {
+	t.Setenv("FAKE_CODEX_MODE", "happy")
+	_, p, c, _ := startInProcess(t, codexOptions)
+
+	before := listeningPorts(t)
+	serveCodex(t, c, "private")
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Prompt(ctx, "private", "hi", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	waitDurableTypes(t, c, "private", api.EventMessageAgentCompleted)
+	after := listeningPorts(t)
+	for port := range after {
+		if !before[port] {
+			t.Fatalf("a new listening socket appeared on port %d", port)
+		}
+	}
+
+	// The raw session DTO carries no harness transport or credential.
+	raw, err := os.ReadFile(p.DaemonDescriptor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desc api.Descriptor
+	if err := json.Unmarshal(raw, &desc); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, c.Endpoint()+"/v1/sessions/private", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+desc.BearerToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(body))
+	for _, forbidden := range []string{"port", "endpoint", "socket", "listen", "stdio", "token"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("session DTO leaks %q: %s", forbidden, body)
+		}
+	}
+	// No route proxies the native server.
+	for _, path := range []string{"/v1/sessions/private/app-server", "/v1/sessions/private/native"} {
+		req, err := http.NewRequest(http.MethodGet, c.Endpoint()+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+desc.BearerToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s returned %d, want 404", path, resp.StatusCode)
+		}
+	}
 }

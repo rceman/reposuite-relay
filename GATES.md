@@ -31,6 +31,7 @@ toolchain: exactly **go1.27.1**.
 | 22 | Requested input | covered by gate 5 — durable `input.requested` with the exact input ID and questions, durable `waiting_input` before the event, runtime unsleepable while pending (`CanSleep` false, `StopIfIdle` → `ErrRuntimeBusy`), answer by exact ID, `UNKNOWN_INPUT` otherwise, `input.aborted` on turn end/cancel/death |
 | 23 | Shared runtime + isolation | covered by gate 5 — concurrent cold wake-ups spawn exactly one app-server process (claim-first creation; 16-way supervisor race + racing HTTP prompts), several sessions share one app-server process with distinct native threads, deleting one detaches only its thread (runtime survives, siblings keep their exact native identity), runtime death projects every bound session COLD and a fresh generation resumes each exact thread |
 | 24 | Process tree + COLD projection | covered by gate 5 — stopping a Codex runtime reaps the app-server and its own child process, the session survives COLD with its native identity, and a live event subscriber on a COLD session never wakes or retains a runtime |
+| 25 | Native server privacy | covered by gate 5 — driving a real turn opens no new listening socket (Linux `/proc/self/net/tcp*`), the session DTO carries no harness transport/credential field, and no API route proxies the native app-server |
 
 ## Notes
 
