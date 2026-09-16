@@ -71,3 +71,19 @@ agent-requested-input channels.
   control plane → Codex vertical slice → canonical event cutover →
   minimal TUI → Devin ACP → OpenCode ACP (preferred) → OpenCode serve
   (if needed) → Gateway/WSS → load hardening.
+
+## Implementation status (2026-09-16)
+
+Implemented: durable `RelaySession` persistence + COLD recovery, the
+ADR-006 loopback HTTP/JSON control plane, the canonical event stream
+(exact cursor/floor, bounded frames and pages, lazy replay ring), the
+runtime supervisor (shared/dedicated runtimes, per-session activity,
+sleep blockers, bounded process-tree teardown), and the **Codex
+app-server vertical slice** with exact native resume, durable event
+mapping, requested input, cancel, runtime-death handling, and structured
+HTTP/CLI control.
+
+Not yet implemented: Codex approval requests, `turn/steer`, rate-limit
+surfaces, OpenCode/Devin adapters, TUI, Gateway/WSS, cross-platform
+singleton locking. See `docs/research/NATIVE_HARNESS_ARCHITECTURE.md`
+§7f for the adapter semantics as built.

@@ -50,3 +50,23 @@ jobs:
           go run ./cmd/reposuite-relay version | grep -q "reposuite-relay 0.1.0-dev"
           go run ./cmd/reposuite-relay help | grep -q "Usage:"
           ! go run ./cmd/reposuite-relay bogus-command 2>/dev/null
+
+      - name: CLI smoke (native session surface)
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          go build -o "$tmp/reposuite-relay" ./cmd/reposuite-relay
+          # A `codex` on PATH that is the deterministic fake app-server:
+          # scripted JSON-RPC only, no model call, no network, no quota.
+          printf '#!/bin/sh\nexec %s __fake-codex "$@"\n' "$tmp/reposuite-relay" > "$tmp/codex"
+          chmod +x "$tmp/codex"
+          export PATH="$tmp:$PATH" FAKE_CODEX_MODE=happy
+          export HOME="$tmp/home" REPOSUITE_HOME="$tmp/rs"
+          mkdir -p "$HOME" "$REPOSUITE_HOME"
+          cd "$HOME"
+          "$tmp/reposuite-relay" serve codex --key smoke | grep -q "runtimeState=cold"
+          "$tmp/reposuite-relay" prompt smoke --text "ci smoke" | grep -q "native_thread_id=th_"
+          "$tmp/reposuite-relay" status smoke | grep -q "harness=codex"
+          "$tmp/reposuite-relay" config smoke --model ci-model | grep -q "harness=codex"
+          "$tmp/reposuite-relay" stop smoke | grep -q "stopped key=smoke"
+          "$tmp/reposuite-relay" daemon stop | grep -q "daemon stopped"

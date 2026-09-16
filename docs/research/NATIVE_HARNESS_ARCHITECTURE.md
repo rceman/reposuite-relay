@@ -1,7 +1,9 @@
 # Native Harness Architecture — Research Report
 
-Status: research complete, awaiting Planner review (ADR-005 Proposed).
-Date: 2026-09-15. Base: main `633fa3f`.
+Status: research complete, accepted (ADR-005); §1/§7/§7c/§7d now have a
+running implementation (see §7f and §11). Date: 2026-09-15, updated
+2026-09-16. Base: main `633fa3f`; implementation base
+`feature/core-domain-persistence-a2`.
 
 Product direction: **RepoSuite Relay is a persistent structured
 agent-session daemon with native harness adapters** — not a terminal
@@ -350,6 +352,56 @@ question records, multi-client attach — justified later if product needs
 exceed ACP (e.g. multi-head attach, browser-direct access). Not claimed
 permanently superior.
 
+## 7f. Implemented adapter semantics (Task A2 vertical slice)
+
+`internal/codex` is the first real native adapter, built against the
+verified §1 surface and gated by a deterministic fake app-server (no
+model call, no network, no quota). Implementation notes that refine the
+design above:
+
+- **Transport:** `codex app-server` (the installed CLI, resolved through
+  `exec.LookPath("codex")`) with newline-delimited JSON-RPC 2.0 over
+  stdio. Frames are bounded (`MaxFrameBytes`); a malformed or oversized
+  frame fails the connection closed and unblocks every pending call
+  instead of being skipped.
+- **Shared runtime:** one app-server process per daemon
+  (`codex/default`) hosts every Codex session. Each Relay session owns
+  exactly one native `thread`; Relay never reuses a thread across
+  sessions.
+- **Materialization:** the native `threadId` is persisted on
+  `RelaySession.nativeSessionId` **only after a turn completes** — the
+  research finding that zero-turn threads are not resumable makes an
+  unproven thread in-memory-only state. A failed first turn therefore
+  persists nothing, and the next prompt starts a fresh thread.
+- **Exact resume:** every new runtime generation reattaches with
+  `thread/resume {threadId: <durable nativeSessionId>}` and verifies the
+  returned id matches. A mismatch or an error surfaces as
+  `NATIVE_SESSION_LOST`; Relay never falls back to another thread.
+- **Turn lifecycle:** `message.user` is published durably *before*
+  `turn/start`, the logical state is written `active` before submission,
+  and a turn stays in flight until its terminal durable record
+  (`message.agent.completed`, `turn.interrupted`, `turn.failed`) is
+  published — so a concurrent prompt can never interleave with the
+  previous turn's completion.
+- **Requested input:** `item/tool/requestUserInput` is answered through
+  the relay input ID; the blocker is registered and the durable state
+  becomes `waiting_input` **before** `input.requested` is published, and
+  an unresolved request makes the runtime unsleepable
+  (`RuntimeSupervisor.CanSleep`). `StopIfIdle` refuses with
+  `ErrRuntimeBusy` while one is pending.
+- **Runtime death:** the supervisor reports each runtime generation gone
+  exactly once (deliberate stop or death). A death fails the in-flight
+  turn durably, aborts unresolved input, records `runtime.exited`, and
+  projects the session COLD; a deliberate stop has no in-flight work by
+  construction and only releases local state.
+- **No client access to the native server:** the app-server is spawned by
+  relayd, speaks only to relayd, and is never exposed on any socket,
+  descriptor, or API surface. Clients see Relay events only.
+- **Not yet implemented in this slice:** approvals
+  (`approvalPolicy=never` is pinned), `turn/steer`, `thread/fork`,
+  rate-limit notifications, and the A/B/C input UI. The protocol types
+  for approvals exist; the handler is a future adapter task.
+
 ## 8. xterm-go / creack/pty disposition
 
 - **`internal/terminal` + `github.com/rceman/xterm-go` → REMOVE FROM
@@ -411,6 +463,10 @@ Cross-platform target: Linux + macOS + Windows. See ADR-006.
 
 ## 11. Implementation train (updated)
 
+A0. **Canonical event stream + COLD resource semantics** — done
+   (commit `87383b9`): exact `after=N` replay with an explicit floor,
+   cursor-ahead rejection, lazy replay ring, no retained transcript
+   handles, bounded pages/frames.
 A. **Core domain + persistence cleanup** — drop terminal-first
    assumptions; remove xterm-go/creack/pty from core; `RelaySession` +
    `HarnessRuntime` + `RuntimeSupervisor` boundaries; deterministic
@@ -419,10 +475,13 @@ A. **Core domain + persistence cleanup** — drop terminal-first
 B. **Cross-platform local control plane** — loopback HTTP/JSON, NDJSON
    events, ephemeral port, `daemon.json`, client package; preserve
    singleton/quiescence.
-C. **Codex app-server vertical slice** — stdio JSON-RPC; shared runtime;
-   start/resume exact thread; prompt; streaming; interrupt;
-   model/effort/tier; metrics/rate-limits; `approvalPolicy=never`;
-   sleep/wake/resume.
+C. **Codex app-server vertical slice** — **done** (commits `5866ef9`,
+   `157474c`, `8e91757`): stdio JSON-RPC, shared runtime, exact
+   thread start/resume, prompt, streaming deltas, interrupt,
+   model/effort/tier, token-usage metrics, `approvalPolicy=never`,
+   sleep/wake/resume, runtime death handling, structured HTTP/CLI
+   control. Remaining for C2: approval requests, `turn/steer`,
+   rate-limit surfaces.
 D. **Canonical event cutover** — transient deltas vs durable records,
    seq, bounded subscribers, `throughSeq→after`.
 E. **Minimal TUI** — ~200/~1000-row bounds, prompt, requested input,
@@ -458,7 +517,9 @@ No adapter-bundling: one vertical slice (Codex) first.
 - Devin generic (non-permission) agent questions — not observed;
   `_meta` surface suggests richer channels exist.
 - Codex `thread/resume` needs ≥1 materialized turn — zero-turn sessions
-  are not resumable (acceptable: an unmaterialized session is empty).
+  are not resumable. **Resolved in implementation:** Relay persists the
+  native thread id only after a completed turn, so a resumable identity is
+  never assumed for an empty thread.
 - ~~ACP model setter~~ — **answered:** `session/set_config_option`
   (configId=`model`) switches mid-session on OpenCode ACP; Devin exposes
   mode via configOptions (`bypass` etc.) — exact Devin model setter

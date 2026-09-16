@@ -106,6 +106,39 @@ report each as PASS/FAIL/N/A with evidence.
   `rceman/xterm-go` library is maintained independently; do not touch it
   here.
 
+## Harness adapter invariants (ADR-005, implemented)
+
+- The daemon runs only its own built-in harness commands. Clients never
+  supply executables or arguments; `internal/codex` resolves the
+  installed `codex` CLI itself and runs `codex app-server`.
+- Native harness servers are private to relayd: never exposed on a
+  socket, descriptor, or API surface.
+- Exact resume only: `thread/resume` uses the persisted
+  `nativeSessionId`; a mismatch or failure is `NATIVE_SESSION_LOST` —
+  never "newest"/`--last`/implicit.
+- Native identity is materialized (persisted) only when proven — for
+  Codex, after the first completed turn.
+- Durable session metadata is mutated only through the daemon's
+  `codex.SessionUpdate` → `Daemon.materialize` path, under
+  `Managed.MetaMu`. Readers use `Managed.Snapshot()`; never read mutable
+  durable fields directly from another goroutine.
+- A turn is in flight until its terminal durable record is published;
+  unresolved requested input is a hard runtime sleep blocker.
+- Runtime death (unexpected) fails in-flight work durably; a deliberate
+  stop has no in-flight work by construction. The supervisor reports
+  each runtime generation gone exactly once (`OnGone`).
+- Every process stop is bounded and reaps the whole process group —
+  leader, descendants, and the app-server's own children.
+
+## Test seams
+
+- `__fixture` — deterministic same-binary child (fixture harness).
+- `__fake-codex` — deterministic fake Codex app-server: scripted
+  JSON-RPC, no model call, no network, no quota. Selected with
+  `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `die-on-turn`,
+  `resume-error`, `stubborn`, `child`). Hidden modes are never listed in
+  help and never part of the public CLI contract.
+
 ## Architecture invariants
 
 - One daemon per RepoSuite state root; exclusive singleton ownership with

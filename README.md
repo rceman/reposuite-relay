@@ -3,9 +3,9 @@
 A persistent structured agent-session daemon with native harness
 adapters, implemented in Go.
 
-**Status: early development** — the ADR-006 local control plane and the
-canonical event-stream foundation are implemented; native harness
-adapters are next.
+**Status: early development** — the ADR-006 local control plane, the
+canonical event-stream foundation, and the first real native harness
+adapter (Codex app-server) are implemented.
 
 RepoSuite Relay keeps agent sessions alive independently of any viewer:
 a persistent per-user daemon owns durable session identities
@@ -27,10 +27,15 @@ $ reposuite-relay version
 reposuite-relay 0.1.0-dev
 $ reposuite-relay help
 $ reposuite-relay paths                      # resolved RepoSuite/Relay state paths
-$ reposuite-relay serve fixture --key demo   # start a fixture session (dev/test harness)
+$ reposuite-relay serve codex --key work     # create a Codex session (COLD: no process yet)
+$ reposuite-relay prompt work --text "..."   # submit a prompt as a native turn
+$ reposuite-relay status work                # state, runtime, activity, generation
+$ reposuite-relay input work --input in_... --answer q1=alpha   # answer requested input
+$ reposuite-relay cancel work                # interrupt the in-flight turn
+$ reposuite-relay config work --model M      # change the accepted model/mode
+$ reposuite-relay stop work                  # delete the session
+$ reposuite-relay serve fixture --key demo   # fixture session (dev/test harness)
 $ reposuite-relay list                       # managed sessions
-$ reposuite-relay status demo                # one session
-$ reposuite-relay stop demo                  # stop it
 $ reposuite-relay daemon status              # daemon liveness (no autostart)
 $ reposuite-relay daemon stop                # graceful shutdown
 ```
@@ -46,6 +51,21 @@ CLI auto-starts the daemon when genuinely absent; `daemon status` and
 `daemon stop` never do. The `fixture` harness is a deterministic
 development/test child — **not** a real agent harness.
 
+**Native Codex sessions.** `serve codex` creates a durable session with
+**zero** harness resources; the first prompt wakes one shared
+`codex app-server` process (spawned by relayd, never exposed to clients)
+and starts a native `thread`. Each Relay session keeps its own exact
+native thread id, persisted only after a turn completes — so resume
+always reattaches the exact thread (`thread/resume`) and never
+"newest"/`--last`. A prompt publishes `message.user` durably before the
+turn is submitted; streaming deltas are live-only while the completed
+agent message, interruptions, failures, requested input, runtime exits,
+and native materialization are durable transcript records. Unresolved
+requested input is a hard runtime sleep blocker. A runtime that dies
+fails its in-flight turn durably and drops every bound session COLD;
+deleting one session detaches only its thread and leaves the shared
+app-server serving the others.
+
 The canonical event-stream foundation is in place: per-session monotonic
 sequence numbers with durable block reservation (`SeqHighWatermark`),
 an exact history cursor (`throughSeq` is the canonical event cursor, so
@@ -57,13 +77,11 @@ NDJSON frame bound across publication, server, and client.
 `GET /v1/sessions/{key}/transcript?limit=N` returns byte- and
 count-bounded durable history (`hasMoreBefore`). COLD sessions hold no
 transcript file descriptors and no replay rings — a daemon restoring
-1000 durable sessions costs bookkeeping only. No harness adapter
-publishes real events yet — the broker is exercised synthetically in
-tests.
+1000 durable sessions costs bookkeeping only.
 
-**Not yet implemented:** native harness adapters (Codex/OpenCode/Devin)
-with exact native resume, real agent-message publication, runtime wake
-from COLD, TUI, Gateway/WSS, cross-platform singleton locking.
+**Not yet implemented:** OpenCode/Devin adapters, Codex approval
+requests and `turn/steer`, rate-limit surfaces, TUI, Gateway/WSS,
+cross-platform singleton locking.
 
 ## Layout
 
@@ -74,6 +92,10 @@ from COLD, TUI, Gateway/WSS, cross-platform singleton locking.
 - `internal/events` — canonical event broker (seq reservation, ring, subs)
 - `internal/session` — `RelaySession`/`HarnessRuntime` domain + registry
 - `internal/store` — durable session/transcript filesystem store
+- `internal/runtime` — `RuntimeSupervisor`: runtime ownership, bindings,
+  activity, sleep blockers, bounded process-tree teardown
+- `internal/codex` — Codex app-server adapter (JSON-RPC, protocol types,
+  event mapping, deterministic fake app-server for tests)
 - `internal/fixture` — deterministic fixture harness child
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
 - `docs/` — domain vocabulary, ADRs, feasibility research
@@ -90,3 +112,9 @@ go vet ./... && go test ./... && go test -race -count=1 ./... && go build ./...
 Relay state defaults to `~/.reposuite/relay`
 (`$REPOSUITE_HOME` overrides the RepoSuite root). Nothing is read or written
 under `~/.airelay` — Airelay is a separate legacy product.
+
+The Codex adapter resolves the installed `codex` CLI
+(`exec.LookPath("codex")`) and runs only its own built-in
+`codex app-server` command — clients can never supply a command. Tests
+never call a model: they spawn a deterministic fake app-server (the
+hidden `__fake-codex` mode of the same binary).

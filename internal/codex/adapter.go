@@ -1108,22 +1108,17 @@ type ConfigCommand struct {
 	Mode  string `json:"mode"`
 }
 
-// ApplyConfig validates and accepts a configuration change. The verified
+// ApplyConfig records an accepted configuration change. The verified
 // app-server surface applies model/mode at thread start/resume and, for
 // model and effort, per turn (turn/start). There is no verified
 // thread-level model mutation while a thread is live, so a change takes
 // effect on the next turn or the next resume — Relay records the
-// accepted configuration rather than pretending otherwise.
+// accepted configuration rather than pretending otherwise. A change
+// during an in-flight turn is accepted and applies to the next turn: the
+// running turn already captured its own model/effort.
 func (a *Adapter) ApplyConfig(_ context.Context, m *session.Managed, cmd ConfigCommand) error {
-	st := a.state(m.Session.ID)
-	if st == nil {
+	if a.state(m.Session.ID) == nil {
 		return fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
-	}
-	a.mu.Lock()
-	busy := st.current != nil
-	a.mu.Unlock()
-	if busy {
-		return fmt.Errorf("%w: configuration change while a turn is in flight", ErrBusy)
 	}
 	if snap := m.Snapshot(); snap.Model == cmd.Model && snap.Mode == cmd.Mode {
 		return nil

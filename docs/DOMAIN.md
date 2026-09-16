@@ -35,18 +35,29 @@ sleep/death, and relayd restart — persisted under
 
 **HarnessRuntime** *(current)* — the ephemeral owned runtime for one
 harness generation: ID, generation, state
-(`STARTING|WARM|ACTIVE|STOPPING`), PID, start time. Daemon-memory only —
-never persisted; its absence IS `COLD`. One runtime may host multiple
-sessions (target); sleep authority is per-runtime (target).
+(`starting|warm|active|stopping`), PID, start time, bound sessions,
+per-session activity. Daemon-memory only — never persisted; its absence
+IS `COLD`. A runtime may host multiple sessions (a shared Codex
+app-server); sleep authority is per-runtime.
 
-**HarnessAdapter** *(target)* — the protocol-specific bridge between a
-native harness protocol (Codex app-server, OpenCode ACP/serve, Devin
-ACP) and Relay's canonical session/event model. No adapter is
-implemented yet.
+**HarnessAdapter** *(current)* — the protocol-specific bridge between a
+native harness protocol and Relay's canonical session/event model.
+Implemented: `internal/codex` (Codex app-server over stdio). Planned:
+OpenCode ACP, Devin ACP. An adapter owns only daemon-memory state; it
+never writes durable session metadata itself (the daemon's `Materialize`
+hook does that under `MetaMu`).
 
-**RuntimeSupervisor** *(target)* — owns runtime wake/sleep/lifecycle:
+**RuntimeSupervisor** *(current)* — owns runtime wake/sleep/lifecycle:
 ensure-awake, protocol init, exact native resume, prompt dispatch,
-per-runtime `SafeToSleep`, stop, and process-tree accounting.
+per-runtime `SafeToSleep`, stop, and process-tree accounting. It is the
+only owner of process state; it reports each runtime generation gone
+exactly once (`OnGone`) whether the process died or was stopped
+deliberately.
+
+**Session activity** *(current)* — per-session runtime activity
+(`idle`, `active`, `waiting_input`), distinct from both the logical
+session state and the runtime process state. Activity is what decides
+whether a runtime may sleep.
 
 **NativeSessionID** *(current)* — the exact harness-native resume
 identity stored on `RelaySession` (empty for fixture, which has no
@@ -70,23 +81,33 @@ suspension; the runtime is gone and is re-created on wake.
 
 ## Requests
 
-**RequestedInput** *(target)* — a blocking question/input request a
+**RequestedInput** *(current)* — a blocking question/input request a
 harness surfaces through the adapter (permission prompt, choice,
-free-text). It is responder-agnostic: any attached client may answer.
-An unresolved `RequestedInput` is a **sleep blocker** — a runtime must
-not sleep while one is pending (native pending-request state is not
-resumable).
+free-text). It is responder-agnostic: any attached client may answer by
+its Relay input ID. An unresolved `RequestedInput` is a **sleep
+blocker** — a runtime must not sleep while one is pending (native
+pending-request state is not resumable), and the logical session state
+is `waiting_input`. Aborting (turn end, cancel, runtime death, session
+delete) publishes `input.aborted`.
 
 ## Events
 
-**Canonical events** *(current foundation)* — sequence-numbered per
-session: `session.state`, `message.user`, `message.agent.delta`,
-`message.agent.completed`, `input.requested`, `input.resolved`,
-`session.metrics`, `session.error`. Durable records persist to the
-session transcript; transient deltas (streaming, fast-changing metrics)
-are live-only. The sequence allocator, replay ring, subscriptions, and
-NDJSON streaming are implemented by `internal/events`; no harness
-adapter publishes real events yet.
+**Canonical events** *(current)* — sequence-numbered per session.
+Durable: `message.user`, `message.agent.completed`, `turn.interrupted`,
+`turn.failed`, `runtime.exited`, `harness.started`, `input.requested`,
+`input.resolved`, `input.aborted`, `session.native`, `session.config`.
+Transient (live-only): `message.agent.delta`, `metrics.updated`,
+`harness.error`. Durable records persist to the session transcript;
+transient deltas and fast-changing metrics are live-only. The sequence
+allocator, replay ring, subscriptions, and NDJSON streaming are
+implemented by `internal/events`, and the Codex adapter publishes real
+events through them.
+
+**Native session materialization** *(current)* — `session.native`
+records the exact native identity the first time it is proven (for Codex:
+after the first completed turn). A failed first turn persists nothing,
+and `harness.started` reports `resumed: true|false` so clients can see
+whether a runtime generation started or reattached a thread.
 
 **Event sequence (`seq`)** *(current)* — a per-session strictly
 monotonic uint64 assigned under the session lock. Durable events are
