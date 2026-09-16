@@ -780,15 +780,21 @@ func (d *Daemon) handleTranscript(w http.ResponseWriter, r *http.Request, key st
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())
 		return
 	}
-	recs, through, err := evs.Tail(limit)
+	page, err := evs.HistorySnapshot(limit, api.HistoryPageMaxBytes)
 	if err != nil {
+		if errors.Is(err, store.ErrRecordTooLarge) {
+			writeErr(w, http.StatusInternalServerError, api.ErrHistoryRecordTooLarge,
+				"canonical record exceeds the bounded history page")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "read transcript: "+err.Error())
 		return
 	}
-	if recs == nil {
-		recs = []store.Record{}
-	}
-	writeJSON(w, http.StatusOK, api.TranscriptPage{ThroughSeq: through, Records: recs})
+	writeJSON(w, http.StatusOK, api.TranscriptPage{
+		ThroughSeq:    page.ThroughSeq,
+		Records:       page.Records,
+		HasMoreBefore: page.HasMoreBefore,
+	})
 }
 
 // handleEvents streams canonical events as NDJSON: the atomic replay
@@ -820,9 +826,14 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request, key string
 	}
 	sub, err := evs.Subscribe(after)
 	if err != nil {
-		if errors.Is(err, events.ErrCursorTooOld) {
+		switch {
+		case errors.Is(err, events.ErrCursorTooOld):
 			writeErr(w, http.StatusConflict, api.ErrCursorTooOld,
 				"requested cursor is older than the replay window; rehydrate durable history")
+			return
+		case errors.Is(err, events.ErrCursorAhead):
+			writeErr(w, http.StatusConflict, api.ErrCursorAhead,
+				"requested cursor is ahead of the current event cursor")
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())

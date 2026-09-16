@@ -21,7 +21,11 @@ toolchain: exactly **go1.27.1**.
 | 12 | Descriptor lifecycle | covered by gate 5 — atomic 0600 publication, endpoint matches the bound listener, fresh instance ID + token per generation, owner-only removal, absent on failed startup, malformed/non-loopback descriptors rejected client-side |
 | 13 | HTTP auth | covered by gate 5 — every endpoint (daemon, sessions, transcript, NDJSON stream, shutdown) requires the bearer token; wrong/missing token is 401; token never appears in status output, session metadata, or transcript |
 | 14 | Event sequencing | covered by gate 5 — durable block reservation before exposure, restart resumes strictly after the persisted watermark, transient-only history still never reuses seq, transcript-beyond-watermark fails startup |
-| 15 | Event stream + bounds | covered by gate 5 — NDJSON replay-then-live with strictly increasing seq, `CURSOR_TOO_OLD` as a JSON error before streaming, disconnect releases the subscriber, bounded replay ring/subscriber queues with deterministic eviction, transcript limit bounds |
+| 15 | Event stream + bounds | covered by gate 5 — NDJSON replay-then-live with strictly increasing seq, `CURSOR_TOO_OLD`/`CURSOR_AHEAD` as JSON errors before streaming, disconnect releases the subscriber, bounded replay ring/subscriber queues with deterministic eviction, transcript limit bounds |
+| 16 | Exact history cursor | covered by gate 5 — `throughSeq` is the canonical event cursor (post-restart: the persisted watermark, not the last durable record); snapshot is atomic with publishes; cutover at that cursor is gap-free for durable and transient intervening events |
+| 17 | Replay floor | covered by gate 5 — floor starts at the persisted watermark and advances on ring overwrite; exact subscription only when `floor <= after <= cursor`; MaxUint64 cursor rejects deterministically |
+| 18 | COLD resource bound | covered by gate 5 — 1000 restored sessions allocate no replay rings, retain no transcript file descriptors (Linux `/proc/self/fd` delta bound), and still serve exact-cursor history |
+| 19 | Frame/page byte bounds | covered by gate 5 — publication refuses frames above the shared 4 MiB bound (nothing stored or exposed), a just-below-bound frame publishes, history pages obey count+byte budgets with `hasMoreBefore`, and an oversized canonical record fails explicitly |
 
 ## Notes
 

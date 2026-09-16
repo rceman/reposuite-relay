@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,12 @@ import (
 
 // RecordVersion is the durable record envelope version.
 const RecordVersion = 1
+
+// ErrRecordTooLarge means one canonical durable record alone exceeds the
+// caller's byte budget: the record cannot be served within the bound and
+// is reported explicitly instead of allocating an unbounded response.
+// The transcript itself is untouched.
+var ErrRecordTooLarge = errors.New("record exceeds byte budget")
 
 // Record is one durable transcript entry.
 type Record struct {
@@ -352,32 +359,83 @@ func (t *Transcript) Append(r Record) error {
 	return nil
 }
 
-// Tail returns the latest up-to-limit durable records plus throughSeq —
-// the seq a reconnecting client subscribes after. It seeks directly into
-// the tail through the index and never scans the lifetime prefix.
-// limit <= 0 returns no records (throughSeq is still the last seq).
+// Tail returns the latest up-to-limit durable records plus lastSeq. It is
+// TailBounded with no byte budget.
 func (t *Transcript) Tail(limit int) ([]Record, uint64, error) {
+	recs, through, _, err := t.TailBounded(limit, 0)
+	return recs, through, err
+}
+
+// TailBounded returns the latest durable records that fit BOTH a record
+// count bound (limit) and a source-byte bound (maxBytes; 0 = unbounded),
+// plus lastSeq and whether older records exist before the returned
+// window. Selection walks the derived index BACKWARD from the last
+// record — record sizes come from consecutive index offsets — so it is
+// O(returned) index reads and never scans the lifetime transcript prefix.
+//
+// If the newest record alone exceeds maxBytes, ErrRecordTooLarge is
+// returned: an explicit bounded failure, never an unbounded allocation.
+func (t *Transcript) TailBounded(limit int, maxBytes int64) ([]Record, uint64, bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.poisoned != nil {
-		return nil, 0, t.poisoned
+		return nil, 0, false, t.poisoned
 	}
 	if limit <= 0 || t.n == 0 {
-		return nil, t.lastSeq, nil
+		return nil, t.lastSeq, false, nil
 	}
-	start := t.n - limit
-	if start < 0 {
-		start = 0
+	// Backward size walk: sizes[i] = offsets[i+1]-offsets[i], and the
+	// final record runs to EOF.
+	var sizes int64
+	start := t.n
+	for i := t.n - 1; i >= 0 && t.n-i <= limit; i-- {
+		off, err := t.readOffset(i)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("tail: index read: %w", err)
+		}
+		end := t.jsize
+		if i+1 < t.n {
+			if end, err = t.readOffset(i + 1); err != nil {
+				return nil, 0, false, fmt.Errorf("tail: index read: %w", err)
+			}
+		}
+		size := end - off
+		if size <= 0 {
+			return nil, 0, false, fmt.Errorf("tail: non-positive record size %d at index %d", size, i)
+		}
+		if maxBytes > 0 && sizes+size > maxBytes {
+			if i == t.n-1 {
+				return nil, 0, false, fmt.Errorf("tail: %w (%d bytes > %d)", ErrRecordTooLarge, size, maxBytes)
+			}
+			break
+		}
+		sizes += size
+		start = i
+	}
+	if start == t.n {
+		return nil, t.lastSeq, false, nil
 	}
 	off, err := t.readOffset(start)
 	if err != nil {
-		return nil, 0, fmt.Errorf("tail: index read: %w", err)
+		return nil, 0, false, fmt.Errorf("tail: index read: %w", err)
 	}
-	recs, _, err := t.scanFrom(off)
-	if err != nil {
-		return nil, 0, fmt.Errorf("tail: %w", err)
+	sr := io.NewSectionReader(t.jsonl, off, t.jsize-off)
+	br := bufio.NewReaderSize(sr, 64*1024)
+	recs := make([]Record, 0, t.n-start)
+	pos := off
+	for i := start; i < t.n; i++ {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("tail: read record at offset %d: %w", pos, err)
+		}
+		var r Record
+		if jerr := json.Unmarshal(line, &r); jerr != nil {
+			return nil, 0, false, fmt.Errorf("tail: malformed record at offset %d: %w", pos, jerr)
+		}
+		recs = append(recs, r)
+		pos += int64(len(line))
 	}
-	return recs, t.lastSeq, nil
+	return recs, t.lastSeq, start > 0, nil
 }
 
 // Len returns the number of durable records.

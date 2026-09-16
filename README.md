@@ -48,11 +48,18 @@ development/test child — **not** a real agent harness.
 
 The canonical event-stream foundation is in place: per-session monotonic
 sequence numbers with durable block reservation (`SeqHighWatermark`),
-a bounded replay ring, bounded subscribers with deterministic eviction,
-`GET /v1/sessions/{key}/events?after=N` NDJSON streaming, and
-`GET /v1/sessions/{key}/transcript?limit=N` durable history. No harness
-adapter publishes real events yet — the broker is exercised synthetically
-in tests.
+an exact history cursor (`throughSeq` is the canonical event cursor, so
+the transcript → `events?after=throughSeq` cutover is gap-free even
+across restarts), an explicit replay floor (`CURSOR_TOO_OLD` below it,
+`CURSOR_AHEAD` above the cursor), a lazily allocated bounded replay ring,
+bounded subscribers with deterministic eviction, and one shared 4 MiB
+NDJSON frame bound across publication, server, and client.
+`GET /v1/sessions/{key}/transcript?limit=N` returns byte- and
+count-bounded durable history (`hasMoreBefore`). COLD sessions hold no
+transcript file descriptors and no replay rings — a daemon restoring
+1000 durable sessions costs bookkeeping only. No harness adapter
+publishes real events yet — the broker is exercised synthetically in
+tests.
 
 **Not yet implemented:** native harness adapters (Codex/OpenCode/Devin)
 with exact native resume, real agent-message publication, runtime wake

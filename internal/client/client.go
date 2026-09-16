@@ -444,7 +444,9 @@ func (c *Client) Events(ctx context.Context, key string, after uint64) (*EventSt
 		return nil, &APIError{Status: resp.StatusCode, Code: fmt.Sprintf("HTTP_%d", resp.StatusCode)}
 	}
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	// The scanner accepts exactly the canonical frame bound — the same
+	// contract enforced at publication and by the NDJSON server.
+	sc.Buffer(make([]byte, 0, 64*1024), api.MaxEventFrameBytes)
 	return &EventStream{rc: resp.Body, sc: sc}, nil
 }
 

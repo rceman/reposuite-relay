@@ -38,9 +38,35 @@ const (
 	ErrUnauthorized      = "UNAUTHORIZED"
 	ErrSessionExists     = "SESSION_EXISTS"
 	ErrSessionNotFound   = "SESSION_NOT_FOUND"
-	ErrCursorTooOld      = "CURSOR_TOO_OLD"
-	ErrShuttingDown      = "DAEMON_SHUTTING_DOWN"
-	ErrInternal          = "INTERNAL"
+	// ErrCursorTooOld means the requested after=N cursor is below the
+	// session's replay floor: exact replay cannot be guaranteed (the ring
+	// overwrote it, or it predates this daemon generation).
+	ErrCursorTooOld = "CURSOR_TOO_OLD"
+	// ErrCursorAhead means the requested after=N cursor is above the
+	// session's current canonical event cursor — a cursor from the future
+	// is never established as a subscription.
+	ErrCursorAhead = "CURSOR_AHEAD"
+	// ErrHistoryRecordTooLarge means a canonical durable record itself
+	// exceeds the bounded history-page byte budget; the transcript is
+	// intact but cannot be served within the response bound.
+	ErrHistoryRecordTooLarge = "HISTORY_RECORD_TOO_LARGE"
+	ErrShuttingDown          = "DAEMON_SHUTTING_DOWN"
+	ErrInternal              = "INTERNAL"
+)
+
+// Canonical size bounds. These are part of the wire contract and are used
+// identically by event publication, the NDJSON event server, and the
+// canonical client scanner — an event that cannot be decoded by the
+// canonical client must never be published.
+const (
+	// MaxEventFrameBytes bounds one canonical NDJSON event frame
+	// (4 MiB). Oversized publication fails explicitly before any
+	// subscriber can receive an undecodable frame.
+	MaxEventFrameBytes = 4 << 20
+	// HistoryPageMaxBytes bounds one transcript page response (8 MiB,
+	// deliberately above MaxEventFrameBytes so any validly published
+	// record always fits a page).
+	HistoryPageMaxBytes = 8 << 20
 )
 
 // ErrorBody is the single error envelope for every failed request.
@@ -108,9 +134,18 @@ type SessionList struct {
 
 // TranscriptPage is the response of GET /v1/sessions/{key}/transcript.
 // Records are durable transcript records, not rendered rows.
+//
+// ThroughSeq is the canonical event cursor at snapshot time — the exact
+// seq a client subscribes after (events?after=throughSeq) to continue
+// with no gap. It is NOT the last durable record seq: transient events
+// and reserved sequence blocks advance the cursor beyond durable
+// records, and those seq values can never be replayed.
 type TranscriptPage struct {
 	ThroughSeq uint64         `json:"throughSeq"`
 	Records    []store.Record `json:"records"`
+	// HasMoreBefore reports that older durable records exist beyond the
+	// returned window (count or byte bound reached).
+	HasMoreBefore bool `json:"hasMoreBefore"`
 }
 
 // Limits for the transcript endpoint.

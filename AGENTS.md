@@ -25,6 +25,15 @@ no terminal emulator, no xterm dependency in the production core.
 - Canonical session events carry a per-session monotonic uint64 seq;
   transient events consume seq without being persisted, so sequence
   space is durably reserved in blocks (`SeqHighWatermark`).
+- The canonical event cursor is what history snapshots hand to clients:
+  after a restart it is the persisted watermark, NOT the last durable
+  record. Exact replay is gated by an explicit replay floor
+  (`replayFloor <= after <= cursor`); below it is `CURSOR_TOO_OLD`, above
+  it is `CURSOR_AHEAD`.
+- COLD sessions are cheap: event state holds no transcript file
+  descriptors (open → work → close) and the replay ring is allocated
+  lazily on first publish. One canonical NDJSON frame bound (4 MiB) is
+  shared by publication, the event server, and the client scanner.
 - Product target: **Linux, macOS, Windows**.
 
 ## Current implementation status
@@ -45,10 +54,12 @@ IMPLEMENTED:
   fail-closed client validation, owner-only removal.
 - Per-daemon Bearer auth on every endpoint (constant-time compare).
 - NDJSON canonical event-stream foundation (`internal/events`):
-  per-session seq allocator with durable block reservation, bounded
-  replay ring, bounded subscribers with deterministic eviction,
-  `after=N` replay, explicit `CURSOR_TOO_OLD`.
-- Transcript history endpoint with server-side limit bounds.
+  per-session seq allocator with durable block reservation, exact
+  history-cursor snapshots, explicit replay floor, lazily allocated
+  bounded replay ring, bounded subscribers with deterministic eviction,
+  `after=N` replay, `CURSOR_TOO_OLD` / `CURSOR_AHEAD`.
+- Transcript history endpoint with server-side record-count AND byte
+  bounds (`hasMoreBefore`), never an unbounded response.
 
 NOT YET IMPLEMENTED:
 

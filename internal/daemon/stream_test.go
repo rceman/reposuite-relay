@@ -21,6 +21,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/paths"
+	"github.com/rceman/reposuite-relay/internal/store"
 )
 
 // serveStreamer creates one fixture session and returns its event state.
@@ -129,6 +130,147 @@ func TestEventStreamAuthRequired(t *testing.T) {
 	}
 }
 
+// TestEventStreamCursorAhead: a cursor above the current canonical event
+// cursor is refused deterministically — including the maximum uint64 —
+// and never registers a subscriber.
+func TestEventStreamCursorAhead(t *testing.T) {
+	d, _, c, _ := startInProcess(t, nil)
+	evs := serveStreamer(t, d, c)
+	ctx, cancel := tctx(t)
+	defer cancel()
+
+	// Fresh session: cursor is 0, so after=1 is from the future.
+	_, err := c.Events(ctx, "streamer", 1)
+	var ae *client.APIError
+	if !errors.As(err, &ae) || ae.Code != api.ErrCursorAhead {
+		t.Fatalf("want CURSOR_AHEAD, got %v", err)
+	}
+	if _, err := c.Events(ctx, "streamer", ^uint64(0)); !errors.As(err, &ae) || ae.Code != api.ErrCursorAhead {
+		t.Fatalf("want CURSOR_AHEAD for MaxUint64, got %v", err)
+	}
+	if evs.SubscriberCount() != 0 {
+		t.Fatal("rejected cursor registered a subscriber")
+	}
+	// At the cursor exactly is valid (live-only subscription).
+	stream, err := c.Events(ctx, "streamer", evs.Cursor())
+	if err != nil {
+		t.Fatalf("subscribe at cursor: %v", err)
+	}
+	stream.Close()
+}
+
+// TestRestartHistoryCursorOverHTTP is the restart replay regression end
+// to end: durable seq 1 + transient seq 2 in generation 1; after restart
+// the transcript endpoint reports throughSeq == the persisted watermark,
+// the live subscription at that cursor works, the old durable cursor is
+// CURSOR_TOO_OLD, and the future cursor is CURSOR_AHEAD.
+func TestRestartHistoryCursorOverHTTP(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	root := filepath.Join(base, "rs")
+	for _, dir := range []string{home, root} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := paths.Resolve(home, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Generation 1.
+	d1, err := Start(p, Options{SelfExe: "/bin/true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served1 := make(chan error, 1)
+	go func() { served1 <- d1.Serve() }()
+	c1 := waitReady(t, p)
+	evs1 := serveStreamer(t, d1, c1)
+	if _, err := evs1.PublishDurable("message.user", json.RawMessage(`{"text":"hi"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evs1.PublishTransient("message.agent.delta", json.RawMessage(`{"chunk":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := d1.registry.Get("streamer")
+	if !ok {
+		t.Fatal("session missing")
+	}
+	persisted := m.Session.SeqHighWatermark
+	d1.Shutdown()
+	<-served1
+
+	// Generation 2: same durable session, fresh event state.
+	d2, err := Start(p, Options{SelfExe: "/bin/true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served2 := make(chan error, 1)
+	go func() { served2 <- d2.Serve() }()
+	defer func() { d2.Shutdown(); <-served2 }()
+	c2 := waitReady(t, p)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	page, err := c2.Transcript(ctx, "streamer", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.ThroughSeq != persisted {
+		t.Fatalf("throughSeq = %d, want persisted watermark %d", page.ThroughSeq, persisted)
+	}
+	if len(page.Records) != 1 || page.Records[0].Seq != 1 {
+		t.Fatalf("records = %+v", page.Records)
+	}
+	if page.HasMoreBefore {
+		t.Fatal("single record must not report more-before")
+	}
+
+	// Live subscription at the snapshot cursor: exact and gap-free.
+	stream, err := c2.Events(ctx, "streamer", page.ThroughSeq)
+	if err != nil {
+		t.Fatalf("subscribe at snapshot cursor: %v", err)
+	}
+	defer stream.Close()
+	m2, ok := d2.registry.Get("streamer")
+	if !ok {
+		t.Fatal("session missing after restart")
+	}
+	evs2, ok := d2.broker.Get(m2.Session.ID)
+	if !ok {
+		t.Fatal("event state missing after restart")
+	}
+	next, err := evs2.PublishTransient("message.agent.delta", json.RawMessage(`{"chunk":"y"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := stream.Next()
+	if err != nil {
+		t.Fatalf("live event after restart: %v", err)
+	}
+	if ev.Seq != next.Seq || ev.Seq <= persisted {
+		t.Fatalf("live seq = %d, next = %d, watermark = %d", ev.Seq, next.Seq, persisted)
+	}
+
+	// The old durable cursor can never be served exactly again.
+	if _, err := c2.Events(ctx, "streamer", 1); !apiErrCode(err, api.ErrCursorTooOld) {
+		t.Fatalf("after=1: want CURSOR_TOO_OLD, got %v", err)
+	}
+	if _, err := c2.Events(ctx, "streamer", evs2.Cursor()+1); !apiErrCode(err, api.ErrCursorAhead) {
+		t.Fatalf("after=cursor+1: want CURSOR_AHEAD, got %v", err)
+	}
+	if _, err := c2.Events(ctx, "streamer", ^uint64(0)); !apiErrCode(err, api.ErrCursorAhead) {
+		t.Fatalf("after=MaxUint64: want CURSOR_AHEAD, got %v", err)
+	}
+}
+
+// apiErrCode reports whether err is an APIError with the given code.
+func apiErrCode(err error, code string) bool {
+	var ae *client.APIError
+	return errors.As(err, &ae) && ae.Code == code
+}
+
 // TestEventStreamCursorTooOld: an unreplayable cursor is a normal JSON
 // error before any streaming begins.
 func TestEventStreamCursorTooOld(t *testing.T) {
@@ -187,6 +329,32 @@ func TestTranscriptEndpoint(t *testing.T) {
 	_, err = c.Transcript(ctx, "nope", 10)
 	if !errors.As(err, &ae) || ae.Code != api.ErrSessionNotFound {
 		t.Fatalf("missing session: %v", err)
+	}
+	// Count-truncated pages report more-before.
+	page, err = c.Transcript(ctx, "streamer", 2)
+	if err != nil || !page.HasMoreBefore || len(page.Records) != 2 {
+		t.Fatalf("truncated page: %+v err=%v", page, err)
+	}
+
+	// A canonical record that alone exceeds the page byte budget is an
+	// explicit bounded error, not an unbounded response.
+	rec := store.Record{
+		Version: store.RecordVersion, Seq: page.ThroughSeq + 1, Type: "message.agent.completed",
+		At:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"blob":"` + strings.Repeat("x", api.HistoryPageMaxBytes+1024) + `"}`),
+	}
+	tr, err := d.store.Transcript(evs.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Append(rec); err != nil {
+		tr.Close()
+		t.Fatal(err)
+	}
+	tr.Close()
+	_, err = c.Transcript(ctx, "streamer", 10)
+	if !errors.As(err, &ae) || ae.Code != api.ErrHistoryRecordTooLarge {
+		t.Fatalf("oversized record: want HISTORY_RECORD_TOO_LARGE, got %v", err)
 	}
 }
 

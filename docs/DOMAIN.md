@@ -58,6 +58,12 @@ conceptually `warmGrace`, `coldResumeSupported`, `sleepBlockers`. No
 universal idle timeout exists; defaults derive from measured PSS and
 spawn/resume/cold-prompt latency.
 
+**COLD resource model** *(current)* — a COLD session costs bookkeeping
+only: event state retains no transcript file descriptors (operations
+open → work → close) and the bounded replay ring is allocated lazily on
+first publish. A daemon restoring 1000 durable sessions holds no
+per-session descriptors and no replay rings.
+
 **COLD** *(target)* — a runtime (or bound session state) with **zero**
 harness resources: no process, no sockets, ~0 RAM. Cold sleep is not
 suspension; the runtime is gone and is re-created on wake.
@@ -87,6 +93,29 @@ monotonic uint64 assigned under the session lock. Durable events are
 appended to the transcript **before** the seq is observable to any
 subscriber. Transient events consume seq without being persisted, so a
 restarted daemon cannot recompute the next seq from the transcript.
+
+**Event cursor** *(current)* — the highest seq consumed in the current
+daemon generation; after a restart it IS the persisted
+`SeqHighWatermark`. History snapshots return it as `throughSeq`: the
+cursor a client subscribes after (`events?after=throughSeq`) for a
+gap-free cutover. It is deliberately not the last durable record seq —
+transient events and reserved blocks push it beyond durable records, and
+those seq values can never be replayed.
+
+**Replay floor** *(current)* — the explicit boundary below which exact
+replay cannot be guaranteed. It starts at the persisted watermark
+(everything at or below belongs to previous generations) and advances
+when the bounded replay ring overwrites an event. Exact subscription
+requires `replayFloor <= after <= cursor`; below the floor the request is
+refused with `CURSOR_TOO_OLD`, above the cursor with `CURSOR_AHEAD` —
+never with silent gaps or `+1` arithmetic.
+
+**Frame/page bounds** *(current)* — one canonical NDJSON frame bound
+(4 MiB) is enforced identically at publication, by the event server, and
+by the client scanner. Transcript pages are bounded by record count AND
+source bytes with `hasMoreBefore` reporting truncation; a single record
+larger than the page budget fails explicitly rather than allocating an
+unbounded response.
 
 **SeqHighWatermark** *(current)* — durable reservation of sequence
 space on `RelaySession` (persisted in `session.json`). A daemon reserves
