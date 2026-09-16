@@ -123,11 +123,12 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	}
 	firstTurn := cur != nil && cur.firstTurn
 	nativeID := st.nativeID
+	materialized := st.materialized
 	a.mu.Unlock()
 
 	// A completed first turn proves the native session is materialized:
 	// only now is the exact native identity persisted.
-	if p.Turn.Status == "completed" && firstTurn && nativeID != "" && !st.materialized {
+	if p.Turn.Status == "completed" && firstTurn && nativeID != "" && !materialized {
 		idle := session.StateIdle
 		if err := a.deps.Materialize(m, SessionUpdate{
 			NativeSessionID: &nativeID,

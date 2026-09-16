@@ -121,16 +121,24 @@ func (a *Adapter) installHandlers(srv *Server) {
 // with the process, while a materialized session keeps its exact durable
 // native identity for the next resume.
 func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) {
+	type boundSession struct {
+		st      *sessState
+		current *activeTurn
+	}
 	a.mu.Lock()
 	srv := a.servers[key]
 	delete(a.servers, key)
-	affected := make([]*sessState, 0, len(a.sessions))
+	affected := make([]boundSession, 0, len(a.sessions))
 	for _, st := range a.sessions {
 		if st.liveKey == key {
-			affected = append(affected, st)
+			// Capture the in-flight turn under the lock: it is the turn
+			// this generation owned, and it must not be re-read after a
+			// concurrent prompt has started the next generation.
+			affected = append(affected, boundSession{st: st, current: st.current})
 		}
 	}
-	for _, st := range affected {
+	for _, entry := range affected {
+		st := entry.st
 		st.liveKey = ""
 		st.nativeID = "" // the in-memory thread died with the process
 		if st.materialized {
@@ -147,7 +155,8 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			detail = err.Error()
 		}
 	}
-	for _, st := range affected {
+	for _, entry := range affected {
+		st, current := entry.st, entry.current
 		m := st.m
 		if !unexpected {
 			// Deliberate stop: no in-flight turn can exist (it is a sleep
@@ -161,9 +170,9 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			RuntimeID: rt.ID,
 			Reason:    detail,
 		})
-		if st.current != nil {
+		if current != nil {
 			_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
-				TurnID: st.current.turnID,
+				TurnID: current.turnID,
 				Error:  "runtime exited: " + detail,
 			})
 		}
