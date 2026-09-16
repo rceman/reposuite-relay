@@ -162,10 +162,29 @@ func (a *Adapter) Track(m *session.Managed) {
 		st.m = m
 	}
 	snap := m.Snapshot()
-	st.materialized = snap.NativeSessionID != ""
+	st.materialized = validNativeID(snap.NativeSessionID)
 	if st.nativeID == "" {
 		st.nativeID = snap.NativeSessionID // exact identity from disk
 	}
+}
+
+// validNativeID reports whether a durable native session identity is
+// plausible enough to resume. A malformed value is never sent to the
+// harness and never substituted: it fails closed as
+// ErrNativeSessionLost (Relay never guesses a native session).
+func validNativeID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.' || r == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Forget drops a session's adapter state (durable delete).
@@ -535,21 +554,26 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 		return PromptResult{}, err
 	}
 
+	// Reuse the live thread when this exact runtime generation already
+	// owns it; otherwise start a new thread or resume the exact recorded
+	// native session. Validated BEFORE any runtime is spawned: a malformed
+	// durable identity must not wake a process at all.
+	a.mu.Lock()
+	threadID := st.nativeID
+	live := st.liveKey == RuntimeKey
+	a.mu.Unlock()
+	resume := !live && threadID != ""
+	if resume && !validNativeID(threadID) {
+		return fail(fmt.Errorf("%w: malformed native session id %q",
+			ErrNativeSessionLost, threadID))
+	}
+
 	srv, err := a.ensureRuntime(ctx, m.Session.Cwd)
 	if err != nil {
 		return fail(err)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-
-	// Reuse the live thread when this exact runtime generation already
-	// owns it; otherwise start a new thread or resume the exact recorded
-	// native session.
-	a.mu.Lock()
-	threadID := st.nativeID
-	live := st.liveKey == RuntimeKey
-	resume := !live && threadID != ""
-	a.mu.Unlock()
 
 	approval := ApprovalNever
 	var threadModel string
@@ -832,7 +856,9 @@ func (a *Adapter) handleApproval(_ context.Context, _ int64, params json.RawMess
 	_ = json.Unmarshal(params, &probe)
 	m, st := a.sessionByThread(probe.ThreadID)
 	if st != nil {
-		_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
+		// Transient, not durable: declining does not fail the turn, but a
+		// pinned bypass that the harness ignores must be visible live.
+		_ = a.publishTransient(m, api.EventHarnessError, turnEventPayload{
 			TurnID: probe.TurnID,
 			Error:  "native approval request received despite approvalPolicy=never; declined",
 		})

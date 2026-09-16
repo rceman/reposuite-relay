@@ -748,3 +748,29 @@ func TestConfigChangeIsAcceptedAndDurable(t *testing.T) {
 		t.Fatalf("thread started with model %q, want m1", started.Model)
 	}
 }
+
+// TestMalformedNativeIdentityFailsClosed: a durable native identity that
+// is not a plausible thread id is never sent to the harness — the prompt
+// fails with ErrNativeSessionLost instead of resuming something else.
+func TestMalformedNativeIdentityFailsClosed(t *testing.T) {
+	e := newEnv(t, "happy")
+	m := e.newSession("malformed", t.TempDir())
+	m.Session.NativeSessionID = "not a thread id\n"
+	if err := e.store.Save(m.Session); err != nil {
+		t.Fatal(err)
+	}
+	e.adapter.Track(m)
+	_, err := e.adapter.Prompt(context.Background(), m, "hello", "", "")
+	if !errors.Is(err, ErrNativeSessionLost) {
+		t.Fatalf("err = %v, want ErrNativeSessionLost", err)
+	}
+	if e.sup.Len() != 0 {
+		t.Fatal("a malformed identity must not spawn a runtime")
+	}
+	if p := e.durablePayload(m.Session.ID, api.EventTurnFailed); p == nil {
+		t.Fatal("no durable turn.failed record")
+	}
+	if got := e.reload(m.Session.ID); got.NativeSessionID != "not a thread id\n" {
+		t.Fatalf("durable identity was rewritten: %q", got.NativeSessionID)
+	}
+}
