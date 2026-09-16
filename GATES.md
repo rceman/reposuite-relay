@@ -33,8 +33,23 @@ toolchain: exactly **go1.27.1**.
 | 24 | Process tree + COLD projection | covered by gate 5 — stopping a Codex runtime reaps the app-server and its own child process, the session survives COLD with its native identity, and a live event subscriber on a COLD session never wakes or retains a runtime |
 | 25 | Native server privacy | covered by gate 5 — driving a real turn opens no new listening socket (Linux `/proc/self/net/tcp*`), the session DTO carries no harness transport/credential field, and no API route proxies the native app-server |
 
+| 26 | Go file token budget | `scripts/check-go-files.sh --all` — every hand-written tracked/untracked Go file is <=3000 o200k_base tokens (complete file: code, comments, strings, tests). Generated files with the standard `// Code generated ... DO NOT EDIT.` header are excluded; no hand-written allowlist, no baseline file |
+| 27 | Structural Go formatting | `scripts/check-go-format.sh --all` — package-aware gofmt-struct is clean over the whole tree (multi-field keyed struct literals vertical); `gofmt -l .` is empty (gate 2) |
+| 28 | Harness namespace topology | vendor-specific adapters live under `internal/harness/<name>`; the old `internal/codex` path is absent from code and current authority docs (`grep -rn "internal/codex"` returns nothing outside historical research notes) |
+| 29 | Tools module | `cd tools && go mod tidy` (no diff) + `go vet ./...` + `go test -count=1 ./...` + `go test -race -count=1 ./...` + `go build ./...`; root `go.mod` still has zero `require` and zero `replace` (gate 8) |
+
 ## Notes
 
+- Gates 26-28 are also available in a fast changed-file form:
+  `scripts/check-go-files.sh [BASE]` (default `BASE=HEAD`) checks gofmt +
+  gofmt-struct + token budget for changed and untracked Go files only, and
+  is the gate to run after every coding task. `--all` is authoritative for
+  CI and final acceptance.
+- The token gate is exact (`o200k_base` via tiktoken-go in the nested
+  `tools/` module, never a production dependency) and initializes the
+  tokenizer once per scan with a bounded worker pool; the encoding payload
+  is cached at `$REPOSUITE_TOKEN_CACHE_DIR` (default
+  `$XDG_CACHE_HOME/reposuite-relay/tiktoken`).
 - Terminal/PTY regression gates were removed in Task A1 — the terminal
   engine and PTY layer are superseded (ADR-005) and no longer part of
   production. Historical evidence: `docs/research/GO_TERMINAL_SPIKE.md`

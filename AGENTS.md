@@ -60,14 +60,22 @@ IMPLEMENTED:
   `after=N` replay, `CURSOR_TOO_OLD` / `CURSOR_AHEAD`.
 - Transcript history endpoint with server-side record-count AND byte
   bounds (`hasMoreBefore`), never an unbounded response.
+- Native harness adapters under `internal/harness/<name>`: the Codex
+  app-server adapter (`internal/harness/codex`) with stdio JSON-RPC,
+  thread/turn handling, requested-input mapping, and the deterministic
+  fake app-server test seam.
+- `internal/runtime` supervisor: one shared or dedicated harness process
+  per runtime key, claim-first creation, activity/sleep-blocker policy,
+  bounded process-group teardown, runtime-gone notification.
+- Runtime wake from COLD and the native session control surface
+  (`serve codex`, `prompt`, `status`, `config`, `input`, `cancel`,
+  `stop`) over the loopback HTTP API and CLI.
 
 NOT YET IMPLEMENTED:
 
-- Codex adapter (app-server), Devin/OpenCode adapters.
-- Real agent-message publication (no harness produces canonical events
-  yet; the broker is exercised synthetically in tests).
+- Devin/OpenCode adapters; Codex approval flows and `turn/steer`;
+  rate-limit surfaces.
 - TUI, Gateway/WSS bridge.
-- Runtime wake from COLD, RuntimeSupervisor policy.
 - Cross-platform singleton locking (currently Linux `flock`; the
   invariant is one relayd per state root, fail-closed).
 
@@ -109,7 +117,7 @@ report each as PASS/FAIL/N/A with evidence.
 ## Harness adapter invariants (ADR-005, implemented)
 
 - The daemon runs only its own built-in harness commands. Clients never
-  supply executables or arguments; `internal/codex` resolves the
+  supply executables or arguments; `internal/harness/codex` resolves the
   installed `codex` CLI itself and runs `codex app-server`.
 - Native harness servers are private to relayd: never exposed on a
   socket, descriptor, or API surface.
@@ -143,6 +151,41 @@ report each as PASS/FAIL/N/A with evidence.
   `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `die-on-turn`,
   `resume-error`, `stubborn`, `child`). Hidden modes are never listed in
   help and never part of the public CLI contract.
+
+## Repository hygiene
+
+- **Harness adapters live under `internal/harness/<name>`.** Everything
+  that speaks a vendor's native protocol (DTOs, JSON-RPC, thread/turn
+  handling, process adapter, fake protocol, adapter tests) belongs to
+  that package. `internal/harness` is a namespace: no shared abstraction
+  until two adapters need the same concrete contract. Generic
+  responsibility stays generic — `internal/runtime` (process
+  supervision), `internal/events`, `internal/session`, `internal/store`,
+  `internal/daemon` (orchestration + HTTP).
+- **Hand-written Go file hard limit: <=3000 o200k_base tokens**, counting
+  the complete file (code, comments, strings, tests, tooling). Files with
+  the standard `// Code generated ... DO NOT EDIT.` header are excluded;
+  there is no hand-written allowlist. Split by responsibility when a file
+  grows past the limit — never delete useful comments, minify code, or add
+  exemption comments to fit. Substantial files should land around
+  1000-2500 tokens to leave headroom.
+- **Normal formatting: `gofmt`. Structural formatting: `gofmt-struct`** —
+  multi-field keyed struct literals are written one field per line; maps,
+  arrays, slices, unkeyed, and single-field literals are untouched.
+- **Fast changed-file gate:** `scripts/check-go-files.sh [BASE]` (default
+  `HEAD`) — gofmt + gofmt-struct + token budget over changed and untracked
+  Go files.
+- **Full gate (authoritative):** `scripts/check-go-files.sh --all`
+  (`scripts/check-go-format.sh --all` for structure only). CI never
+  rewrites; run `scripts/check-go-format.sh --write --all` locally.
+- Exact counting lives in the nested developer module `tools/`
+  (tiktoken-go): production stays stdlib-only and never imports `tools/`.
+  The encoding payload is cached once at `$REPOSUITE_TOKEN_CACHE_DIR`
+  (default `$XDG_CACHE_HOME/reposuite-relay/tiktoken`), so repeated gates
+  do no network work.
+
+Why: bounded agent context, cohesive source ownership, easier review, and
+no giant accumulation files.
 
 ## Architecture invariants
 

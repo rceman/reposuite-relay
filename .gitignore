@@ -5,3 +5,6 @@ coverage.*
 
 # Local environment
 .env
+
+# Local build output
+/reposuite-relay

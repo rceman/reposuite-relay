@@ -354,7 +354,7 @@ permanently superior.
 
 ## 7f. Implemented adapter semantics (Task A2 vertical slice)
 
-`internal/codex` is the first real native adapter, built against the
+`internal/harness/codex` is the first real native adapter, built against the
 verified §1 surface and gated by a deterministic fake app-server (no
 model call, no network, no quota). Implementation notes that refine the
 design above:

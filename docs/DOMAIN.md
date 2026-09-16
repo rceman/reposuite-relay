@@ -42,7 +42,7 @@ app-server); sleep authority is per-runtime.
 
 **HarnessAdapter** *(current)* — the protocol-specific bridge between a
 native harness protocol and Relay's canonical session/event model.
-Implemented: `internal/codex` (Codex app-server over stdio). Planned:
+Implemented: `internal/harness/codex` (Codex app-server over stdio). Planned:
 OpenCode ACP, Devin ACP. An adapter owns only daemon-memory state; it
 never writes durable session metadata itself (the daemon's `Materialize`
 hook does that under `MetaMu`).

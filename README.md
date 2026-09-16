@@ -94,10 +94,13 @@ cross-platform singleton locking.
 - `internal/store` — durable session/transcript filesystem store
 - `internal/runtime` — `RuntimeSupervisor`: runtime ownership, bindings,
   activity, sleep blockers, bounded process-tree teardown
-- `internal/codex` — Codex app-server adapter (JSON-RPC, protocol types,
+- `internal/harness/codex` — Codex app-server adapter (JSON-RPC, protocol types,
   event mapping, deterministic fake app-server for tests)
 - `internal/fixture` — deterministic fixture harness child
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
+- `tools/` — nested developer-tool module: exact `o200k_base` token
+  counter and `gofmt-struct` (never imported by production)
+- `scripts/` — Go hygiene gates (`check-go-files.sh`, `check-go-format.sh`)
 - `docs/` — domain vocabulary, ADRs, feasibility research
 - `testdata/` — historical captured research data (terminal spike)
 
@@ -106,7 +109,10 @@ cross-platform singleton locking.
 See `AGENTS.md` and `GATES.md`. Canonical gates:
 
 ```bash
+scripts/check-go-files.sh HEAD   # fast gate: changed + untracked Go files
+scripts/check-go-files.sh --all  # full gate: gofmt + gofmt-struct + <=3000 tokens
 go vet ./... && go test ./... && go test -race -count=1 ./... && go build ./...
+(cd tools && go test ./... && go test -race ./... && go build ./...)
 ```
 
 Relay state defaults to `~/.reposuite/relay`
