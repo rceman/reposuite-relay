@@ -5,7 +5,8 @@
 //	RepoSuite root   = $REPOSUITE_HOME (cleaned) or <user home>/.reposuite
 //	Relay root       = <RepoSuite root>/relay
 //	Run directory    = <Relay root>/run
-//	Daemon socket    = <Run dir>/relayd.sock   (future; not created here)
+//	Daemon descriptor= <Run dir>/daemon.json  (0600, local authority)
+//	Daemon lock      = <Run dir>/relayd.lock
 //	Log directory    = <Relay root>/logs
 //	Sessions store   = <Relay root>/sessions/<session-id>/
 //
@@ -86,8 +87,14 @@ func (p Paths) RelayRoot() string { return filepath.Join(p.repoSuiteRoot, "relay
 // RunDir holds runtime artifacts such as the daemon socket.
 func (p Paths) RunDir() string { return filepath.Join(p.RelayRoot(), "run") }
 
-// DaemonSocket is the future reposuite-relayd socket path.
-func (p Paths) DaemonSocket() string { return filepath.Join(p.RunDir(), "relayd.sock") }
+// DaemonDescriptor is the runtime descriptor path (ADR-006): a
+// user-private file publishing the loopback endpoint, instance identity,
+// and local bearer token of the current daemon generation.
+func (p Paths) DaemonDescriptor() string { return filepath.Join(p.RunDir(), "daemon.json") }
+
+// DaemonLock is the singleton ownership lock file (current Linux
+// implementation detail; the invariant is one daemon per state root).
+func (p Paths) DaemonLock() string { return filepath.Join(p.RunDir(), "relayd.lock") }
 
 // LogDir holds Relay logs.
 func (p Paths) LogDir() string { return filepath.Join(p.RelayRoot(), "logs") }

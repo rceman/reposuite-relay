@@ -33,10 +33,11 @@ func TestCustomRepoSuiteHome(t *testing.T) {
 func TestRelayPaths(t *testing.T) {
 	p := mustResolve(t, "/h", "")
 	cases := map[string]string{
-		p.RelayRoot():    "/h/.reposuite/relay",
-		p.RunDir():       "/h/.reposuite/relay/run",
-		p.DaemonSocket(): "/h/.reposuite/relay/run/relayd.sock",
-		p.LogDir():       "/h/.reposuite/relay/logs",
+		p.RelayRoot():        "/h/.reposuite/relay",
+		p.RunDir():           "/h/.reposuite/relay/run",
+		p.DaemonDescriptor(): "/h/.reposuite/relay/run/daemon.json",
+		p.DaemonLock():       "/h/.reposuite/relay/run/relayd.lock",
+		p.LogDir():           "/h/.reposuite/relay/logs",
 	}
 	for got, want := range cases {
 		if got != want {
@@ -101,7 +102,7 @@ func TestNoAirelayPaths(t *testing.T) {
 	for _, s := range []string{"/dev/null", "/home/x"} {
 		p := mustResolve(t, s, "")
 		for _, path := range []string{
-			p.RepoSuiteRoot(), p.RelayRoot(), p.RunDir(), p.DaemonSocket(), p.LogDir(),
+			p.RepoSuiteRoot(), p.RelayRoot(), p.RunDir(), p.DaemonDescriptor(), p.LogDir(),
 		} {
 			if strings.Contains(path, "airelay") {
 				t.Fatalf("airelay leaked into path %q", path)

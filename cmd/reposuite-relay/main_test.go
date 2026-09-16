@@ -78,7 +78,7 @@ func TestCLI(t *testing.T) {
 	}{
 		{[]string{"version"}, "reposuite-relay 0.1.0-dev", false},
 		{[]string{"help"}, "Usage:", false},
-		{[]string{"paths"}, "daemon_socket:", false},
+		{[]string{"paths"}, "daemon_descriptor:", false},
 		{[]string{"nope"}, "unknown command", true},
 	} {
 		cmd := exec.Command(bin, tc.args...)
@@ -109,8 +109,14 @@ func TestPathsCommandRespectsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v: %s", err, o)
 	}
-	if !strings.Contains(string(o), root+"/relay/run/relayd.sock") {
-		t.Fatalf("socket path wrong:\n%s", o)
+	if !strings.Contains(string(o), root+"/relay/run/daemon.json") {
+		t.Fatalf("descriptor path wrong:\n%s", o)
+	}
+	if !strings.Contains(string(o), root+"/relay/sessions") {
+		t.Fatalf("sessions dir missing:\n%s", o)
+	}
+	if strings.Contains(string(o), "relayd.sock") {
+		t.Fatalf("obsolete socket path advertised:\n%s", o)
 	}
 	if strings.Contains(string(o), "airelay") {
 		t.Fatalf("airelay leaked:\n%s", o)

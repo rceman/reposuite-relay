@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rceman/reposuite-relay/internal/protocol"
+	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/store"
 )
 
@@ -23,7 +23,7 @@ var errInjected = errors.New("injected fault")
 // exists on disk and the next daemon start owns it (no ghost, no
 // duplicate window).
 func TestCreateUncertainHaltsDaemon(t *testing.T) {
-	d, p, c, served := startInProcess(t, func(o *Options) {
+	_, p, c, served := startInProcess(t, func(o *Options) {
 		o.StoreHooks = &store.Hooks{
 			SyncDir: func(dir string) error {
 				if filepath.Base(dir) == "sessions" {
@@ -33,11 +33,8 @@ func TestCreateUncertainHaltsDaemon(t *testing.T) {
 			},
 		}
 	})
-	_ = d
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "ghost", Cwd: "/"})
-	if r.OK || r.Code != protocol.ErrInternal {
-		t.Fatalf("want INTERNAL, got %+v", r)
-	}
+	_, err := serve(t, c, "ghost")
+	wantAPIErr(t, err, api.ErrInternal)
 	// The daemon must halt rather than keep serving with ambiguous state.
 	select {
 	case <-served:
@@ -85,18 +82,17 @@ func TestDeleteCleanupFailureStillDeletes(t *testing.T) {
 			},
 		}
 	})
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "victim", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("serve: %+v", r)
+	if _, err := serve(t, c, "victim"); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
-	r = do(t, c, protocol.Request{Op: protocol.OpStopSession, Key: "victim"})
-	if !r.OK {
-		t.Fatalf("committed delete must succeed despite cleanup failure: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.StopSession(ctx, "victim"); err != nil {
+		t.Fatalf("committed delete must succeed despite cleanup failure: %v", err)
 	}
 	// Registry: gone.
-	r = do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "victim"})
-	if r.OK || r.Code != protocol.ErrSessionNotFound {
-		t.Fatalf("session must be gone: %+v", r)
+	if _, err := c.Status(ctx, "victim"); err == nil {
+		t.Fatal("session must be gone")
 	}
 	// Disk: canonical dir gone (tombstone may remain for recovery).
 	entries, err := os.ReadDir(p.SessionsDir())

@@ -7,7 +7,9 @@ package daemon_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,8 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/paths"
-	"github.com/rceman/reposuite-relay/internal/protocol"
 )
 
 var testBin string
@@ -137,23 +139,61 @@ func stopDaemon(t *testing.T, home, root string) {
 	t.Helper()
 	mustCLI(t, home, root, "daemon", "stop")
 	deadline := time.Now().Add(4 * time.Second)
-	sock := filepath.Join(root, "relay", "run", "relayd.sock")
+	desc := filepath.Join(root, "relay", "run", "daemon.json")
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sock); os.IsNotExist(err) {
+		if _, err := os.Stat(desc); os.IsNotExist(err) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("socket still present after daemon stop")
+	t.Fatal("descriptor still present after daemon stop")
 }
 
-func socketPath(t *testing.T, home, root string) string {
+func descriptorPath(t *testing.T, home, root string) string {
 	t.Helper()
 	p, err := paths.Resolve(home, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.DaemonSocket()
+	return p.DaemonDescriptor()
+}
+
+// readDescriptor loads the runtime descriptor for raw HTTP tests (the
+// token is never printed).
+func readDescriptor(t *testing.T, home, root string) api.Descriptor {
+	t.Helper()
+	raw, err := os.ReadFile(descriptorPath(t, home, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d api.Descriptor
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// rawReq performs one raw HTTP request against the daemon endpoint and
+// returns status + body.
+func rawReq(t *testing.T, d api.Descriptor, method, path, body string, auth bool) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, d.Endpoint+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth {
+		req.Header.Set("Authorization", "Bearer "+d.BearerToken)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("raw request: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(raw)
 }
 
 // TestDaemonAbsentByDefault: no autostart for status/stop.
@@ -248,6 +288,24 @@ func TestSingletonRace(t *testing.T) {
 	if !daemonPIDs[strconv.Itoa(dp)] || count != n {
 		t.Fatalf("daemon status pid=%d count=%d", dp, count)
 	}
+	// Exactly one descriptor generation: every client converged on the
+	// same instance identity and loopback endpoint.
+	desc := readDescriptor(t, home, root)
+	if len(desc.InstanceID) != 32 {
+		t.Fatalf("instanceId malformed: %q", desc.InstanceID)
+	}
+	if !strings.HasPrefix(desc.Endpoint, "http://127.0.0.1:") {
+		t.Fatalf("endpoint not loopback: %q", desc.Endpoint)
+	}
+	if desc.PID != dp {
+		t.Fatalf("descriptor pid=%d status pid=%d", desc.PID, dp)
+	}
+	// Only one daemon process owns the lock; a status command does not
+	// spawn anything new.
+	dp2, _ := daemonStatus(t, home, root)
+	if dp2 != dp {
+		t.Fatalf("daemon status spawned a second daemon: %d -> %d", dp, dp2)
+	}
 	out := mustCLI(t, home, root, "list")
 	for i := 0; i < n; i++ {
 		if !strings.Contains(out, fmt.Sprintf("key=worker_%02d", i)) {
@@ -290,9 +348,10 @@ func TestKeyValidationCLI(t *testing.T) {
 	}
 }
 
-// TestStaleSocketRecovery: a stale Unix socket inode is reclaimed by the
-// daemon lock owner.
-func TestStaleSocketRecovery(t *testing.T) {
+// TestStaleDescriptorRecovery: a crashed daemon leaves a stale descriptor
+// (dead endpoint). A managed command spawns a contender; the lock owner
+// atomically replaces the descriptor with its own generation.
+func TestStaleDescriptorRecovery(t *testing.T) {
 	home, root := testRoot(t)
 	p, err := paths.Resolve(home, root)
 	if err != nil {
@@ -301,24 +360,32 @@ func TestStaleSocketRecovery(t *testing.T) {
 	if err := p.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("unix", p.DaemonSocket())
-	if err != nil {
-		t.Fatal(err)
+	stale := api.Descriptor{
+		Version:     api.DescriptorVersion,
+		InstanceID:  strings.Repeat("a", 32),
+		PID:         999999,
+		Endpoint:    "http://127.0.0.1:1", // nothing listens here
+		BearerToken: strings.Repeat("b", 64),
 	}
-	ln.(*net.UnixListener).SetUnlinkOnClose(false) // keep the inode: dead socket
-	ln.Close()                                     // leaves a stale socket behind
-	if _, err := os.Lstat(p.DaemonSocket()); err != nil {
-		t.Fatalf("stale socket not created: %v", err)
+	raw, _ := json.Marshal(stale)
+	if err := os.WriteFile(p.DaemonDescriptor(), raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	// A managed command must recover and start the daemon.
 	mustCLI(t, home, root, "list")
-	daemonStatus(t, home, root)
+	_, count := daemonStatus(t, home, root)
+	_ = count
+	fresh := readDescriptor(t, home, root)
+	if fresh.InstanceID == stale.InstanceID {
+		t.Fatal("stale descriptor was not replaced by the lock owner")
+	}
 	stopDaemon(t, home, root)
 }
 
-// TestNonSocketCollision: a regular file at relayd.sock is never deleted;
-// startup fails closed.
-func TestNonSocketCollision(t *testing.T) {
+// TestMalformedDescriptorFailsClosed: a corrupt descriptor is never
+// trusted and never silently deleted — the client fails closed as a bad
+// peer rather than sending commands somewhere unknown.
+func TestMalformedDescriptorFailsClosed(t *testing.T) {
 	home, root := testRoot(t)
 	p, err := paths.Resolve(home, root)
 	if err != nil {
@@ -327,104 +394,140 @@ func TestNonSocketCollision(t *testing.T) {
 	if err := p.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	marker := []byte("do not delete me")
-	if err := os.WriteFile(p.DaemonSocket(), marker, 0o644); err != nil {
+	marker := []byte("{not a descriptor")
+	if err := os.WriteFile(p.DaemonDescriptor(), marker, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := cli(t, home, root, "list")
 	if err == nil {
-		t.Fatalf("daemon start must fail on non-socket collision: %s", out)
+		t.Fatalf("malformed descriptor accepted: %s", out)
 	}
-	got, _ := os.ReadFile(p.DaemonSocket())
+	if !strings.Contains(out, "compatible relayd") {
+		t.Fatalf("want fail-closed bad-peer error, got: %s", out)
+	}
+	got, _ := os.ReadFile(p.DaemonDescriptor())
 	if string(got) != string(marker) {
-		t.Fatal("collision file was modified/deleted")
+		t.Fatal("client modified/deleted the descriptor")
+	}
+	// Non-loopback endpoint also fails closed.
+	bad := api.Descriptor{
+		Version: api.DescriptorVersion, InstanceID: strings.Repeat("a", 32),
+		PID: 1234, Endpoint: "http://10.0.0.1:9000", BearerToken: strings.Repeat("b", 64),
+	}
+	raw, _ := json.Marshal(bad)
+	os.WriteFile(p.DaemonDescriptor(), raw, 0o600)
+	out, err = cli(t, home, root, "list")
+	if err == nil || !strings.Contains(out, "loopback") {
+		t.Fatalf("non-loopback descriptor accepted: %s %v", out, err)
 	}
 }
 
 // TestMalformedClient: every bad input gets a bounded response; the daemon
-// stays healthy throughout.
+// stays healthy throughout. Auth is required on every endpoint.
 func TestMalformedClient(t *testing.T) {
 	home, root := testRoot(t)
 	serveKey(t, home, root, "alive-check")
-	sock := socketPath(t, home, root)
-
-	raw := func(t *testing.T, payload []byte) (string, error) {
-		c, err := net.DialTimeout("unix", sock, time.Second)
-		if err != nil {
-			return "", err
-		}
-		defer c.Close()
-		c.SetDeadline(time.Now().Add(6 * time.Second))
-		if _, err := c.Write(payload); err != nil {
-			return "", err
-		}
-		if uc, ok := c.(*net.UnixConn); ok {
-			uc.CloseWrite()
-		}
-		var b strings.Builder
-		buf := make([]byte, 8192)
-		for {
-			n, err := c.Read(buf)
-			b.Write(buf[:n])
-			if err != nil {
-				break
-			}
-		}
-		return b.String(), nil
-	}
+	d := readDescriptor(t, home, root)
 
 	pingOK := func() {
-		out, err := raw(t, []byte(`{"v":1,"op":"ping"}`))
-		if err != nil || !strings.Contains(out, `"ok":true`) {
-			t.Fatalf("daemon unhealthy after malformed input: %v %s", err, out)
+		status, out := rawReq(t, d, http.MethodGet, "/v1/daemon", "", true)
+		if status != 200 || !strings.Contains(out, `"apiVersion":1`) {
+			t.Fatalf("daemon unhealthy after malformed input: %d %s", status, out)
 		}
 	}
 
-	out, _ := raw(t, []byte("{not json"))
-	if !strings.Contains(out, "INVALID_REQUEST") {
-		t.Fatalf("malformed json: %s", out)
+	// Every endpoint requires the bearer token.
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/daemon", ""},
+		{http.MethodGet, "/v1/sessions", ""},
+		{http.MethodGet, "/v1/sessions/alive-check", ""},
+		{http.MethodDelete, "/v1/sessions/alive-check", ""},
+		{http.MethodGet, "/v1/sessions/alive-check/transcript", ""},
+		{http.MethodGet, "/v1/sessions/alive-check/events", ""},
+		{http.MethodPost, "/v1/daemon/shutdown", ""},
+		{http.MethodPost, "/v1/sessions/fixture", `{"key":"x","cwd":"/"}`},
+	} {
+		status, out := rawReq(t, d, tc.method, tc.path, tc.body, false)
+		if status != 401 || !strings.Contains(out, "UNAUTHORIZED") {
+			t.Fatalf("%s %s without auth: %d %s", tc.method, tc.path, status, out)
+		}
+	}
+	// Wrong token is also 401.
+	req, _ := http.NewRequest(http.MethodGet, d.Endpoint+"/v1/daemon", nil)
+	req.Header.Set("Authorization", "Bearer "+strings.Repeat("0", 64))
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Fatalf("wrong token: %d", resp.StatusCode)
+		}
 	}
 	pingOK()
 
-	out, _ = raw(t, []byte(`{"v":1,"op":"nope"}`))
-	if !strings.Contains(out, "INVALID_REQUEST") {
-		t.Fatalf("unknown op: %s", out)
+	// Malformed JSON body.
+	status, out := rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", "{not json", true)
+	if status != 400 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("malformed json: %d %s", status, out)
 	}
 	pingOK()
 
-	out, _ = raw(t, []byte(`{"v":2,"op":"ping"}`))
-	if !strings.Contains(out, "PROTOCOL_MISMATCH") {
-		t.Fatalf("bad version: %s", out)
+	// Unknown field / trailing value.
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"x","cwd":"/","exec":"rm"}`, true)
+	if status != 400 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("unknown field: %d %s", status, out)
+	}
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"x","cwd":"/"} {"key":"y"}`, true)
+	if status != 400 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("trailing value: %d %s", status, out)
+	}
+	// Relative cwd.
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"rel","cwd":"relative/path"}`, true)
+	if status != 400 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("relative cwd: %d %s", status, out)
+	}
+	// Invalid key.
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"bad key!","cwd":"/"}`, true)
+	if status != 400 || !strings.Contains(out, "INVALID_SESSION_KEY") {
+		t.Fatalf("bad key: %d %s", status, out)
 	}
 	pingOK()
 
-	// Oversized request.
-	big := append([]byte(`{"v":1,"op":"x","key":"`), []byte(strings.Repeat("A", 70*1024))...)
-	big = append(big, []byte(`"}`)...)
-	out, _ = raw(t, big)
-	if !strings.Contains(out, "INVALID_REQUEST") {
-		t.Fatalf("oversized: %s", out[:min(200, len(out))])
+	// Oversized body (> 64 KiB).
+	big := `{"key":"` + strings.Repeat("A", 70*1024) + `","cwd":"/"}`
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", big, true)
+	if status != 400 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("oversized: %d %.200s", status, out)
 	}
 	pingOK()
 
-	// Idle client: connect, send nothing — daemon must close it via deadline.
-	c, err := net.DialTimeout("unix", sock, time.Second)
+	// Unknown route / wrong method.
+	status, _ = rawReq(t, d, http.MethodGet, "/v1/nope", "", true)
+	if status != 404 {
+		t.Fatalf("unknown route: %d", status)
+	}
+	status, out = rawReq(t, d, http.MethodPatch, "/v1/sessions/alive-check", "", true)
+	if status != 405 || !strings.Contains(out, "INVALID_REQUEST") {
+		t.Fatalf("method not allowed: %d %s", status, out)
+	}
+	pingOK()
+
+	// Idle client: connect, send nothing — daemon closes it via the header
+	// deadline (never delays shutdown for it either).
+	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(d.Endpoint, "http://"), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.SetReadDeadline(time.Now().Add(8 * time.Second))
-	_, err = c.Read(make([]byte, 1))
-	c.Close()
-	if err == nil {
+	conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("idle connection was not closed by deadline")
 	}
+	conn.Close()
 	pingOK()
 
 	stopDaemon(t, home, root)
 }
 
 // TestDaemonShutdown: graceful stop kills all fixture children and
-// removes the socket. Durable RelaySessions survive: a later `list`
+// removes the descriptor. Durable RelaySessions survive: a later `list`
 // autostarts a fresh daemon that restores them COLD (no runtime, no PID).
 func TestDaemonShutdown(t *testing.T) {
 	home, root := testRoot(t)
@@ -441,9 +544,9 @@ func TestDaemonShutdown(t *testing.T) {
 		waitDead(t, pid, 3*time.Second)
 	}
 	waitDead(t, dp, 3*time.Second)
-	sock := socketPath(t, home, root)
-	if _, err := os.Stat(sock); !os.IsNotExist(err) {
-		t.Fatal("socket not removed")
+	desc := descriptorPath(t, home, root)
+	if _, err := os.Stat(desc); !os.IsNotExist(err) {
+		t.Fatal("descriptor not removed")
 	}
 	if out, err := cli(t, home, root, "daemon", "status"); err == nil {
 		t.Fatalf("daemon status after stop must fail: %s", out)
@@ -481,12 +584,12 @@ func TestForceKillDaemonOrphans(t *testing.T) {
 	waitDead(t, dp, 3*time.Second)
 	waitDead(t, fixturePID, 3*time.Second)
 
-	// The stale socket is recovered by the next managed command.
+	// The stale descriptor is recovered by the next managed command.
 	mustCLI(t, home, root, "list")
 	stopDaemon(t, home, root)
 }
 
-// TestPermissions: private modes on state dirs, socket, lock.
+// TestPermissions: private modes on state dirs, descriptor, lock.
 func TestPermissions(t *testing.T) {
 	home, root := testRoot(t)
 	serveKey(t, home, root, "perm")
@@ -505,8 +608,9 @@ func TestPermissions(t *testing.T) {
 	check(filepath.Join(root, "relay"), 0o700)
 	check(filepath.Join(root, "relay", "run"), 0o700)
 	check(filepath.Join(root, "relay", "logs"), 0o700)
-	check(filepath.Join(root, "relay", "run", "relayd.sock"), 0o600)
+	check(filepath.Join(root, "relay", "run", "daemon.json"), 0o600)
 	check(filepath.Join(root, "relay", "run", "relayd.lock"), 0o600)
+	check(filepath.Join(root, "relay", "sessions"), 0o700)
 }
 
 // TestRelativeHomeRejected: relative REPOSUITE_HOME fails before any
@@ -592,7 +696,7 @@ func TestSmokeSequence(t *testing.T) {
 	_ = dp
 }
 
-// TestDaemonPidAndVersion: ping exposes pid + protocol version.
+// TestDaemonPidAndVersion: daemon status exposes pid + API version.
 func TestDaemonPidAndVersion(t *testing.T) {
 	home, root := testRoot(t)
 	serveKey(t, home, root, "x")
@@ -601,47 +705,41 @@ func TestDaemonPidAndVersion(t *testing.T) {
 	if pid <= 1 || !alive(pid) {
 		t.Fatalf("daemon pid %d not alive", pid)
 	}
-	if v := field(t, out, "protocolVersion"); v != "1" {
-		t.Fatalf("protocolVersion=%s", v)
+	if v := field(t, out, "apiVersion"); v != "1" {
+		t.Fatalf("apiVersion=%s", v)
 	}
 	stopDaemon(t, home, root)
 }
 
-// TestBadProtocolRequestShapes: structurally valid JSON, semantically bad.
-func TestBadProtocolRequestShapes(t *testing.T) {
+// TestBadRequestShapes: structurally valid JSON, semantically bad —
+// stable machine codes on both path and body key validation.
+func TestBadRequestShapes(t *testing.T) {
 	home, root := testRoot(t)
 	serveKey(t, home, root, "ok")
-	sock := socketPath(t, home, root)
+	d := readDescriptor(t, home, root)
 
-	do := func(req string) protocol.Response {
-		c, err := net.DialTimeout("unix", sock, time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-		c.SetDeadline(time.Now().Add(6 * time.Second))
-		fmt.Fprintln(c, req)
-		if uc, ok := c.(*net.UnixConn); ok {
-			uc.CloseWrite()
-		}
-		var resp protocol.Response
-		if err := json.NewDecoder(c).Decode(&resp); err != nil {
-			t.Fatal(err)
-		}
-		return resp
+	status, out := rawReq(t, d, http.MethodGet, "/v1/sessions/missing", "", true)
+	if status != 404 || !strings.Contains(out, "SESSION_NOT_FOUND") {
+		t.Fatalf("missing: %d %s", status, out)
 	}
-
-	r := do(`{"v":1,"op":"serve_fixture","key":"bad key!"}`)
-	if r.OK || r.Code != protocol.ErrInvalidSessionKey {
-		t.Fatalf("bad key: %+v", r)
+	status, out = rawReq(t, d, http.MethodDelete, "/v1/sessions/missing", "", true)
+	if status != 404 || !strings.Contains(out, "SESSION_NOT_FOUND") {
+		t.Fatalf("stop missing: %d %s", status, out)
 	}
-	r = do(`{"v":1,"op":"session_status","key":"missing"}`)
-	if r.OK || r.Code != protocol.ErrSessionNotFound {
-		t.Fatalf("missing: %+v", r)
+	// Path-based key validation (single segment, URL-escaped space).
+	status, out = rawReq(t, d, http.MethodGet, "/v1/sessions/bad%20key", "", true)
+	if status != 400 || !strings.Contains(out, "INVALID_SESSION_KEY") {
+		t.Fatalf("bad path key: %d %s", status, out)
 	}
-	r = do(`{"v":1,"op":"stop_session","key":"missing"}`)
-	if r.OK || r.Code != protocol.ErrSessionNotFound {
-		t.Fatalf("stop missing: %+v", r)
+	// Path traversal is never a valid session route.
+	status, _ = rawReq(t, d, http.MethodGet, "/v1/sessions/..%2Fx", "", true)
+	if status != 404 {
+		t.Fatalf("traversal route: %d", status)
+	}
+	// Duplicate create is a conflict.
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"ok","cwd":"/"}`, true)
+	if status != 409 || !strings.Contains(out, "SESSION_EXISTS") {
+		t.Fatalf("duplicate: %d %s", status, out)
 	}
 	stopDaemon(t, home, root)
 }

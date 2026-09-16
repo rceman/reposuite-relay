@@ -1,14 +1,15 @@
 package daemon
 
-// Same-package tests for the lifecycle/protocol corrections: they run the
-// daemon in-process (Start/Serve/Shutdown) so test seams — spawn counting,
-// randomness failure, short deadlines, spawn suppression — are usable
-// without a second binary.
+// Same-package tests for the lifecycle/control-plane corrections: they run
+// the daemon in-process (Start/Serve/Shutdown) so test seams — spawn
+// counting, randomness failure, short deadlines, spawn suppression — are
+// usable without a second binary. All client traffic goes through the
+// production internal/client package over loopback HTTP.
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -19,16 +20,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
-	"github.com/rceman/reposuite-relay/internal/protocol"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
 // startInProcess brings up a daemon on an isolated root with the given
 // option overrides. It is Serve'd in a goroutine (result on `served`) and
 // Shutdown on cleanup.
-func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, *Client, chan error) {
+func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, *client.Client, chan error) {
 	t.Helper()
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
@@ -54,11 +56,10 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 	go func() { served <- d.Serve() }()
 	t.Cleanup(d.Shutdown)
 
-	// Wait until the socket answers ping.
-	c := newClient(p.DaemonSocket())
+	// Wait until the daemon answers an authenticated ping.
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := c.Ping(); err == nil {
+		if c, err := client.Dial(p); err == nil {
 			return d, p, c, served
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -67,13 +68,35 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 	return nil, paths.Paths{}, nil, nil
 }
 
-func do(t *testing.T, c *Client, req protocol.Request) *protocol.Response {
+// tctx returns a bounded context for one client call.
+func tctx(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
-	r, err := c.Do(req)
-	if err != nil {
-		t.Fatalf("Do(%s): %v", req.Op, err)
+	return context.WithTimeout(context.Background(), 15*time.Second)
+}
+
+// serve creates a fixture session; the error is returned as-is so tests
+// can assert stable API codes.
+func serve(t *testing.T, c *client.Client, key string) (api.SessionInfo, error) {
+	t.Helper()
+	ctx, cancel := tctx(t)
+	defer cancel()
+	resp, err := c.ServeFixture(ctx, key, "/")
+	return resp.Session, err
+}
+
+// wantAPIErr asserts err is an APIError with the given code.
+func wantAPIErr(t *testing.T, err error, code string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("want API error %s, got nil", code)
 	}
-	return r
+	var ae *client.APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("want API error %s, got %v", code, err)
+	}
+	if ae.Code != code {
+		t.Fatalf("want API error %s, got %s (%v)", code, ae.Code, err)
+	}
 }
 
 // TestDuplicateKeyNoSpawn: a duplicate serve must create ZERO extra
@@ -87,14 +110,11 @@ func TestDuplicateKeyNoSpawn(t *testing.T) {
 		}
 	})
 
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "same", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("first serve failed: %+v", r)
+	if _, err := serve(t, c, "same"); err != nil {
+		t.Fatalf("first serve failed: %v", err)
 	}
-	r = do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "same", Cwd: "/"})
-	if r.OK || r.Code != protocol.ErrSessionExists {
-		t.Fatalf("duplicate: %+v", r)
-	}
+	_, err := serve(t, c, "same")
+	wantAPIErr(t, err, api.ErrSessionExists)
 	if n := atomic.LoadInt32(&spawns); n != 1 {
 		t.Fatalf("spawn count = %d, want 1 — duplicate spawned a process", n)
 	}
@@ -118,16 +138,19 @@ func TestSameKeyCreateRace(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r, err := c.Do(protocol.Request{Op: protocol.OpServeFixture, Key: "raced", Cwd: "/"})
-			if err != nil {
-				codes[i] = "TRANSPORT:" + err.Error()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_, err := c.ServeFixture(ctx, "raced", "/")
+			if err == nil {
+				codes[i] = "OK"
 				return
 			}
-			if r.OK {
-				codes[i] = "OK"
-			} else {
-				codes[i] = r.Code
+			var ae *client.APIError
+			if errors.As(err, &ae) {
+				codes[i] = ae.Code
+				return
 			}
+			codes[i] = "TRANSPORT:" + err.Error()
 		}(i)
 	}
 	wg.Wait()
@@ -137,7 +160,7 @@ func TestSameKeyCreateRace(t *testing.T) {
 		switch code {
 		case "OK":
 			okCount++
-		case protocol.ErrSessionExists:
+		case api.ErrSessionExists:
 			exists++
 		default:
 			t.Fatalf("unexpected result %q", code)
@@ -149,9 +172,10 @@ func TestSameKeyCreateRace(t *testing.T) {
 	if n := atomic.LoadInt32(&spawns); n != 1 {
 		t.Fatalf("spawn count = %d, want 1", n)
 	}
-	r := do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "raced"})
-	if !r.OK || r.Session == nil {
-		t.Fatalf("final session missing: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Status(ctx, "raced"); err != nil {
+		t.Fatalf("final session missing: %v", err)
 	}
 }
 
@@ -162,9 +186,8 @@ func TestSameKeyCreateRace(t *testing.T) {
 func TestSameKeyStopRace(t *testing.T) {
 	_, _, c, _ := startInProcess(t, nil)
 
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "victim", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("serve: %+v", r)
+	if _, err := serve(t, c, "victim"); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
 
 	const n = 8
@@ -174,16 +197,19 @@ func TestSameKeyStopRace(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r, err := c.Do(protocol.Request{Op: protocol.OpStopSession, Key: "victim"})
-			if err != nil {
-				codes[i] = "TRANSPORT:" + err.Error()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_, err := c.StopSession(ctx, "victim")
+			if err == nil {
+				codes[i] = "OK"
 				return
 			}
-			if r.OK {
-				codes[i] = "OK"
-			} else {
-				codes[i] = r.Code
+			var ae *client.APIError
+			if errors.As(err, &ae) {
+				codes[i] = ae.Code
+				return
 			}
+			codes[i] = "TRANSPORT:" + err.Error()
 		}(i)
 	}
 	wg.Wait()
@@ -193,7 +219,7 @@ func TestSameKeyStopRace(t *testing.T) {
 		switch code {
 		case "OK":
 			okCount++
-		case protocol.ErrSessionNotFound:
+		case api.ErrSessionNotFound:
 			notFound++
 		default:
 			t.Fatalf("unexpected %q", code)
@@ -202,9 +228,10 @@ func TestSameKeyStopRace(t *testing.T) {
 	if okCount != 1 || notFound != n-1 {
 		t.Fatalf("ok=%d notFound=%d (want 1/%d)", okCount, notFound, n-1)
 	}
-	r = do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "victim"})
-	if r.OK {
-		t.Fatalf("session must be gone: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Status(ctx, "victim"); err == nil {
+		t.Fatal("session must be gone")
 	}
 }
 
@@ -262,27 +289,25 @@ func TestRuntimeIDFailure(t *testing.T) {
 		}
 	})
 
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "k", Cwd: "/"})
-	if r.OK || r.Code != protocol.ErrInternal {
-		t.Fatalf("want INTERNAL, got %+v", r)
-	}
+	_, err := serve(t, c, "k")
+	wantAPIErr(t, err, api.ErrInternal)
 	if n := atomic.LoadInt32(&spawns); n != 0 {
 		t.Fatalf("spawn count = %d, want 0 on rand failure", n)
 	}
-	r = do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "k"})
-	if r.OK {
-		t.Fatalf("session must not exist: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Status(ctx, "k"); err == nil {
+		t.Fatal("session must not exist")
 	}
 	// Retry with working randomness succeeds — reservation was released.
 	atomic.StoreInt32(&randFails, 0)
-	r = do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "k", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("retry must succeed: %+v", r)
+	if _, err := serve(t, c, "k"); err != nil {
+		t.Fatalf("retry must succeed: %v", err)
 	}
 }
 
-// TestSpawnFailure: fixture spawn error → FIXTURE_START_FAILED, empty
-// registry, reservation released, retry works.
+// TestSpawnFailure: fixture spawn error → INTERNAL, empty registry,
+// reservation released, retry works.
 func TestSpawnFailure(t *testing.T) {
 	var failSpawn int32 = 1
 	_, _, c, _ := startInProcess(t, func(o *Options) {
@@ -293,148 +318,38 @@ func TestSpawnFailure(t *testing.T) {
 			return fixture.Spawn(selfExe, cwd)
 		}
 	})
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "k", Cwd: "/"})
-	if r.OK || r.Code != protocol.ErrFixtureStart {
-		t.Fatalf("want FIXTURE_START_FAILED, got %+v", r)
-	}
-	r = do(t, c, protocol.Request{Op: protocol.OpListSessions})
-	if len(r.Sessions) != 0 {
-		t.Fatalf("registry must be empty: %+v", r.Sessions)
+	_, err := serve(t, c, "k")
+	wantAPIErr(t, err, api.ErrInternal)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	resp, err := c.Sessions(ctx)
+	if err != nil || len(resp.Sessions) != 0 {
+		t.Fatalf("registry must be empty: %v %v", resp.Sessions, err)
 	}
 	atomic.StoreInt32(&failSpawn, 0)
-	r = do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "k", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("retry must succeed: %+v", r)
-	}
-}
-
-// TestProtocolMismatchPeer: a live peer answering with v != 1 must surface
-// ErrProtocolMismatch — never ErrNotRunning — and Ensure must not spawn.
-func TestProtocolMismatchPeer(t *testing.T) {
-	base := t.TempDir()
-	home := filepath.Join(base, "home")
-	root := filepath.Join(base, "rs")
-	os.MkdirAll(home, 0o755)
-	os.MkdirAll(root, 0o755)
-	p, err := paths.Resolve(home, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Fake peer: accepts, replies with protocol v+1.
-	ln, err := net.Listen("unix", p.DaemonSocket())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				io.Copy(io.Discard, c) // drain request
-				c.Write([]byte(fmt.Sprintf(`{"v":%d,"ok":false,"code":"PROTOCOL_MISMATCH","error":"daemon speaks v%d"}`+"\n",
-					protocol.Version+1, protocol.Version+1)))
-			}(conn)
-		}
-	}()
-
-	_, err = Dial(p)
-	if !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("Dial: want ErrProtocolMismatch, got %v", err)
-	}
-
-	var spawned int32
-	old := spawnDaemonFunc
-	spawnDaemonFunc = func(paths.Paths, string) error {
-		atomic.AddInt32(&spawned, 1)
-		return nil
-	}
-	defer func() { spawnDaemonFunc = old }()
-
-	_, err = Ensure(p, "/unused")
-	if !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("Ensure: want ErrProtocolMismatch, got %v", err)
-	}
-	if n := atomic.LoadInt32(&spawned); n != 0 {
-		t.Fatalf("Ensure spawned %d daemons against an incompatible peer", n)
-	}
-}
-
-// TestBadPeer: a live socket that is not a Relay daemon → ErrBadPeer,
-// Ensure still does not spawn.
-func TestBadPeer(t *testing.T) {
-	base := t.TempDir()
-	home := filepath.Join(base, "home")
-	root := filepath.Join(base, "rs")
-	os.MkdirAll(home, 0o755)
-	os.MkdirAll(root, 0o755)
-	p, err := paths.Resolve(home, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("unix", p.DaemonSocket())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				io.Copy(io.Discard, c)
-				c.Write([]byte("not-json\n"))
-			}(conn)
-		}
-	}()
-
-	_, err = Dial(p)
-	if !errors.Is(err, ErrBadPeer) {
-		t.Fatalf("Dial: want ErrBadPeer, got %v", err)
-	}
-	var spawned int32
-	old := spawnDaemonFunc
-	spawnDaemonFunc = func(paths.Paths, string) error {
-		atomic.AddInt32(&spawned, 1)
-		return nil
-	}
-	defer func() { spawnDaemonFunc = old }()
-	if _, err := Ensure(p, "/unused"); !errors.Is(err, ErrBadPeer) {
-		t.Fatalf("Ensure: want ErrBadPeer, got %v", err)
-	}
-	if n := atomic.LoadInt32(&spawned); n != 0 {
-		t.Fatalf("Ensure spawned %d daemons against a bad peer", n)
+	if _, err := serve(t, c, "k"); err != nil {
+		t.Fatalf("retry must succeed: %v", err)
 	}
 }
 
 // TestReadDeadlineEnforced: an idle connection is closed by the server's
-// read deadline — proven with a short test timeout, not 5s.
+// header read deadline — proven with a short test timeout, not 5s.
 func TestReadDeadlineEnforced(t *testing.T) {
 	_, p, _, _ := startInProcess(t, func(o *Options) {
 		o.ReadTimeout = 150 * time.Millisecond
 	})
-	c, err := net.DialTimeout("unix", p.DaemonSocket(), time.Second)
+	d, err := readDescriptor(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	c.SetReadDeadline(time.Now().Add(3 * time.Second)) // generous test bound
+	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(d.Endpoint, "http://"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) // generous test bound
 	start := time.Now()
-	_, err = c.Read(make([]byte, 1))
-	if err == nil {
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("idle connection was not closed by server read deadline")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -442,56 +357,33 @@ func TestReadDeadlineEnforced(t *testing.T) {
 	}
 }
 
-// TestClientDeadlineSeparation: the client's read deadline is its own, not
-// a combined read+write. A server that accepts but never responds must hit
-// the client read deadline.
-func TestClientDeadlineSeparation(t *testing.T) {
-	base := t.TempDir()
-	sock := filepath.Join(base, "s.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) { // reads the request, never replies
-				defer c.Close()
-				io.Copy(io.Discard, c)
-			}(conn)
-		}
-	}()
-
-	cl := &Client{sock: sock, readTimeout: 150 * time.Millisecond, writeTimeout: ReadTimeout}
-	start := time.Now()
-	_, err = cl.Do(protocol.Request{Op: protocol.OpPing})
-	if err == nil {
-		t.Fatal("silent peer must produce an error")
-	}
-	if !errors.Is(err, ErrBadPeer) {
-		t.Fatalf("want ErrBadPeer, got %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("client read deadline not enforced: %s", elapsed)
-	}
-}
-
-// TestKeyValidationAllOps: serve/status/stop reject malformed keys with
-// INVALID_SESSION_KEY (not SESSION_NOT_FOUND).
-func TestKeyValidationAllOps(t *testing.T) {
+// TestKeyValidation: bad keys never reach session lookup.
+func TestKeyValidation(t *testing.T) {
 	_, _, c, _ := startInProcess(t, nil)
-	bad := []string{"", "../x", "bad key", "a/b", ".dot"}
-	for _, op := range []string{protocol.OpServeFixture, protocol.OpSessionStatus, protocol.OpStopSession} {
-		for _, k := range bad {
-			req := protocol.Request{Op: op, Key: k, Cwd: "/"}
-			r := do(t, c, req)
-			if r.OK || r.Code != protocol.ErrInvalidSessionKey {
-				t.Fatalf("%s key=%q: want INVALID_SESSION_KEY, got %+v", op, k, r)
-			}
+	// Body-carried keys (serve): every malformed key is INVALID_SESSION_KEY.
+	for _, k := range []string{"", "../x", "bad key", "a/b", ".dot"} {
+		_, err := serve(t, c, k)
+		wantAPIErr(t, err, api.ErrInvalidSessionKey)
+	}
+	// Path-carried keys (status/stop): single-segment malformed keys are
+	// INVALID_SESSION_KEY; keys containing separators are not routes.
+	ctx, cancel := tctx(t)
+	defer cancel()
+	for _, k := range []string{"bad key", ".dot"} {
+		if _, err := c.Status(ctx, k); err == nil {
+			t.Fatalf("status key %q accepted", k)
+		} else {
+			wantAPIErr(t, err, api.ErrInvalidSessionKey)
+		}
+		if _, err := c.StopSession(ctx, k); err == nil {
+			t.Fatalf("stop key %q accepted", k)
+		} else {
+			wantAPIErr(t, err, api.ErrInvalidSessionKey)
+		}
+	}
+	for _, k := range []string{"", "../x", "a/b"} {
+		if _, err := c.Status(ctx, k); err == nil {
+			t.Fatalf("status key %q accepted", k)
 		}
 	}
 }
@@ -548,7 +440,9 @@ func TestCreateVsShutdown(t *testing.T) {
 
 	serveDone := make(chan struct{})
 	go func() {
-		_, _ = c.Do(protocol.Request{Op: protocol.OpServeFixture, Key: "racer", Cwd: "/"})
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_, _ = c.ServeFixture(ctx, "racer", "/")
 		close(serveDone)
 	}()
 
@@ -563,7 +457,7 @@ func TestCreateVsShutdown(t *testing.T) {
 	}
 
 	close(spawnRelease) // let the create resolve
-	<-serveDone         // handler exits (conn already closed — fine)
+	<-serveDone         // handler exits (response may be lost — fine)
 
 	select {
 	case err := <-served:
@@ -607,15 +501,16 @@ func TestStopVsShutdown(t *testing.T) {
 		}
 	})
 
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "victim", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("serve: %+v", r)
+	if _, err := serve(t, c, "victim"); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
 
-	stopDone := make(chan *protocol.Response, 1)
+	stopDone := make(chan struct{})
 	go func() {
-		r, _ := c.Do(protocol.Request{Op: protocol.OpStopSession, Key: "victim"})
-		stopDone <- r
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_, _ = c.StopSession(ctx, "victim")
+		close(stopDone)
 	}()
 
 	<-stopEntered // the request handler owns the stop and is inside it
@@ -629,7 +524,7 @@ func TestStopVsShutdown(t *testing.T) {
 	}
 
 	close(stopRelease)
-	<-stopDone // stop request resolved (response may be lost on closed conn)
+	<-stopDone // stop request resolved
 
 	select {
 	case err := <-served:
@@ -647,13 +542,14 @@ func TestStopVsShutdown(t *testing.T) {
 	}
 }
 
-// TestShutdownOpResponse: the `shutdown` request itself gets its OK
-// response written before teardown — not torn down mid-reply.
+// TestShutdownOpResponse: the shutdown request itself gets its response
+// written before teardown — not torn down mid-reply.
 func TestShutdownOpResponse(t *testing.T) {
 	_, _, c, served := startInProcess(t, nil)
-	r := do(t, c, protocol.Request{Op: protocol.OpShutdown})
-	if !r.OK {
-		t.Fatalf("shutdown response: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown response: %v", err)
 	}
 	select {
 	case err := <-served:
@@ -669,19 +565,25 @@ func TestShutdownOpResponse(t *testing.T) {
 // by shutdown — it must not delay shutdown for the read deadline.
 func TestShutdownWithIdleConn(t *testing.T) {
 	_, p, _, served := startInProcess(t, nil)
-	idle, err := net.DialTimeout("unix", p.DaemonSocket(), time.Second)
+	d, err := readDescriptor(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle, err := net.DialTimeout("tcp", strings.TrimPrefix(d.Endpoint, "http://"), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer idle.Close()
-	time.Sleep(30 * time.Millisecond) // let the accept loop register it
+	time.Sleep(30 * time.Millisecond) // let the server register it
 
-	// In-process Shutdown — Serve must return promptly (< read deadline).
-	// Use the protocol op to also prove response delivery.
-	c := newClient(p.DaemonSocket())
-	r := do(t, c, protocol.Request{Op: protocol.OpShutdown})
-	if !r.OK {
-		t.Fatalf("shutdown: %+v", r)
+	c, err := client.Dial(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
 	}
 	select {
 	case err := <-served:
@@ -699,8 +601,8 @@ func TestShutdownWithIdleConn(t *testing.T) {
 }
 
 // TestStopSessionForcedKill: a stubborn child (ignores stdin EOF) reaches
-// the SIGKILL fallback; confirmed reaping → stop_session succeeds and the
-// session is removed — not INTERNAL/AbortStop.
+// the SIGKILL fallback; confirmed reaping → stop succeeds and the session
+// is removed — not INTERNAL/AbortStop.
 func TestStopSessionForcedKill(t *testing.T) {
 	var childPID int32
 	_, _, c, _ := startInProcess(t, func(o *Options) {
@@ -717,9 +619,8 @@ func TestStopSessionForcedKill(t *testing.T) {
 		}
 	})
 
-	r := do(t, c, protocol.Request{Op: protocol.OpServeFixture, Key: "stubborn", Cwd: "/"})
-	if !r.OK {
-		t.Fatalf("serve: %+v", r)
+	if _, err := serve(t, c, "stubborn"); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
 	pid := int(atomic.LoadInt32(&childPID))
 	if pid == 0 || !procAlive(pid) {
@@ -727,14 +628,14 @@ func TestStopSessionForcedKill(t *testing.T) {
 	}
 
 	// The child ignores stdin EOF → StopTimeout(3s) → SIGKILL → reaped.
-	r = do(t, c, protocol.Request{Op: protocol.OpStopSession, Key: "stubborn"})
-	if !r.OK {
-		t.Fatalf("stop_session after forced kill must succeed: %+v", r)
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.StopSession(ctx, "stubborn"); err != nil {
+		t.Fatalf("stop after forced kill must succeed: %v", err)
 	}
 	waitProcDead(t, pid, 2*time.Second)
 
-	r = do(t, c, protocol.Request{Op: protocol.OpSessionStatus, Key: "stubborn"})
-	if r.OK || r.Code != protocol.ErrSessionNotFound {
-		t.Fatalf("status after forced-kill stop: %+v", r)
+	if _, err := c.Status(ctx, "stubborn"); err == nil {
+		t.Fatal("session must be gone after forced-kill stop")
 	}
 }

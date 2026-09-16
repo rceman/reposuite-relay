@@ -1,45 +1,54 @@
 // Package daemon implements the single persistent RepoSuite Relay daemon:
-// an advisory-locked singleton per RepoSuite state root serving a bounded
-// versioned JSON protocol on a private Unix socket.
+// an advisory-locked singleton per RepoSuite state root serving the
+// ADR-006 local control plane — loopback HTTP/JSON commands plus an NDJSON
+// canonical event stream — with runtime discovery through a user-private
+// run/daemon.json descriptor.
 //
 // Singleton authority: an exclusive flock(2) on <relay>/run/relayd.lock.
 // Concurrent `__daemon` contenders race for it; exactly one wins and the
-// rest exit. The socket is bound only after the lock is held, and stale
-// socket cleanup is performed only by the lock owner.
+// rest exit. The listener is bound and the descriptor published only
+// after the lock is held; stale-descriptor cleanup is performed only by
+// the lock owner, and shutdown removes the descriptor only when it still
+// belongs to this daemon instance.
 package daemon
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
-	"github.com/rceman/reposuite-relay/internal/protocol"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
 )
 
-// LockName is the daemon singleton lock file inside the run directory.
-const LockName = "relayd.lock"
-
-// Bounds for the local control plane — phase-specific deadlines.
+// Bounds for the local control plane — phase-specific, never a global
+// write deadline (NDJSON event streams are intentionally long-lived).
 const (
-	ReadTimeout  = 5 * time.Second // per-connection read deadline
-	WriteTimeout = 5 * time.Second // per-connection write deadline
+	ReadHeaderTimeout = 5 * time.Second  // request header deadline
+	IdleTimeout       = 60 * time.Second // keep-alive idle deadline
+	WriteTimeout      = 10 * time.Second // per-response deadline (streams clear it)
+	MaxRequestSize    = 64 << 10         // bounded JSON request bodies
 
 	// QuiescenceTimeout bounds how long shutdown waits for already-running
-	// request handlers (create/stop lifecycle ops) to finish before the
-	// final registry drain. Never unbounded, and never skipped — the drain
-	// must not race lifecycle ownership.
+	// lifecycle handlers (create/stop ops) to finish before the final
+	// registry drain. Never unbounded, and never skipped — the drain must
+	// not race lifecycle ownership.
 	QuiescenceTimeout = 10 * time.Second
 )
 
@@ -66,7 +75,7 @@ type Options struct {
 
 func (o Options) withDefaults() Options {
 	if o.ReadTimeout <= 0 {
-		o.ReadTimeout = ReadTimeout
+		o.ReadTimeout = ReadHeaderTimeout
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = WriteTimeout
@@ -83,31 +92,37 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Daemon owns the listener, the registry, and all active generations.
+// Daemon owns the listener, the descriptor, the registry, the event
+// broker, and all active generations.
 type Daemon struct {
 	paths paths.Paths
 	opts  Options
 
-	started  time.Time
-	registry *session.Registry
-	store    *store.Sessions
+	started    time.Time
+	registry   *session.Registry
+	store      *store.Sessions
+	broker     *events.Broker
+	instanceID string
+	token      string
 
 	lockFile *os.File
 	ln       net.Listener
+	srv      *http.Server
 
 	mu       sync.Mutex
 	shutting bool
-	conns    map[net.Conn]struct{}
 	shutdown chan struct{}
 	once     sync.Once
-	wg       sync.WaitGroup // in-flight request handlers (lifecycle ops)
+	wg       sync.WaitGroup // in-flight lifecycle handlers (create/stop)
+	conns    map[net.Conn]http.ConnState
 }
 
 // ErrAlreadyRunning is returned when another daemon owns this state root.
 var ErrAlreadyRunning = errors.New("another daemon owns this state root")
 
-// Run is the __daemon entry point: acquire singleton lock, recover stale
-// socket, serve until shutdown/signal, then clean up.
+// Run is the __daemon entry point: acquire singleton lock, recover the
+// durable store, bind loopback, publish the descriptor, serve until
+// shutdown/signal, then clean up.
 func Run(p paths.Paths, selfExe string) error {
 	d, err := Start(p, Options{SelfExe: selfExe})
 	if err != nil {
@@ -117,12 +132,12 @@ func Run(p paths.Paths, selfExe string) error {
 }
 
 // Start performs singleton lock acquisition, durable-store load/recovery,
-// registry restore, stale-socket recovery, and the socket bind, then
-// returns a Daemon ready to Serve. Order preserves ownership safety: only
-// the singleton owner mutates or recovers the store, and any failure
-// releases the lock without leaving a listener behind. Splitting
-// Start/Serve lets tests inject seams via Options before the accept loop
-// begins.
+// registry restore, event-state initialization, loopback bind, and
+// descriptor publication, then returns a Daemon ready to Serve. Order
+// preserves ownership safety: only the singleton owner mutates or
+// recovers the store, and any failure releases the lock without leaving a
+// listener or descriptor behind. Splitting Start/Serve lets tests inject
+// seams via Options before serving begins.
 func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	if err := p.Ensure(); err != nil {
 		return nil, err
@@ -131,8 +146,8 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 		paths:    p,
 		opts:     opts.withDefaults(),
 		started:  time.Now(),
-		conns:    map[net.Conn]struct{}{},
 		shutdown: make(chan struct{}),
+		conns:    map[net.Conn]http.ConnState{},
 	}
 	if err := d.acquireLock(); err != nil {
 		return nil, err
@@ -157,38 +172,88 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	}
 	d.store = ss
 	d.registry = reg
-	if err := d.bindSocket(); err != nil {
+	d.broker = events.NewBroker(ss)
+	// Event state for every restored session: open transcripts via the
+	// healthy O(1) path and validate the durable seq watermark.
+	for _, m := range reg.List() {
+		if _, err := d.broker.Ensure(m); err != nil {
+			d.releaseLock()
+			return nil, fmt.Errorf("session store: %w", err)
+		}
+	}
+	if err := d.bindListener(); err != nil {
+		d.releaseLock()
+		return nil, err
+	}
+	instanceID, err := newInstanceID()
+	if err != nil {
+		d.ln.Close()
+		d.releaseLock()
+		return nil, err
+	}
+	token, err := newToken()
+	if err != nil {
+		d.ln.Close()
+		d.releaseLock()
+		return nil, err
+	}
+	d.instanceID = instanceID
+	d.token = token
+	d.srv = &http.Server{
+		Handler:           http.HandlerFunc(d.route),
+		ReadHeaderTimeout: d.opts.ReadTimeout,
+		IdleTimeout:       IdleTimeout,
+		ConnState:         d.connState,
+	}
+	// Descriptor publication IS daemon readiness: lock held, store
+	// recovered, listener bound, token generated, handler constructed.
+	if err := writeDescriptor(p, api.Descriptor{
+		Version:     api.DescriptorVersion,
+		InstanceID:  d.instanceID,
+		PID:         os.Getpid(),
+		Endpoint:    d.endpoint(),
+		BearerToken: d.token,
+	}); err != nil {
+		d.ln.Close()
 		d.releaseLock()
 		return nil, err
 	}
 	return d, nil
 }
 
-// Serve runs the accept loop until shutdown or SIGTERM/SIGINT, then stops
-// every live runtime, closes the listener, and removes the socket.
-// Shutdown stops runtimes only — durable RelaySessions are retained and
-// reload as COLD on the next start. A session belongs to Relay until
-// explicit deletion.
+func (d *Daemon) endpoint() string { return "http://" + d.ln.Addr().String() }
+
+// Serve runs the HTTP server until shutdown or SIGTERM/SIGINT, then
+// disconnects event subscribers, drains lifecycle handlers, and stops
+// every live runtime. Shutdown stops runtimes only — durable RelaySessions
+// are retained and reload as COLD on the next start. A session belongs to
+// Relay until explicit deletion.
 //
 // Shutdown is a quiescence barrier, in order:
-//  1. mark shutting down (no new dispatch work)
-//  2. close the listener — stops new connections
-//  3. wait for the accept loop to die — no more handler Adds are possible
-//  4. close tracked connections — unblocks idle readers (a handler blocked
-//     in a lifecycle op is unaffected; it is not conn-bound)
-//  5. wait for in-flight handlers, bounded by QuiescenceTimeout
-//  6. only then drain the registry and stop remaining generations —
+//  1. mark shutting down (mutating handlers are rejected, in-flight ones
+//     are already counted in wg)
+//  2. disconnect all event subscribers — long-lived streams end, so the
+//     HTTP server can actually finish draining
+//  3. http.Server.Shutdown: stop accepting, close the listener, wait for
+//     in-flight handlers (bounded by QuiescenceTimeout)
+//  4. bounded belt-and-suspenders wait for lifecycle handlers
+//  5. only then drain the registry and stop remaining generations —
 //     never concurrently with a create/stop lifecycle operation
 func (d *Daemon) Serve() error {
-	defer os.Remove(d.paths.DaemonSocket())
+	defer removeOwnDescriptor(d.paths, d.instanceID)
 	defer d.releaseLock()
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 
-	acceptDone := make(chan struct{})
-	go func() { d.acceptLoop(); close(acceptDone) }()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		if err := d.srv.Serve(d.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "relayd: serve: %v\n", err)
+		}
+	}()
 
 	select {
 	case sig := <-sigCh:
@@ -197,14 +262,20 @@ func (d *Daemon) Serve() error {
 	}
 
 	d.initiate()
-	_ = d.ln.Close()
-	<-acceptDone
+	d.broker.CloseAll()
+	// Close connections that never started (or finished) a request so they
+	// cannot delay shutdown until the header deadline; connections with a
+	// request in flight are left to the graceful Shutdown below.
+	d.closeIdleConns()
 
-	d.mu.Lock()
-	for c := range d.conns {
-		_ = c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), QuiescenceTimeout)
+	err := d.srv.Shutdown(ctx)
+	cancel()
+	if err != nil {
+		// Forced close: remaining connections are dropped.
+		_ = d.srv.Close()
 	}
-	d.mu.Unlock()
+	<-serveDone
 
 	drained := make(chan struct{})
 	go func() { d.wg.Wait(); close(drained) }()
@@ -214,9 +285,9 @@ func (d *Daemon) Serve() error {
 		// Do not drain: a live handler may still own a generation's Stop.
 		// Process exit is the final safety net — fixture children die via
 		// stdin-pipe EOF when this process exits.
-		err := fmt.Errorf("relayd: handler quiescence exceeded %s", QuiescenceTimeout)
-		fmt.Fprintln(os.Stderr, err)
-		return err
+		qerr := fmt.Errorf("relayd: handler quiescence exceeded %s", QuiescenceTimeout)
+		fmt.Fprintln(os.Stderr, qerr)
+		return qerr
 	}
 
 	for _, m := range d.registry.Drain() {
@@ -230,14 +301,20 @@ func (d *Daemon) Serve() error {
 }
 
 // Shutdown asks a running daemon to stop gracefully (test seam; external
-// users normally use the `shutdown` protocol op or SIGTERM).
+// users use POST /v1/daemon/shutdown or SIGTERM).
 func (d *Daemon) Shutdown() { d.initiate() }
+
+// InstanceID returns this daemon generation's identity (test seam).
+func (d *Daemon) InstanceID() string { return d.instanceID }
+
+// Token returns the local bearer token (test seam — never log or print).
+func (d *Daemon) Token() string { return d.token }
 
 // acquireLock takes the exclusive non-blocking advisory lock that makes the
 // daemon a singleton. Stale lock FILES are harmless: the kernel lock, not
 // file existence, is the authority.
 func (d *Daemon) acquireLock() error {
-	lockPath := filepath.Join(d.paths.RunDir(), LockName)
+	lockPath := d.paths.DaemonLock()
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("daemon lock: %w", err)
@@ -259,51 +336,43 @@ func (d *Daemon) releaseLock() {
 	d.lockFile.Close()
 }
 
-// bindSocket binds the daemon socket. Only called while holding the lock:
-// the lock owner may remove a stale Unix socket inode, but never deletes a
-// non-socket object at that path — that fails closed instead.
-func (d *Daemon) bindSocket() error {
-	sock := d.paths.DaemonSocket()
-	fi, err := os.Lstat(sock)
-	switch {
-	case err == nil:
-		if fi.Mode()&os.ModeSocket == 0 {
-			return fmt.Errorf("%s exists and is not a socket (mode %s); refusing to remove it", sock, fi.Mode())
-		}
-		if err := os.Remove(sock); err != nil { // stale socket inode
-			return fmt.Errorf("remove stale socket: %w", err)
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("stat socket: %w", err)
-	}
-	ln, err := net.Listen("unix", sock)
+// bindListener binds the loopback control endpoint. The OS chooses the
+// ephemeral port; anything that is not loopback fails startup closed.
+func (d *Daemon) bindListener() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("bind %s: %w", sock, err)
+		return fmt.Errorf("bind loopback control endpoint: %w", err)
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || addr.IP == nil || !addr.IP.IsLoopback() {
 		ln.Close()
-		return fmt.Errorf("socket chmod: %w", err)
+		return fmt.Errorf("listener %s is not loopback; refusing startup", ln.Addr())
 	}
 	d.ln = ln
 	return nil
 }
 
-func (d *Daemon) acceptLoop() {
-	for {
-		c, err := d.ln.Accept()
-		if err != nil {
-			return // listener closed on shutdown
-		}
-		d.mu.Lock()
-		if d.shutting {
-			d.mu.Unlock()
+// connState tracks connection phases so shutdown can close idle
+// connections promptly without disturbing in-flight requests.
+func (d *Daemon) connState(c net.Conn, st http.ConnState) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch st {
+	case http.StateClosed, http.StateHijacked:
+		delete(d.conns, c)
+	default:
+		d.conns[c] = st
+	}
+}
+
+// closeIdleConns closes connections with no request in flight.
+func (d *Daemon) closeIdleConns() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for c, st := range d.conns {
+		if st == http.StateNew || st == http.StateIdle {
 			_ = c.Close()
-			continue
 		}
-		d.conns[c] = struct{}{}
-		d.wg.Add(1) // before the goroutine; no Adds survive acceptDone
-		d.mu.Unlock()
-		go d.serveConn(c)
 	}
 }
 
@@ -317,106 +386,178 @@ func (d *Daemon) initiate() {
 	})
 }
 
-// serveConn handles one request/response with bounded phase-specific
-// deadlines, then closes the connection: ReadTimeout applies while reading
-// the request, WriteTimeout while writing the response.
-func (d *Daemon) serveConn(c net.Conn) {
-	defer func() {
-		d.wg.Done()
-		d.mu.Lock()
-		delete(d.conns, c)
-		d.mu.Unlock()
-		_ = c.Close()
-	}()
-
-	_ = c.SetReadDeadline(time.Now().Add(d.opts.ReadTimeout))
-	limited := io.LimitReader(c, protocol.MaxRequest+1)
-	raw, err := io.ReadAll(limited)
-	if err != nil {
-		return // idle/short-lived client: read deadline or close
-	}
-	var resp protocol.Response
-	switch {
-	case len(raw) > protocol.MaxRequest:
-		resp = protocol.Fail(protocol.ErrInvalidRequest, "request exceeds 64KiB")
-	case len(raw) == 0:
-		return // client sent nothing
-	default:
-		resp = d.dispatch(raw)
-	}
-	_ = c.SetWriteDeadline(time.Now().Add(d.opts.WriteTimeout))
-	_ = json.NewEncoder(c).Encode(resp)
-
-	// shutdown is deferred until the response has been written.
-	if resp.OK && isShutdown(raw) {
-		go d.initiate()
-	}
-}
-
-func isShutdown(raw []byte) bool {
-	var probe struct {
-		Op string `json:"op"`
-	}
-	return json.Unmarshal(raw, &probe) == nil && probe.Op == protocol.OpShutdown
-}
-
-// dispatch validates and executes one request.
-func (d *Daemon) dispatch(raw []byte) protocol.Response {
-	var req protocol.Request
-	if err := json.Unmarshal(raw, &req); err != nil {
-		return protocol.Fail(protocol.ErrInvalidRequest, "malformed JSON: "+err.Error())
-	}
-	if req.Version != protocol.Version {
-		return protocol.Fail(protocol.ErrProtocolMismatch,
-			fmt.Sprintf("protocol version %d, daemon speaks %d", req.Version, protocol.Version))
-	}
-	if d.isShutting() && req.Op != protocol.OpPing && req.Op != protocol.OpDaemonStatus {
-		return protocol.Fail(protocol.ErrShuttingDown, "daemon is shutting down")
-	}
-	switch req.Op {
-	case protocol.OpPing, protocol.OpDaemonStatus:
-		return protocol.Ok(d.info())
-	case protocol.OpServeFixture:
-		return d.serveFixture(req)
-	case protocol.OpListSessions:
-		r := protocol.Ok(d.info())
-		for _, m := range d.registry.List() {
-			r.Sessions = append(r.Sessions, sessionInfo(m))
-		}
-		return r
-	case protocol.OpSessionStatus:
-		return d.sessionStatus(req)
-	case protocol.OpStopSession:
-		return d.stopSession(req)
-	case protocol.OpShutdown:
-		return protocol.Ok(d.info())
-	default:
-		return protocol.Fail(protocol.ErrInvalidRequest, "unknown op "+req.Op)
-	}
-}
-
 func (d *Daemon) isShutting() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.shutting
 }
 
-func (d *Daemon) info() *protocol.DaemonInfo {
-	return &protocol.DaemonInfo{
-		PID:             os.Getpid(),
-		ProtocolVersion: protocol.Version,
-		UptimeSeconds:   time.Since(d.started).Seconds(),
-		SessionCount:    d.registry.Len(),
+// --- routing / auth ---------------------------------------------------
+
+// route dispatches one request. Every route requires the bearer token,
+// including daemon status, transcript, the event stream, and shutdown.
+func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
+	if !d.authorized(r) {
+		writeErr(w, http.StatusUnauthorized, api.ErrUnauthorized, "missing or invalid bearer token")
+		return
+	}
+	p := r.URL.Path
+	switch {
+	case p == "/v1/daemon" && r.Method == http.MethodGet:
+		d.handleDaemonInfo(w, r)
+	case p == "/v1/daemon/shutdown" && r.Method == http.MethodPost:
+		d.handleShutdown(w, r)
+	case p == "/v1/sessions" && r.Method == http.MethodGet:
+		d.handleList(w, r)
+	case p == "/v1/sessions/fixture" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleServeFixture)(w, r, "")
+	case strings.HasPrefix(p, "/v1/sessions/"):
+		d.routeSession(w, r, strings.TrimPrefix(p, "/v1/sessions/"))
+	default:
+		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
 	}
 }
 
+// routeSession handles /v1/sessions/{key}[/transcript|/events].
+func (d *Daemon) routeSession(w http.ResponseWriter, r *http.Request, rest string) {
+	switch {
+	case rest == "":
+		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
+	case strings.HasSuffix(rest, "/transcript"):
+		key := strings.TrimSuffix(rest, "/transcript")
+		if strings.Contains(key, "/") || r.Method != http.MethodGet {
+			methodOrNotFound(w, r, http.MethodGet)
+			return
+		}
+		d.handleTranscript(w, r, key)
+	case strings.HasSuffix(rest, "/events"):
+		key := strings.TrimSuffix(rest, "/events")
+		if strings.Contains(key, "/") || r.Method != http.MethodGet {
+			methodOrNotFound(w, r, http.MethodGet)
+			return
+		}
+		d.handleEvents(w, r, key)
+	case !strings.Contains(rest, "/"):
+		switch r.Method {
+		case http.MethodGet:
+			d.handleStatus(w, r, rest)
+		case http.MethodDelete:
+			d.lifecycle(d.handleStop)(w, r, rest)
+		default:
+			methodOrNotFound(w, r, http.MethodGet, http.MethodDelete)
+		}
+	default:
+		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
+	}
+}
+
+func methodOrNotFound(w http.ResponseWriter, r *http.Request, allowed ...string) {
+	for _, m := range allowed {
+		if r.Method == m {
+			writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
+			return
+		}
+	}
+	w.Header().Set("Allow", strings.Join(allowed, ", "))
+	writeErr(w, http.StatusMethodNotAllowed, api.ErrInvalidRequest, "method not allowed")
+}
+
+// authorized performs constant-time bearer token comparison.
+func (d *Daemon) authorized(r *http.Request) bool {
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return false
+	}
+	got := h[len(prefix):]
+	if len(got) != len(d.token) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(d.token)) == 1
+}
+
+// lifecycle admits a mutating handler through the shutdown barrier: once
+// shutting down no new lifecycle work starts, and every admitted handler
+// is counted for the quiescence wait.
+func (d *Daemon) lifecycle(h func(http.ResponseWriter, *http.Request, string)) func(http.ResponseWriter, *http.Request, string) {
+	return func(w http.ResponseWriter, r *http.Request, key string) {
+		d.mu.Lock()
+		if d.shutting {
+			d.mu.Unlock()
+			writeErr(w, http.StatusServiceUnavailable, api.ErrShuttingDown, "daemon is shutting down")
+			return
+		}
+		d.wg.Add(1)
+		d.mu.Unlock()
+		defer d.wg.Done()
+		h(w, r, key)
+	}
+}
+
+// --- response helpers -------------------------------------------------
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, api.ErrorBody{Error: api.ErrorDetail{Code: code, Message: msg}})
+}
+
+// decodeBody strictly decodes a bounded JSON object body: 64 KiB cap,
+// unknown fields rejected, exactly one JSON value.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestSize)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON value")
+	}
+	return nil
+}
+
+// --- handlers ---------------------------------------------------------
+
+func (d *Daemon) info() api.DaemonInfo {
+	return api.DaemonInfo{
+		InstanceID:    d.instanceID,
+		PID:           os.Getpid(),
+		APIVersion:    api.Version,
+		UptimeSeconds: time.Since(d.started).Seconds(),
+		SessionCount:  d.registry.Len(),
+	}
+}
+
+func (d *Daemon) handleDaemonInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
+}
+
+func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
+	go d.initiate() // shutdown is deferred until the response is written
+}
+
+func (d *Daemon) handleList(w http.ResponseWriter, r *http.Request) {
+	resp := api.SessionList{Daemon: d.info()}
+	for _, m := range d.registry.List() {
+		resp.Sessions = append(resp.Sessions, sessionInfo(m))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // sessionInfo projects a managed session into the wire DTO. The domain
-// package knows nothing about the protocol — projection lives here in the
+// package knows nothing about the API — projection lives here in the
 // control layer. A session with no runtime projects as COLD: runtimeId
 // "", pid 0, no generation start time.
-func sessionInfo(m *session.Managed) protocol.SessionInfo {
+func sessionInfo(m *session.Managed) api.SessionInfo {
 	s := m.Session
-	info := protocol.SessionInfo{
+	info := api.SessionInfo{
 		Key:             s.Key,
 		SessionID:       s.ID,
 		NativeSessionID: s.NativeSessionID,
@@ -436,44 +577,54 @@ func sessionInfo(m *session.Managed) protocol.SessionInfo {
 	return info
 }
 
-// serveFixture atomically reserves the key BEFORE spawning, so a duplicate
-// or racing request can never create a transient extra process. Order:
-// reserve → session ID → runtime ID → spawn → durable create → commit.
-// On any failure the reservation is cancelled, the child is reaped, and
-// nothing durable remains.
-func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
-	if !session.ValidKey(req.Key) {
-		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
+// handleServeFixture atomically reserves the key BEFORE spawning, so a
+// duplicate or racing request can never create a transient extra process.
+// Order: reserve → session ID → runtime ID → spawn → durable create →
+// commit → event state. On any failure the reservation is cancelled, the
+// child is reaped, and nothing durable remains.
+func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ string) {
+	var req api.FixtureRequest
+	if err := decodeBody(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "invalid request body: "+err.Error())
+		return
 	}
-	cwd := req.Cwd
-	if cwd == "" || !filepath.IsAbs(cwd) {
-		return protocol.Fail(protocol.ErrInvalidRequest, "serve requires an absolute client cwd")
+	if !session.ValidKey(req.Key) {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+req.Key)
+		return
+	}
+	if req.Cwd == "" || !strings.HasPrefix(req.Cwd, "/") {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "serve requires an absolute client cwd")
+		return
 	}
 	if !d.registry.Reserve(req.Key) {
-		return protocol.Fail(protocol.ErrSessionExists, "session "+req.Key+" already exists")
+		writeErr(w, http.StatusConflict, api.ErrSessionExists, "session "+req.Key+" already exists")
+		return
 	}
-	fail := func(r protocol.Response) protocol.Response {
+	fail := func(status int, code, msg string) {
 		d.registry.Cancel(req.Key)
-		return r
+		writeErr(w, status, code, msg)
 	}
 	sessionID, err := d.opts.RandSessionID()
 	if err != nil {
-		return fail(protocol.Fail(protocol.ErrInternal, "session id: "+err.Error()))
+		fail(http.StatusInternalServerError, api.ErrInternal, "session id: "+err.Error())
+		return
 	}
 	runtimeID, err := d.opts.RandRuntimeID()
 	if err != nil {
-		return fail(protocol.Fail(protocol.ErrInternal, "runtime id: "+err.Error()))
+		fail(http.StatusInternalServerError, api.ErrInternal, "runtime id: "+err.Error())
+		return
 	}
-	child, err := d.opts.SpawnFixture(d.opts.SelfExe, cwd)
+	child, err := d.opts.SpawnFixture(d.opts.SelfExe, req.Cwd)
 	if err != nil {
-		return fail(protocol.Fail(protocol.ErrFixtureStart, err.Error()))
+		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
 	}
 	now := time.Now()
 	rs := &session.RelaySession{
 		ID:         sessionID,
 		Key:        req.Key,
 		Harness:    session.HarnessFixture,
-		Cwd:        cwd,
+		Cwd:        req.Cwd,
 		State:      session.StateIdle,
 		Generation: 1,
 		CreatedAt:  now,
@@ -488,10 +639,12 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 			// durable outcome is ambiguous. Fail closed: halt the daemon;
 			// the next start reconciles against canonical disk state.
 			go d.initiate()
-			return fail(protocol.Fail(protocol.ErrInternal,
-				"store commit uncertain; daemon halting: "+err.Error()))
+			fail(http.StatusInternalServerError, api.ErrInternal,
+				"store commit uncertain; daemon halting: "+err.Error())
+			return
 		}
-		return fail(protocol.Fail(protocol.ErrInternal, "persist session: "+err.Error()))
+		fail(http.StatusInternalServerError, api.ErrInternal, "persist session: "+err.Error())
+		return
 	}
 	stop := child.Stop
 	if d.opts.WrapStop != nil {
@@ -514,46 +667,57 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 		_ = child.Stop()
 		_ = d.store.Delete(rs.ID)
 		d.registry.Cancel(req.Key)
-		return protocol.Fail(protocol.ErrInternal, "lost key reservation")
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "lost key reservation")
+		return
 	}
-	r := protocol.Ok(d.info())
-	r.Session = ptr(sessionInfo(m))
-	return r
+	if _, err := d.broker.Ensure(m); err != nil {
+		// Event state must exist for every managed session; a failure here
+		// means the durable transcript is unusable — fail closed.
+		fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
+		go d.initiate()
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "event state: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: sessionInfo(m)})
 }
 
-func (d *Daemon) sessionStatus(req protocol.Request) protocol.Response {
-	if !session.ValidKey(req.Key) {
-		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
+func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request, key string) {
+	if !session.ValidKey(key) {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+key)
+		return
 	}
-	m, ok := d.registry.Get(req.Key)
+	m, ok := d.registry.Get(key)
 	if !ok {
-		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
+		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
+		return
 	}
-	r := protocol.Ok(d.info())
-	r.Session = ptr(sessionInfo(m))
-	return r
+	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: sessionInfo(m)})
 }
 
-// stopSession takes exclusive stop ownership (BeginStop), stops and
+// handleStop takes exclusive stop ownership (BeginStop), stops and
 // detaches the runtime if one exists (ClearRuntime → COLD), durably
-// deletes the session, then removes it (CommitStop). A failed runtime
-// stop keeps the session as-is (AbortStop); a failed durable delete after
-// a confirmed runtime stop keeps the session managed but COLD — the
-// daemon never loses authority and never retains a dead PID.
-func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
-	if !session.ValidKey(req.Key) {
-		return protocol.Fail(protocol.ErrInvalidSessionKey, "invalid session key "+req.Key)
+// deletes the session, then removes it (CommitStop) and closes its event
+// subscribers. A failed runtime stop keeps the session as-is
+// (AbortStop); a failed durable delete after a confirmed runtime stop
+// keeps the session managed but COLD — the daemon never loses authority
+// and never retains a dead PID.
+func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) {
+	if !session.ValidKey(key) {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+key)
+		return
 	}
-	m, ok := d.registry.BeginStop(req.Key)
+	m, ok := d.registry.BeginStop(key)
 	if !ok {
-		return protocol.Fail(protocol.ErrSessionNotFound, "no session "+req.Key)
+		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
+		return
 	}
 	if m.Runtime != nil {
 		if err := m.Stop(); err != nil {
-			d.registry.AbortStop(req.Key)
-			return protocol.Fail(protocol.ErrInternal, "stop runtime: "+err.Error())
+			d.registry.AbortStop(key)
+			writeErr(w, http.StatusInternalServerError, api.ErrInternal, "stop runtime: "+err.Error())
+			return
 		}
-		d.registry.ClearRuntime(req.Key)
+		d.registry.ClearRuntime(key)
 	}
 	if err := d.store.Delete(m.Session.ID); err != nil {
 		var ce *store.CleanupError
@@ -563,22 +727,141 @@ func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
 			// Deletion committed — apply it. The leftover tombstone is
 			// recovered on next daemon start.
 			fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
-			d.registry.CommitStop(req.Key)
-			return protocol.Ok(d.info())
+			d.registry.CommitStop(key)
+			d.broker.Remove(m.Session.ID)
+			writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
+			return
 		case errors.As(err, &ue):
 			// Namespace outcome committed but durability is ambiguous —
 			// apply the outcome, then fail closed and halt.
-			d.registry.CommitStop(req.Key)
+			d.registry.CommitStop(key)
+			d.broker.Remove(m.Session.ID)
 			go d.initiate()
-			return protocol.Fail(protocol.ErrInternal,
+			writeErr(w, http.StatusInternalServerError, api.ErrInternal,
 				"store commit uncertain; daemon halting: "+err.Error())
+			return
 		default:
-			d.registry.AbortStop(req.Key)
-			return protocol.Fail(protocol.ErrInternal, "delete session: "+err.Error())
+			d.registry.AbortStop(key)
+			writeErr(w, http.StatusInternalServerError, api.ErrInternal, "delete session: "+err.Error())
+			return
 		}
 	}
-	d.registry.CommitStop(req.Key)
-	return protocol.Ok(d.info())
+	d.registry.CommitStop(key)
+	d.broker.Remove(m.Session.ID)
+	writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
 }
 
-func ptr[T any](v T) *T { return &v }
+// handleTranscript serves bounded durable transcript tail records through
+// the derived index — durable records, not rendered rows.
+func (d *Daemon) handleTranscript(w http.ResponseWriter, r *http.Request, key string) {
+	if !session.ValidKey(key) {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+key)
+		return
+	}
+	m, ok := d.registry.Get(key)
+	if !ok {
+		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
+		return
+	}
+	limit := api.TranscriptDefaultLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "invalid limit")
+			return
+		}
+		limit = n
+	}
+	if limit > api.TranscriptMaxLimit {
+		limit = api.TranscriptMaxLimit
+	}
+	evs, err := d.broker.Ensure(m)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
+	}
+	recs, through, err := evs.Tail(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "read transcript: "+err.Error())
+		return
+	}
+	if recs == nil {
+		recs = []store.Record{}
+	}
+	writeJSON(w, http.StatusOK, api.TranscriptPage{ThroughSeq: through, Records: recs})
+}
+
+// handleEvents streams canonical events as NDJSON: the atomic replay
+// prefix (events after the requested cursor) followed by live events. The
+// cursor-too-old case is a normal JSON error before any streaming begins.
+func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request, key string) {
+	if !session.ValidKey(key) {
+		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+key)
+		return
+	}
+	m, ok := d.registry.Get(key)
+	if !ok {
+		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
+		return
+	}
+	var after uint64
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "invalid after cursor")
+			return
+		}
+		after = n
+	}
+	evs, err := d.broker.Ensure(m)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
+	}
+	sub, err := evs.Subscribe(after)
+	if err != nil {
+		if errors.Is(err, events.ErrCursorTooOld) {
+			writeErr(w, http.StatusConflict, api.ErrCursorTooOld,
+				"requested cursor is older than the replay window; rehydrate durable history")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())
+		return
+	}
+	defer evs.Unsubscribe(sub)
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{}) // streams are intentionally long-lived
+	w.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(w)
+	flush := func() { _ = rc.Flush() }
+	for _, ev := range sub.Replay {
+		_ = enc.Encode(ev)
+	}
+	flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-sub.Events():
+			if !ok {
+				if reason := sub.Err(); reason != nil {
+					code := "STREAM_CLOSED"
+					if errors.Is(reason, events.ErrSubscriberEvicted) {
+						code = "SUBSCRIBER_EVICTED"
+					}
+					_ = enc.Encode(api.ErrorBody{Error: api.ErrorDetail{
+						Code: code, Message: reason.Error(),
+					}})
+					flush()
+				}
+				return
+			}
+			if err := enc.Encode(ev); err != nil {
+				return
+			}
+			flush()
+		}
+	}
+}

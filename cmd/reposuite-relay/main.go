@@ -1,22 +1,26 @@
 // Command reposuite-relay is the RepoSuite Relay standalone CLI.
 // Future umbrella form: `reposuite relay ...` dispatches here.
 //
-// Hidden internal modes `__daemon` and `__fixture` are implementation
-// details of the single-binary design — never listed in help and not part
-// of the public CLI contract.
+// The CLI is a local HTTP client of relayd (ADR-006): every managed
+// command goes through internal/client — descriptor discovery, bearer
+// auth, typed methods. Hidden internal modes `__daemon` and `__fixture`
+// are implementation details of the single-binary design — never listed
+// in help and not part of the public CLI contract.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/daemon"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
-	"github.com/rceman/reposuite-relay/internal/protocol"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/version"
 )
@@ -63,27 +67,28 @@ func run(args []string, selfExe string) int {
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Printf("reposuite_root: %s\n", p.RepoSuiteRoot())
-		fmt.Printf("relay_root:     %s\n", p.RelayRoot())
-		fmt.Printf("run_dir:        %s\n", p.RunDir())
-		fmt.Printf("daemon_socket:  %s\n", p.DaemonSocket())
-		fmt.Printf("log_dir:        %s\n", p.LogDir())
+		fmt.Printf("reposuite_root:  %s\n", p.RepoSuiteRoot())
+		fmt.Printf("relay_root:      %s\n", p.RelayRoot())
+		fmt.Printf("run_dir:         %s\n", p.RunDir())
+		fmt.Printf("daemon_descriptor: %s\n", p.DaemonDescriptor())
+		fmt.Printf("sessions_dir:    %s\n", p.SessionsDir())
+		fmt.Printf("log_dir:         %s\n", p.LogDir())
 	case "serve":
 		return cmdServe(args[1:], selfExe)
 	case "list":
-		return cmdManaged(selfExe, protocol.OpListSessions, "")
+		return cmdList(selfExe)
 	case "status":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "reposuite-relay: status requires exactly one session key")
 			return 2
 		}
-		return cmdManaged(selfExe, protocol.OpSessionStatus, args[1])
+		return cmdStatus(selfExe, args[1])
 	case "stop":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "reposuite-relay: stop requires exactly one session key")
 			return 2
 		}
-		return cmdManaged(selfExe, protocol.OpStopSession, args[1])
+		return cmdStop(selfExe, args[1])
 	case "daemon":
 		return cmdDaemon(args[1:])
 	case "__daemon":
@@ -112,9 +117,27 @@ func fail(err error) int {
 	return 1
 }
 
-func failResp(r *protocol.Response) int {
-	fmt.Fprintf(os.Stderr, "reposuite-relay: %s: %s\n", r.Code, r.Error)
-	return 1
+func failAPI(err error) int {
+	var ae *client.APIError
+	if errors.As(err, &ae) {
+		fmt.Fprintf(os.Stderr, "reposuite-relay: %s: %s\n", ae.Code, ae.Message)
+		return 1
+	}
+	return fail(err)
+}
+
+// ensureClient resolves paths and returns a live daemon client, starting
+// relayd when it is genuinely absent.
+func ensureClient(selfExe string) (*client.Client, int, bool) {
+	p, code, ok := pathsForClient()
+	if !ok {
+		return nil, code, false
+	}
+	c, err := client.Ensure(p, selfExe)
+	if err != nil {
+		return nil, fail(err), false
+	}
+	return c, 0, true
 }
 
 // cmdServe implements `serve fixture --key <KEY>`.
@@ -137,73 +160,82 @@ func cmdServe(args []string, selfExe string) int {
 	if err != nil {
 		return fail(err)
 	}
-	p, code, ok := pathsForClient()
+	c, code, ok := ensureClient(selfExe)
 	if !ok {
 		return code
 	}
-	c, err := daemon.Ensure(p, selfExe)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := c.ServeFixture(ctx, *key, cwd)
 	if err != nil {
-		return fail(err)
+		return failAPI(err)
 	}
-	r, err := c.Do(protocol.Request{Op: protocol.OpServeFixture, Key: *key, Cwd: cwd})
-	if err != nil {
-		return fail(err)
-	}
-	if !r.OK {
-		return failResp(r)
-	}
-	if r.Session == nil || r.Daemon == nil {
-		return fail(daemon.ErrBadPeer)
-	}
-	printSession(r.Session)
-	fmt.Printf("daemon_pid=%d\n", r.Daemon.PID)
+	printSession(resp.Session)
+	fmt.Printf("daemon_pid=%d\n", resp.Daemon.PID)
 	return 0
 }
 
-// cmdManaged implements list/status/stop — all of which ensure the daemon.
-func cmdManaged(selfExe, op, key string) int {
-	p, code, ok := pathsForClient()
+// cmdList implements `list` — ensures the daemon, lists durable sessions
+// (COLD sessions included).
+func cmdList(selfExe string) int {
+	c, code, ok := ensureClient(selfExe)
 	if !ok {
 		return code
 	}
-	c, err := daemon.Ensure(p, selfExe)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := c.Sessions(ctx)
 	if err != nil {
-		return fail(err)
+		return failAPI(err)
 	}
-	r, err := c.Do(protocol.Request{Op: op, Key: key})
-	if err != nil {
-		return fail(err)
+	for i := range resp.Sessions {
+		printSession(resp.Sessions[i])
 	}
-	if !r.OK {
-		return failResp(r)
-	}
-	if r.Daemon == nil {
-		return fail(daemon.ErrBadPeer)
-	}
-	switch op {
-	case protocol.OpListSessions:
-		for i := range r.Sessions {
-			printSession(&r.Sessions[i])
-		}
-		fmt.Printf("daemon_pid=%d sessions=%d\n", r.Daemon.PID, r.Daemon.SessionCount)
-	case protocol.OpSessionStatus:
-		if r.Session == nil {
-			return fail(daemon.ErrBadPeer)
-		}
-		printSession(r.Session)
-	case protocol.OpStopSession:
-		fmt.Printf("stopped key=%s\n", key)
-	}
+	fmt.Printf("daemon_pid=%d sessions=%d\n", resp.Daemon.PID, resp.Daemon.SessionCount)
 	return 0
 }
 
-func printSession(s *protocol.SessionInfo) {
+// cmdStatus implements `status <KEY>`.
+func cmdStatus(selfExe, key string) int {
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := c.Status(ctx, key)
+	if err != nil {
+		return failAPI(err)
+	}
+	printSession(resp.Session)
+	fmt.Printf("daemon_pid=%d\n", resp.Daemon.PID)
+	return 0
+}
+
+// cmdStop implements `stop <KEY>` — stop the session runtime and delete
+// the durable RelaySession.
+func cmdStop(selfExe, key string) int {
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := c.StopSession(ctx, key); err != nil {
+		return failAPI(err)
+	}
+	fmt.Printf("stopped key=%s\n", key)
+	return 0
+}
+
+func printSession(s api.SessionInfo) {
 	fmt.Printf("key=%s sessionId=%s runtimeId=%s runtimeState=%s harness=%s state=%s generation=%d pid=%d cwd=%s createdAt=%s generationStartedAt=%s\n",
 		s.Key, s.SessionID, s.RuntimeID, s.RuntimeState, s.Harness, s.State,
 		s.Generation, s.PID, s.Cwd, s.CreatedAt, s.GenerationStartedAt)
 }
 
-// cmdDaemon implements `daemon status|stop` — neither auto-starts a daemon.
+// cmdDaemon implements `daemon status|stop` — neither auto-starts a
+// daemon.
 func cmdDaemon(args []string) int {
 	if len(args) != 1 || (args[0] != "status" && args[0] != "stop") {
 		fmt.Fprintln(os.Stderr, "usage: reposuite-relay daemon {status|stop}")
@@ -213,40 +245,36 @@ func cmdDaemon(args []string) int {
 	if !ok {
 		return code
 	}
-	c, err := daemon.Dial(p)
+	c, err := client.Dial(p)
 	if err != nil {
-		if errors.Is(err, daemon.ErrNotRunning) {
+		if errors.Is(err, client.ErrNotRunning) {
 			fmt.Fprintln(os.Stderr, "reposuite-relay: daemon not running")
 		} else {
-			// Protocol mismatch / bad peer is NOT "not running".
+			// Bad peer / incompatible endpoint is NOT "not running".
 			fmt.Fprintln(os.Stderr, "reposuite-relay:", err)
 		}
 		return 1
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if args[0] == "status" {
-		r, err := c.Do(protocol.Request{Op: protocol.OpDaemonStatus})
+		info, err := c.DaemonInfo(ctx)
 		if err != nil {
-			return fail(err)
+			return failAPI(err)
 		}
-		if r.Daemon == nil {
-			return fail(daemon.ErrBadPeer)
-		}
-		fmt.Printf("pid=%d protocolVersion=%d uptimeSeconds=%.3f sessionCount=%d\n",
-			r.Daemon.PID, r.Daemon.ProtocolVersion, r.Daemon.UptimeSeconds, r.Daemon.SessionCount)
+		fmt.Printf("pid=%d apiVersion=%d uptimeSeconds=%.3f sessionCount=%d\n",
+			info.PID, info.APIVersion, info.UptimeSeconds, info.SessionCount)
 		return 0
 	}
-	// stop: request shutdown, then wait bounded for the socket to go away.
-	r, err := c.Do(protocol.Request{Op: protocol.OpShutdown})
-	if err != nil {
-		return fail(err)
+	// stop: request shutdown, then wait bounded for the descriptor to go
+	// away (the lock owner removes its own descriptor as it exits).
+	if _, err := c.Shutdown(ctx); err != nil {
+		return failAPI(err)
 	}
-	if !r.OK {
-		return failResp(r)
-	}
-	sock := p.DaemonSocket()
-	deadline := time.Now().Add(4 * time.Second)
+	desc := p.DaemonDescriptor()
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sock); os.IsNotExist(err) {
+		if _, err := os.Stat(desc); os.IsNotExist(err) {
 			fmt.Println("daemon stopped")
 			return 0
 		}
