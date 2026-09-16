@@ -30,12 +30,14 @@ import (
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/codex"
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
+	"github.com/rceman/reposuite-relay/internal/version"
 )
 
 // Bounds for the local control plane — phase-specific, never a global
@@ -69,6 +71,10 @@ type Options struct {
 	// WrapStop decorates each session's runtime-stop function — the seam
 	// tests use to pause an in-flight stop under shutdown.
 	WrapStop func(stop func() error) func() error
+	// CodexCommand resolves the app-server command. Production resolves
+	// the installed Codex CLI; tests point at the deterministic fake
+	// app-server (the `__fake-codex` mode).
+	CodexCommand func() (codex.Command, error)
 	// StoreHooks overrides store filesystem primitives — test seam only
 	// for deterministic post-commit failure injection.
 	StoreHooks *store.Hooks
@@ -92,6 +98,9 @@ func (o Options) withDefaults() Options {
 	if o.RandRuntimeID == nil {
 		o.RandRuntimeID = session.NewRuntimeID
 	}
+	if o.CodexCommand == nil {
+		o.CodexCommand = codex.DefaultCommand
+	}
 	return o
 }
 
@@ -106,6 +115,7 @@ type Daemon struct {
 	store      *store.Sessions
 	broker     *events.Broker
 	supervisor *runtime.Supervisor
+	adapter    *codex.Adapter
 	instanceID string
 	token      string
 
@@ -178,6 +188,23 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	d.registry = reg
 	d.broker = events.NewBroker(ss)
 	d.supervisor = runtime.New()
+	d.adapter = codex.NewAdapter(codex.Deps{
+		Broker:        d.broker,
+		Supervisor:    d.supervisor,
+		Command:       d.opts.CodexCommand,
+		Materialize:   d.materialize,
+		RandRuntimeID: d.opts.RandRuntimeID,
+		Version:       version.Version,
+	})
+	// Runtime removal is authoritative: the adapter fails in-flight work
+	// durably on an unexpected exit, and every bound session becomes COLD
+	// in either case (deliberate stop or death).
+	d.supervisor.OnGone = d.adapter.OnRuntimeGone
+	for _, m := range reg.List() {
+		if m.Snapshot().Harness == session.HarnessCodex {
+			d.adapter.Track(m)
+		}
+	}
 	// Event state for every restored session: open transcripts via the
 	// healthy O(1) path and validate the durable seq watermark.
 	for _, m := range reg.List() {
@@ -415,6 +442,8 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 		d.handleList(w, r)
 	case p == "/v1/sessions/fixture" && r.Method == http.MethodPost:
 		d.lifecycle(d.handleServeFixture)(w, r, "")
+	case p == "/v1/sessions/codex" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleCreateCodex)(w, r, "")
 	case strings.HasPrefix(p, "/v1/sessions/"):
 		d.routeSession(w, r, strings.TrimPrefix(p, "/v1/sessions/"))
 	default:
@@ -441,6 +470,34 @@ func (d *Daemon) routeSession(w http.ResponseWriter, r *http.Request, rest strin
 			return
 		}
 		d.handleEvents(w, r, key)
+	case strings.HasSuffix(rest, "/prompt"):
+		key := strings.TrimSuffix(rest, "/prompt")
+		if strings.Contains(key, "/") || r.Method != http.MethodPost {
+			methodOrNotFound(w, r, http.MethodPost)
+			return
+		}
+		d.lifecycle(d.handlePrompt)(w, r, key)
+	case strings.HasSuffix(rest, "/cancel"):
+		key := strings.TrimSuffix(rest, "/cancel")
+		if strings.Contains(key, "/") || r.Method != http.MethodPost {
+			methodOrNotFound(w, r, http.MethodPost)
+			return
+		}
+		d.lifecycle(d.handleCancel)(w, r, key)
+	case strings.HasSuffix(rest, "/input"):
+		key := strings.TrimSuffix(rest, "/input")
+		if strings.Contains(key, "/") || r.Method != http.MethodPost {
+			methodOrNotFound(w, r, http.MethodPost)
+			return
+		}
+		d.lifecycle(d.handleInput)(w, r, key)
+	case strings.HasSuffix(rest, "/config"):
+		key := strings.TrimSuffix(rest, "/config")
+		if strings.Contains(key, "/") || r.Method != http.MethodPatch {
+			methodOrNotFound(w, r, http.MethodPatch)
+			return
+		}
+		d.lifecycle(d.handleConfig)(w, r, key)
 	case !strings.Contains(rest, "/"):
 		switch r.Method {
 		case http.MethodGet:
@@ -562,7 +619,7 @@ func (d *Daemon) handleList(w http.ResponseWriter, r *http.Request) {
 // generation start time. Several sessions may legitimately share one
 // runtime ID/PID/start time (a shared Codex app-server).
 func (d *Daemon) sessionInfo(m *session.Managed) api.SessionInfo {
-	s := m.Session
+	s := m.Snapshot()
 	info := api.SessionInfo{
 		Key:             s.Key,
 		SessionID:       s.ID,
@@ -700,6 +757,43 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
 
+// materialize applies a durable session metadata mutation requested by
+// the Codex adapter. It is the ONLY path by which native identity,
+// generation, model/mode, and logical state become durable — always under
+// the session's MetaMu, so a concurrent seq-block reservation (which uses
+// the same mutex) can never interleave a partial write.
+func (d *Daemon) materialize(m *session.Managed, upd codex.SessionUpdate) error {
+	m.MetaMu.Lock()
+	defer m.MetaMu.Unlock()
+	rs := m.Session
+	changed := false
+	if upd.NativeSessionID != nil && rs.NativeSessionID != *upd.NativeSessionID {
+		rs.NativeSessionID = *upd.NativeSessionID
+		changed = true
+	}
+	if upd.Model != nil && rs.Model != *upd.Model {
+		rs.Model = *upd.Model
+		changed = true
+	}
+	if upd.Mode != nil && rs.Mode != *upd.Mode {
+		rs.Mode = *upd.Mode
+		changed = true
+	}
+	if upd.State != nil && rs.State != *upd.State {
+		rs.State = *upd.State
+		changed = true
+	}
+	if upd.BumpGeneration {
+		rs.Generation++
+		changed = true
+	}
+	if !changed {
+		return nil // no durable write for a no-op projection
+	}
+	rs.UpdatedAt = time.Now().UTC()
+	return d.store.Save(rs)
+}
+
 // fixtureRuntimeKey is the supervisor key of a fixture session's dedicated
 // runtime: one process per session, never shared.
 func fixtureRuntimeKey(sessionID string) string { return "fixture/" + sessionID }
@@ -742,6 +836,12 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 	if !ok {
 		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
 		return
+	}
+	// Adapter cleanup first (still bound): an in-flight native turn is
+	// interrupted, unresolved requested input is aborted durably, and the
+	// session's native thread tracking is dropped.
+	if m.Snapshot().Harness == session.HarnessCodex {
+		d.adapter.StopSession(m)
 	}
 	// Runtime ownership: a dedicated runtime (fixture) is stopped and
 	// reaped; a shared runtime (Codex) is only detached — deleting one

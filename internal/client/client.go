@@ -353,6 +353,46 @@ func (c *Client) ServeFixture(ctx context.Context, key, cwd string) (api.Session
 	return resp, err
 }
 
+// CreateCodex creates a durable Codex session (COLD — no app-server is
+// started until the first prompt).
+func (c *Client) CreateCodex(ctx context.Context, key, cwd, model, mode string) (api.SessionResponse, error) {
+	var resp api.SessionResponse
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/codex",
+		api.CodexRequest{Key: key, Cwd: cwd, Model: model, Mode: mode}, &resp)
+	return resp, err
+}
+
+// Prompt submits a user prompt as a native turn (202 Accepted).
+func (c *Client) Prompt(ctx context.Context, key, text, model, effort string) (api.PromptResponse, error) {
+	var resp api.PromptResponse
+	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/prompt",
+		api.PromptRequest{Text: text, Model: model, Effort: effort}, &resp)
+	return resp, err
+}
+
+// Cancel interrupts the in-flight native turn.
+func (c *Client) Cancel(ctx context.Context, key string) (api.CancelResponse, error) {
+	var resp api.CancelResponse
+	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/cancel", nil, &resp)
+	return resp, err
+}
+
+// AnswerInput answers a native requested-input request.
+func (c *Client) AnswerInput(ctx context.Context, key, inputID string, answers []api.InputAnswer) (api.InputResponse, error) {
+	var resp api.InputResponse
+	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/input",
+		api.InputRequest{InputID: inputID, Answers: answers}, &resp)
+	return resp, err
+}
+
+// SetConfig accepts a model/mode change for a Codex session.
+func (c *Client) SetConfig(ctx context.Context, key string, model, mode *string) (api.SessionResponse, error) {
+	var resp api.SessionResponse
+	err := c.do(ctx, http.MethodPatch, sessionPath(key)+"/config",
+		api.ConfigRequest{Model: model, Mode: mode}, &resp)
+	return resp, err
+}
+
 // Status returns one session.
 func (c *Client) Status(ctx context.Context, key string) (api.SessionResponse, error) {
 	var resp api.SessionResponse

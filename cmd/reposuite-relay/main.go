@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/api"
@@ -36,6 +37,12 @@ Commands:
   help                           show this help
   paths                          print resolved RepoSuite/Relay state paths
   serve fixture --key <KEY>      start a fixture session
+  serve codex --key <KEY>        create a Codex session (COLD)
+  prompt <KEY> --text <TEXT>     submit a prompt as a native turn
+  cancel <KEY>                   interrupt the in-flight turn
+  input <KEY> --input <ID>       answer requested input
+  config <KEY> [--model M] [--mode S]
+                                 change accepted model/mode
   list                           list managed sessions
   status <KEY>                   show one session
   stop <KEY>                     stop a session
@@ -76,6 +83,14 @@ func run(args []string, selfExe string) int {
 		fmt.Printf("log_dir:         %s\n", p.LogDir())
 	case "serve":
 		return cmdServe(args[1:], selfExe)
+	case "prompt":
+		return cmdPrompt(args[1:], selfExe)
+	case "cancel":
+		return cmdCancel(args[1:], selfExe)
+	case "input":
+		return cmdInput(args[1:], selfExe)
+	case "config":
+		return cmdConfig(args[1:], selfExe)
 	case "list":
 		return cmdList(selfExe)
 	case "status":
@@ -147,14 +162,17 @@ func ensureClient(selfExe string) (*client.Client, int, bool) {
 
 // cmdServe implements `serve fixture --key <KEY>`.
 func cmdServe(args []string, selfExe string) int {
-	if len(args) == 0 || args[0] != "fixture" {
-		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture --key <KEY>")
+	if len(args) == 0 || (args[0] != "fixture" && args[0] != "codex") {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex --key <KEY> [--model M] [--mode S]")
 		return 2
 	}
+	harness := args[0]
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	key := fs.String("key", "", "session key")
+	model := fs.String("model", "", "model id (codex)")
+	mode := fs.String("mode", "", "service tier / mode (codex)")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture --key <KEY>")
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex --key <KEY> [--model M] [--mode S]")
 		return 2
 	}
 	if !session.ValidKey(*key) {
@@ -171,13 +189,152 @@ func cmdServe(args []string, selfExe string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := c.ServeFixture(ctx, *key, cwd)
+	var resp api.SessionResponse
+	if harness == "codex" {
+		resp, err = c.CreateCodex(ctx, *key, cwd, *model, *mode)
+	} else {
+		resp, err = c.ServeFixture(ctx, *key, cwd)
+	}
 	if err != nil {
 		return failAPI(err)
 	}
 	printSession(resp.Session)
 	fmt.Printf("daemon_pid=%d\n", resp.Daemon.PID)
 	return 0
+}
+
+// cmdPrompt submits a prompt as a native turn (codex sessions).
+func cmdPrompt(args []string, selfExe string) int {
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	text := fs.String("text", "", "prompt text")
+	model := fs.String("model", "", "per-turn model override")
+	effort := fs.String("effort", "", "per-turn reasoning effort override")
+	if err := fs.Parse(splitKeyFirst(args)); err != nil || fs.NArg() != 1 || *text == "" {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay prompt <KEY> --text <TEXT> [--model M] [--effort E]")
+		return 2
+	}
+	key := fs.Arg(0)
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := c.Prompt(ctx, key, *text, *model, *effort)
+	if err != nil {
+		return failAPI(err)
+	}
+	fmt.Printf("key=%s turn_id=%s native_thread_id=%s runtime_id=%s\n",
+		resp.Key, resp.TurnID, resp.NativeThreadID, resp.RuntimeID)
+	return 0
+}
+
+// cmdCancel interrupts the in-flight turn of a session.
+func cmdCancel(args []string, selfExe string) int {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	if err := fs.Parse(splitKeyFirst(args)); err != nil || fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay cancel <KEY>")
+		return 2
+	}
+	key := fs.Arg(0)
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := c.Cancel(ctx, key)
+	if err != nil {
+		return failAPI(err)
+	}
+	fmt.Printf("key=%s cancelled=1\n", resp.Key)
+	return 0
+}
+
+// cmdInput answers a native requested-input request. Answers are supplied
+// as QUESTION_ID=ANSWER pairs (repeatable).
+func cmdInput(args []string, selfExe string) int {
+	fs := flag.NewFlagSet("input", flag.ContinueOnError)
+	inputID := fs.String("input", "", "requested input id")
+	var pairs multiFlag
+	fs.Var(&pairs, "answer", "questionId=answer (repeatable)")
+	if err := fs.Parse(splitKeyFirst(args)); err != nil || fs.NArg() != 1 || *inputID == "" || len(pairs) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay input <KEY> --input <ID> --answer <QID>=<ANSWER> [--answer ...]")
+		return 2
+	}
+	key := fs.Arg(0)
+	answers := make([]api.InputAnswer, 0, len(pairs))
+	for _, p := range pairs {
+		qid, ans, found := strings.Cut(p, "=")
+		if !found || qid == "" || ans == "" {
+			fmt.Fprintf(os.Stderr, "reposuite-relay: bad answer %q, want questionId=answer\n", p)
+			return 2
+		}
+		answers = append(answers, api.InputAnswer{QuestionID: qid, Answers: []string{ans}})
+	}
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := c.AnswerInput(ctx, key, *inputID, answers)
+	if err != nil {
+		return failAPI(err)
+	}
+	fmt.Printf("key=%s input_id=%s answered=1\n", resp.Key, resp.InputID)
+	return 0
+}
+
+// cmdConfig changes the accepted model/mode of a session.
+func cmdConfig(args []string, selfExe string) int {
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	model := fs.String("model", "", "model id")
+	mode := fs.String("mode", "", "service tier / mode")
+	if err := fs.Parse(splitKeyFirst(args)); err != nil || fs.NArg() != 1 || (*model == "" && *mode == "") {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay config <KEY> [--model M] [--mode S]")
+		return 2
+	}
+	key := fs.Arg(0)
+	var m, md *string
+	if *model != "" {
+		m = model
+	}
+	if *mode != "" {
+		md = mode
+	}
+	c, code, ok := ensureClient(selfExe)
+	if !ok {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := c.SetConfig(ctx, key, m, md)
+	if err != nil {
+		return failAPI(err)
+	}
+	printSession(resp.Session)
+	return 0
+}
+
+// splitKeyFirst reorders `command <KEY> [flags]` into flag-first order:
+// the stdlib flag package stops parsing at the first non-flag argument,
+// and the documented CLI shape puts the key first.
+func splitKeyFirst(args []string) []string {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return append(append([]string{}, args[1:]...), args[0])
+	}
+	return args
+}
+
+// multiFlag collects a repeatable string flag.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
 }
 
 // cmdList implements `list` — ensures the daemon, lists durable sessions
