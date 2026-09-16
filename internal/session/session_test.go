@@ -56,9 +56,16 @@ func TestIDUnique(t *testing.T) {
 func mkRelay(key string) *RelaySession {
 	id, _ := NewSessionID()
 	now := time.Now()
-	return &RelaySession{ID: id, Key: key, Harness: HarnessFixture,
-		Cwd: "/", State: StateIdle, Generation: 1,
-		CreatedAt: now, UpdatedAt: now}
+	return &RelaySession{
+		ID:         id,
+		Key:        key,
+		Harness:    HarnessFixture,
+		Cwd:        "/",
+		State:      StateIdle,
+		Generation: 1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
 }
 
 func mkManaged(k string) *Managed {

@@ -1,117 +1,177 @@
-package daemon
-
-// Daemon-level proof for store commit-point semantics: after a create
-// commit point the daemon must never continue serving ambiguous
-// authority, and after a committed delete it must never resurrect the
-// session because cleanup failed.
+package daemon_test
 
 import (
-	"errors"
+	"encoding/json"
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/paths"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/store"
 )
 
-var errInjected = errors.New("injected fault")
+// TestStaleDescriptorRecovery: a crashed daemon leaves a stale descriptor
+// (dead endpoint). A managed command spawns a contender; the lock owner
+// atomically replaces the descriptor with its own generation.
+func TestStaleDescriptorRecovery(t *testing.T) {
+	home, root := testRoot(t)
+	p, err := paths.Resolve(home, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stale := api.Descriptor{
+		Version:     api.DescriptorVersion,
+		InstanceID:  strings.Repeat("a", 32),
+		PID:         999999,
+		Endpoint:    "http://127.0.0.1:1", // nothing listens here
+		BearerToken: strings.Repeat("b", 64),
+	}
+	raw, _ := json.Marshal(stale)
+	if err := os.WriteFile(p.DaemonDescriptor(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A managed command must recover and start the daemon.
+	mustCLI(t, home, root, "list")
+	_, count := daemonStatus(t, home, root)
+	_ = count
+	fresh := readDescriptor(t, home, root)
+	if fresh.InstanceID == stale.InstanceID {
+		t.Fatal("stale descriptor was not replaced by the lock owner")
+	}
+	stopDaemon(t, home, root)
+}
 
-// TestCreateUncertainHaltsDaemon: create rename committed + root sync
-// failure → daemon returns INTERNAL and halts; the canonical session
-// exists on disk and the next daemon start owns it (no ghost, no
-// duplicate window).
-func TestCreateUncertainHaltsDaemon(t *testing.T) {
-	_, p, c, served := startInProcess(t, func(o *Options) {
-		o.StoreHooks = &store.Hooks{
-			SyncDir: func(dir string) error {
-				if filepath.Base(dir) == "sessions" {
-					return errInjected // post-rename root sync only
-				}
-				return syncDirReal(dir)
-			},
-		}
-	})
-	_, err := serve(t, c, "ghost")
-	wantAPIErr(t, err, api.ErrInternal)
-	// The daemon must halt rather than keep serving with ambiguous state.
-	select {
-	case <-served:
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon must shut down after an uncertain store commit")
-	}
-	// Canonical truth: the session directory exists.
-	sessionsDir := p.SessionsDir()
-	entries, err := os.ReadDir(sessionsDir)
+// TestMalformedDescriptorFailsClosed: a corrupt descriptor is never
+// trusted and never silently deleted — the client fails closed as a bad
+// peer rather than sending commands somewhere unknown.
+func TestMalformedDescriptorFailsClosed(t *testing.T) {
+	home, root := testRoot(t)
+	p, err := paths.Resolve(home, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := 0
-	for _, e := range entries {
-		if len(e.Name()) == 32 { // canonical session id
-			found++
-		}
-	}
-	if found != 1 {
-		t.Fatalf("canonical session dirs = %d, want 1", found)
-	}
-	// A fresh daemon owns the session — no duplicate create possible.
-	ss, err := store.OpenSessions(sessionsDir, nil)
-	if err != nil {
+	if err := p.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := ss.LoadAll()
-	if err != nil || len(loaded) != 1 || loaded[0].Key != "ghost" {
-		t.Fatalf("next startup must own the committed session: %v %v", loaded, err)
+	marker := []byte("{not a descriptor")
+	if err := os.WriteFile(p.DaemonDescriptor(), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := cli(t, home, root, "list")
+	if err == nil {
+		t.Fatalf("malformed descriptor accepted: %s", out)
+	}
+	if !strings.Contains(out, "compatible relayd") {
+		t.Fatalf("want fail-closed bad-peer error, got: %s", out)
+	}
+	got, _ := os.ReadFile(p.DaemonDescriptor())
+	if string(got) != string(marker) {
+		t.Fatal("client modified/deleted the descriptor")
+	}
+	// Non-loopback endpoint also fails closed.
+	bad := api.Descriptor{
+		Version: api.DescriptorVersion, InstanceID: strings.Repeat("a", 32),
+		PID: 1234, Endpoint: "http://10.0.0.1:9000", BearerToken: strings.Repeat("b", 64),
+	}
+	raw, _ := json.Marshal(bad)
+	os.WriteFile(p.DaemonDescriptor(), raw, 0o600)
+	out, err = cli(t, home, root, "list")
+	if err == nil || !strings.Contains(out, "loopback") {
+		t.Fatalf("non-loopback descriptor accepted: %s %v", out, err)
 	}
 }
 
-// TestDeleteCleanupFailureStillDeletes: delete commit + tombstone cleanup
-// failure → stop reports success, the session is gone from disk and the
-// registry, and the tombstone is recovered at next start.
-func TestDeleteCleanupFailureStillDeletes(t *testing.T) {
-	_, p, c, _ := startInProcess(t, func(o *Options) {
-		o.StoreHooks = &store.Hooks{
-			RemoveAll: func(path string) error {
-				if filepath.Base(filepath.Dir(path)) == "sessions" &&
-					len(filepath.Base(path)) > 8 && filepath.Base(path)[:8] == ".delete-" {
-					return errInjected // tombstone removal only
-				}
-				return os.RemoveAll(path)
-			},
+// TestBadRequestShapes: structurally valid JSON, semantically bad —
+// stable machine codes on both path and body key validation.
+func TestBadRequestShapes(t *testing.T) {
+	home, root := testRoot(t)
+	serveKey(t, home, root, "ok")
+	d := readDescriptor(t, home, root)
+
+	status, out := rawReq(t, d, http.MethodGet, "/v1/sessions/missing", "", true)
+	if status != 404 || !strings.Contains(out, "SESSION_NOT_FOUND") {
+		t.Fatalf("missing: %d %s", status, out)
+	}
+	status, out = rawReq(t, d, http.MethodDelete, "/v1/sessions/missing", "", true)
+	if status != 404 || !strings.Contains(out, "SESSION_NOT_FOUND") {
+		t.Fatalf("stop missing: %d %s", status, out)
+	}
+	// Path-based key validation (single segment, URL-escaped space).
+	status, out = rawReq(t, d, http.MethodGet, "/v1/sessions/bad%20key", "", true)
+	if status != 400 || !strings.Contains(out, "INVALID_SESSION_KEY") {
+		t.Fatalf("bad path key: %d %s", status, out)
+	}
+	// Path traversal is never a valid session route.
+	status, _ = rawReq(t, d, http.MethodGet, "/v1/sessions/..%2Fx", "", true)
+	if status != 404 {
+		t.Fatalf("traversal route: %d", status)
+	}
+	// Duplicate create is a conflict.
+	status, out = rawReq(t, d, http.MethodPost, "/v1/sessions/fixture", `{"key":"ok","cwd":"/"}`, true)
+	if status != 409 || !strings.Contains(out, "SESSION_EXISTS") {
+		t.Fatalf("duplicate: %d %s", status, out)
+	}
+	stopDaemon(t, home, root)
+}
+
+// TestPermissions: private modes on state dirs, descriptor, lock.
+func TestPermissions(t *testing.T) {
+	home, root := testRoot(t)
+	serveKey(t, home, root, "perm")
+	defer stopDaemon(t, home, root)
+
+	check := func(path string, want os.FileMode) {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
 		}
-	})
-	if _, err := serve(t, c, "victim"); err != nil {
-		t.Fatalf("serve: %v", err)
+		if got := fi.Mode().Perm(); got != want {
+			t.Fatalf("%s mode %o want %o", path, got, want)
+		}
 	}
-	ctx, cancel := tctx(t)
-	defer cancel()
-	if _, err := c.StopSession(ctx, "victim"); err != nil {
-		t.Fatalf("committed delete must succeed despite cleanup failure: %v", err)
-	}
-	// Registry: gone.
-	if _, err := c.Status(ctx, "victim"); err == nil {
-		t.Fatal("session must be gone")
-	}
-	// Disk: canonical dir gone (tombstone may remain for recovery).
-	entries, err := os.ReadDir(p.SessionsDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if len(e.Name()) == 32 {
-			t.Fatalf("canonical session dir must be gone: %s", e.Name())
+	check(filepath.Join(root, "relay"), 0o700)
+	check(filepath.Join(root, "relay", "run"), 0o700)
+	check(filepath.Join(root, "relay", "logs"), 0o700)
+	check(filepath.Join(root, "relay", "run", "daemon.json"), 0o600)
+	check(filepath.Join(root, "relay", "run", "relayd.lock"), 0o600)
+	check(filepath.Join(root, "relay", "sessions"), 0o700)
+}
+
+// TestRelativeHomeRejected: relative REPOSUITE_HOME fails before any
+// daemon/socket is created.
+func TestRelativeHomeRejected(t *testing.T) {
+	home, _ := testRoot(t)
+	for _, rel := range []string{"reposuite", "./rs", "x/y"} {
+		out, err := cli(t, home, rel, "list")
+		if err == nil {
+			t.Fatalf("REPOSUITE_HOME=%q accepted: %s", rel, out)
+		}
+		if !strings.Contains(out, "not absolute") {
+			t.Fatalf("REPOSUITE_HOME=%q wrong error: %s", rel, out)
+		}
+		if _, statErr := os.Stat(filepath.Join(home, rel, "relay")); !os.IsNotExist(statErr) {
+			t.Fatalf("REPOSUITE_HOME=%q created state", rel)
 		}
 	}
 }
 
-// syncDirReal mirrors the store's syncDir for hook composition.
-func syncDirReal(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
+// TestDaemonPidAndVersion: daemon status exposes pid + API version.
+func TestDaemonPidAndVersion(t *testing.T) {
+	home, root := testRoot(t)
+	serveKey(t, home, root, "x")
+	out := mustCLI(t, home, root, "daemon", "status")
+	pid, _ := strconv.Atoi(field(t, out, "pid"))
+	if pid <= 1 || !alive(pid) {
+		t.Fatalf("daemon pid %d not alive", pid)
 	}
-	defer f.Close()
-	return f.Sync()
+	if v := field(t, out, "apiVersion"); v != "1" {
+		t.Fatalf("apiVersion=%s", v)
+	}
+	stopDaemon(t, home, root)
 }

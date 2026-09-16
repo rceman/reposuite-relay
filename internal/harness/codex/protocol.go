@@ -76,7 +76,12 @@ type UserInput struct {
 }
 
 // TextInput builds a text input element.
-func TextInput(text string) UserInput { return UserInput{Type: "text", Text: text} }
+func TextInput(text string) UserInput {
+	return UserInput{
+		Type: "text",
+		Text: text,
+	}
+}
 
 // ThreadStartParams is the verified thread/start body subset.
 type ThreadStartParams struct {

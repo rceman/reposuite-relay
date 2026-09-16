@@ -186,8 +186,7 @@ func TestDeadEndpointSpawnsContender(t *testing.T) {
 
 	// Ensure will spawn repeatedly and time out — the point is that it
 	// classified the dead endpoint as "not running", not "bad peer".
-	_, err = Ensure(p, "/unused")
-	if !errors.Is(err, ErrStartTimeout) {
+	if _, err := Ensure(p, "/unused"); !errors.Is(err, ErrStartTimeout) {
 		t.Fatalf("want ErrStartTimeout, got %v", err)
 	}
 	if n := atomic.LoadInt32(&spawned); n < 1 {

@@ -32,5 +32,8 @@ func TestMain(m *testing.M) {
 
 // fakeCommand returns the fake app-server command.
 func fakeCommand() (Command, error) {
-	return Command{Path: fakeBin, Args: []string{"__fake-codex"}}, nil
+	return Command{
+		Path: fakeBin,
+		Args: []string{"__fake-codex"},
+	}, nil
 }

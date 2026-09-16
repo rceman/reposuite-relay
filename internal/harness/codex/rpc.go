@@ -216,7 +216,10 @@ func (c *Conn) Call(ctx context.Context, method string, params any, out any) err
 	}
 	c.nextID++
 	id := c.nextID
-	call := &pendingCall{method: method, ch: make(chan rpcMessage, 1)}
+	call := &pendingCall{
+		method: method,
+		ch:     make(chan rpcMessage, 1),
+	}
 	c.pending[id] = call
 	c.mu.Unlock()
 
@@ -225,7 +228,12 @@ func (c *Conn) Call(ctx context.Context, method string, params any, out any) err
 		ID      int64           `json:"id"`
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params,omitempty"`
-	}{Jsonrpc: "2.0", ID: id, Method: method, Params: raw}
+	}{
+		Jsonrpc: "2.0",
+		ID:      id,
+		Method:  method,
+		Params:  raw,
+	}
 	if err := c.write(frame); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -259,7 +267,11 @@ func (c *Conn) Notify(method string, params any) error {
 		Jsonrpc string `json:"jsonrpc"`
 		Method  string `json:"method"`
 		Params  any    `json:"params,omitempty"`
-	}{Jsonrpc: "2.0", Method: method, Params: params}
+	}{
+		Jsonrpc: "2.0",
+		Method:  method,
+		Params:  params,
+	}
 	return c.write(frame)
 }
 
@@ -269,7 +281,11 @@ func (c *Conn) Respond(id int64, result any) error {
 		Jsonrpc string `json:"jsonrpc"`
 		ID      int64  `json:"id"`
 		Result  any    `json:"result,omitempty"`
-	}{Jsonrpc: "2.0", ID: id, Result: result}
+	}{
+		Jsonrpc: "2.0",
+		ID:      id,
+		Result:  result,
+	}
 	return c.write(frame)
 }
 
@@ -278,7 +294,14 @@ func (c *Conn) respondError(id int64, code int, msg string) error {
 		Jsonrpc string    `json:"jsonrpc"`
 		ID      int64     `json:"id"`
 		Error   *rpcError `json:"error"`
-	}{Jsonrpc: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}}
+	}{
+		Jsonrpc: "2.0",
+		ID:      id,
+		Error: &rpcError{
+			Code:    code,
+			Message: msg,
+		},
+	}
 	return c.write(frame)
 }
 
@@ -317,8 +340,10 @@ func (c *Conn) fail(err error) {
 	c.mu.Unlock()
 	close(c.done)
 	for _, call := range pend {
-		call.ch <- rpcMessage{Error: &rpcError{Code: -32000,
-			Message: err.Error()}}
+		call.ch <- rpcMessage{Error: &rpcError{
+			Code:    -32000,
+			Message: err.Error(),
+		}}
 	}
 }
 

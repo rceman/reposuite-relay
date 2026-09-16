@@ -28,7 +28,10 @@ func DefaultCommand() (Command, error) {
 	if err != nil {
 		return Command{}, fmt.Errorf("codex executable: %w", err)
 	}
-	return Command{Path: path, Args: []string{"app-server"}}, nil
+	return Command{
+		Path: path,
+		Args: []string{"app-server"},
+	}, nil
 }
 
 // Server is one owned app-server process generation plus its RPC

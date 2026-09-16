@@ -1,17 +1,13 @@
-// Package client is the single local HTTP client for relayd (ADR-006):
-// descriptor resolution and validation, bearer authentication, bounded
-// requests, stable API error decoding, and typed methods. The CLI (and
-// later the TUI and Gateway bridge) must go through this package — HTTP
-// request construction is never duplicated.
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/paths"
 	"io"
 	"net"
 	"net/http"
@@ -22,10 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/events"
-	"github.com/rceman/reposuite-relay/internal/paths"
 )
 
 // Stable client-side errors.
@@ -139,7 +131,9 @@ func isHex(s string) bool {
 func newHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+			DialContext: (&net.Dialer{
+				Timeout: 2 * time.Second,
+			}).DialContext,
 			// Loopback only — no proxies, no keep-alive surprises.
 			Proxy:                 nil,
 			MaxIdleConnsPerHost:   4,
@@ -159,7 +153,10 @@ func Dial(p paths.Paths) (*Client, error) {
 		}
 		return nil, err
 	}
-	c := &Client{desc: *d, hc: newHTTPClient()}
+	c := &Client{
+		desc: *d,
+		hc:   newHTTPClient(),
+	}
 	if err := c.ping(); err != nil {
 		return nil, err
 	}
@@ -311,7 +308,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		var eb api.ErrorBody
 		if json.Unmarshal(raw, &eb) == nil && eb.Error.Code != "" {
-			return &APIError{Status: resp.StatusCode, Code: eb.Error.Code, Message: eb.Error.Message}
+			return &APIError{
+				Status:  resp.StatusCode,
+				Code:    eb.Error.Code,
+				Message: eb.Error.Message,
+			}
 		}
 		return &APIError{
 			Status:  resp.StatusCode,
@@ -325,169 +326,6 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 	}
 	return nil
-}
-
-func sessionPath(key string) string { return "/v1/sessions/" + url.PathEscape(key) }
-
-// --- typed methods ----------------------------------------------------
-
-// DaemonInfo returns the daemon generation info.
-func (c *Client) DaemonInfo(ctx context.Context) (api.DaemonInfo, error) {
-	var resp api.DaemonResponse
-	err := c.do(ctx, http.MethodGet, "/v1/daemon", nil, &resp)
-	return resp.Daemon, err
-}
-
-// Sessions lists durable sessions (COLD sessions included).
-func (c *Client) Sessions(ctx context.Context) (api.SessionList, error) {
-	var resp api.SessionList
-	err := c.do(ctx, http.MethodGet, "/v1/sessions", nil, &resp)
-	return resp, err
-}
-
-// ServeFixture creates a fixture session.
-func (c *Client) ServeFixture(ctx context.Context, key, cwd string) (api.SessionResponse, error) {
-	var resp api.SessionResponse
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/fixture",
-		api.FixtureRequest{Key: key, Cwd: cwd}, &resp)
-	return resp, err
-}
-
-// CreateCodex creates a durable Codex session (COLD — no app-server is
-// started until the first prompt).
-func (c *Client) CreateCodex(ctx context.Context, key, cwd, model, mode string) (api.SessionResponse, error) {
-	var resp api.SessionResponse
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/codex",
-		api.CodexRequest{Key: key, Cwd: cwd, Model: model, Mode: mode}, &resp)
-	return resp, err
-}
-
-// Prompt submits a user prompt as a native turn (202 Accepted).
-func (c *Client) Prompt(ctx context.Context, key, text, model, effort string) (api.PromptResponse, error) {
-	var resp api.PromptResponse
-	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/prompt",
-		api.PromptRequest{Text: text, Model: model, Effort: effort}, &resp)
-	return resp, err
-}
-
-// Cancel interrupts the in-flight native turn.
-func (c *Client) Cancel(ctx context.Context, key string) (api.CancelResponse, error) {
-	var resp api.CancelResponse
-	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/cancel", nil, &resp)
-	return resp, err
-}
-
-// AnswerInput answers a native requested-input request.
-func (c *Client) AnswerInput(ctx context.Context, key, inputID string, answers []api.InputAnswer) (api.InputResponse, error) {
-	var resp api.InputResponse
-	err := c.do(ctx, http.MethodPost, sessionPath(key)+"/input",
-		api.InputRequest{InputID: inputID, Answers: answers}, &resp)
-	return resp, err
-}
-
-// SetConfig accepts a model/mode change for a Codex session.
-func (c *Client) SetConfig(ctx context.Context, key string, model, mode *string) (api.SessionResponse, error) {
-	var resp api.SessionResponse
-	err := c.do(ctx, http.MethodPatch, sessionPath(key)+"/config",
-		api.ConfigRequest{Model: model, Mode: mode}, &resp)
-	return resp, err
-}
-
-// Status returns one session.
-func (c *Client) Status(ctx context.Context, key string) (api.SessionResponse, error) {
-	var resp api.SessionResponse
-	err := c.do(ctx, http.MethodGet, sessionPath(key), nil, &resp)
-	return resp, err
-}
-
-// StopSession deletes a session (runtime stop + durable delete).
-func (c *Client) StopSession(ctx context.Context, key string) (api.DaemonInfo, error) {
-	var resp api.DaemonResponse
-	err := c.do(ctx, http.MethodDelete, sessionPath(key), nil, &resp)
-	return resp.Daemon, err
-}
-
-// Shutdown asks the daemon to stop gracefully.
-func (c *Client) Shutdown(ctx context.Context) (api.DaemonInfo, error) {
-	var resp api.DaemonResponse
-	err := c.do(ctx, http.MethodPost, "/v1/daemon/shutdown", nil, &resp)
-	return resp.Daemon, err
-}
-
-// Transcript fetches the bounded durable transcript tail. The limit is
-// always sent explicitly: limit 0 means "no records", and the server
-// rejects negative limits.
-func (c *Client) Transcript(ctx context.Context, key string, limit int) (api.TranscriptPage, error) {
-	var resp api.TranscriptPage
-	path := sessionPath(key) + "/transcript?limit=" + strconv.Itoa(limit)
-	err := c.do(ctx, http.MethodGet, path, nil, &resp)
-	return resp, err
-}
-
-// EventStream is an open NDJSON event stream.
-type EventStream struct {
-	rc io.ReadCloser
-	sc *bufio.Scanner
-}
-
-// Next returns the next canonical event, or an error: io.EOF at stream
-// end, *APIError for a deterministic stream termination
-// (SUBSCRIBER_EVICTED / STREAM_CLOSED), or a transport error.
-func (s *EventStream) Next() (events.Event, error) {
-	for s.sc.Scan() {
-		line := s.sc.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var probe struct {
-			Error *api.ErrorDetail `json:"error"`
-		}
-		if json.Unmarshal(line, &probe) == nil && probe.Error != nil {
-			return events.Event{}, &APIError{Code: probe.Error.Code, Message: probe.Error.Message}
-		}
-		var ev events.Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			return events.Event{}, fmt.Errorf("malformed event line: %w", err)
-		}
-		return ev, nil
-	}
-	if err := s.sc.Err(); err != nil {
-		return events.Event{}, err
-	}
-	return events.Event{}, io.EOF
-}
-
-// Close ends the stream (cancels the subscription server-side).
-func (s *EventStream) Close() error { return s.rc.Close() }
-
-// Events opens the canonical event stream for a session after the given
-// cursor. A too-old cursor is returned as *APIError CURSOR_TOO_OLD before
-// any streaming begins.
-func (c *Client) Events(ctx context.Context, key string, after uint64) (*EventStream, error) {
-	path := sessionPath(key) + "/events?after=" + strconv.FormatUint(after, 10)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.desc.Endpoint+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.desc.BearerToken)
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrNotRunning, err)
-	}
-	if resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		var eb api.ErrorBody
-		if json.Unmarshal(raw, &eb) == nil && eb.Error.Code != "" {
-			return nil, &APIError{Status: resp.StatusCode, Code: eb.Error.Code, Message: eb.Error.Message}
-		}
-		return nil, &APIError{Status: resp.StatusCode, Code: fmt.Sprintf("HTTP_%d", resp.StatusCode)}
-	}
-	sc := bufio.NewScanner(resp.Body)
-	// The scanner accepts exactly the canonical frame bound — the same
-	// contract enforced at publication and by the NDJSON server.
-	sc.Buffer(make([]byte, 0, 64*1024), api.MaxEventFrameBytes)
-	return &EventStream{rc: resp.Body, sc: sc}, nil
 }
 
 // ExecutablePath is a small helper for tests/spawn wiring.

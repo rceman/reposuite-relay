@@ -110,7 +110,10 @@ func TestCallCorrelatesResponses(t *testing.T) {
 			defer wg.Done()
 			var res InitializeResult
 			if err := p.conn.Call(context.Background(), "initialize",
-				InitializeParams{ClientInfo: ClientInfo{Name: name, Version: "0"}}, &res); err != nil {
+				InitializeParams{ClientInfo: ClientInfo{
+					Name:    name,
+					Version: "0",
+				}}, &res); err != nil {
 				t.Errorf("call %s: %v", name, err)
 				return
 			}

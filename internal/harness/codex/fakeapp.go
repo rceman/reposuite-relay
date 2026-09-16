@@ -191,7 +191,11 @@ func (f *fakeServer) startTurn(msg frame) {
 	})
 
 	text := p.Input[0].Text
-	f.pending = &pendingTurn{threadID: p.ThreadID, turnID: turnID, text: text}
+	f.pending = &pendingTurn{
+		threadID: p.ThreadID,
+		turnID:   turnID,
+		text:     text,
+	}
 
 	if f.mode == "input" {
 		f.nextID++
@@ -286,7 +290,10 @@ func (f *fakeServer) respond(msg frame, result any) {
 	if msg.ID != nil {
 		id = *msg.ID
 	}
-	f.write(frame{ID: &id, Result: mustJSON(result)})
+	f.write(frame{
+		ID:     &id,
+		Result: mustJSON(result),
+	})
 }
 
 func (f *fakeServer) respondErr(msg frame, code int, text string) {
@@ -294,11 +301,20 @@ func (f *fakeServer) respondErr(msg frame, code int, text string) {
 	if msg.ID != nil {
 		id = *msg.ID
 	}
-	f.write(frame{ID: &id, Error: &rpcError{Code: code, Message: text}})
+	f.write(frame{
+		ID: &id,
+		Error: &rpcError{
+			Code:    code,
+			Message: text,
+		},
+	})
 }
 
 func (f *fakeServer) notify(method string, params any) {
-	f.write(frame{Method: method, Params: mustJSON(params)})
+	f.write(frame{
+		Method: method,
+		Params: mustJSON(params),
+	})
 }
 
 func (f *fakeServer) write(v frame) {
