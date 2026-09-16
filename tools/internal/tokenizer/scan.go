@@ -85,7 +85,12 @@ func (c *Counter) Scan(ctx context.Context, opts ScanOptions) (Report, error) {
 	if workers > len(opts.Paths) {
 		workers = len(opts.Paths)
 	}
-	report := Report{MaxTokens: max}
+	report := Report{
+		Files:     []FileCount{},
+		Offending: []FileCount{},
+		Skipped:   []FileCount{},
+		MaxTokens: max,
+	}
 	if len(opts.Paths) == 0 {
 		return report, nil
 	}
