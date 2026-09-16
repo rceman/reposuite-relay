@@ -28,10 +28,42 @@ jobs:
       - name: Format
         run: test -z "$(gofmt -l .)"
 
+      - name: Root dependency invariant
+        run: |
+          # Production stays stdlib-only: no require, no replace.
+          ! grep -Eq '^(require|replace)' go.mod
+          grep -q '^module github.com/rceman/reposuite-relay$' go.mod
+
+      - name: Tokenizer payload cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/reposuite-relay/tiktoken
+          key: reposuite-relay-o200k_base-tiktoken-v1
+
+      - name: Structural formatting (full tree)
+        run: scripts/check-go-format.sh --all
+
+      - name: Go file hygiene (gofmt + structural + token budget)
+        run: scripts/check-go-files.sh --all
+
       - name: Tidy check
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+
+      - name: Tools module tidy check
+        run: |
+          cd tools
+          go mod tidy
+          git -C .. diff --exit-code -- tools/go.mod tools/go.sum
+
+      - name: Tools module vet, test, race, build
+        run: |
+          cd tools
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go build ./...
 
       - name: Vet
         run: go vet ./...

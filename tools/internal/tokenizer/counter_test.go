@@ -1,0 +1,249 @@
+package tokenizer
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// referenceCounts were produced by the Repodex tokenizer
+// (cmd/tokenizer --enc o200k_base, tiktoken-go v0.1.8) for the same
+// o200k_base encoding, so parity with the reference implementation is
+// asserted exactly rather than approximately.
+var referenceCounts = []struct {
+	name   string
+	source string
+	tokens int
+}{
+	{"empty", "", 0},
+	{"ascii-go", "package fixture\nfunc Add(a, b int) int { return a + b }", 17},
+	{"unicode-comment", "package fixture\n// 中文注释：结构化会话 — naïve café ünïcödé\nconst Greeting = \"こんにちは世界 🚀\"", 30},
+	{"long-line", "package fixture\nvar Values = []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}", 68},
+}
+
+func TestCountTextMatchesReferenceTokenizers(t *testing.T) {
+	counter := NewCounter()
+	for _, fixture := range referenceCounts {
+		got, err := counter.CountText([]byte(fixture.source))
+		if err != nil {
+			t.Fatalf("%s: %v", fixture.name, err)
+		}
+		if got != fixture.tokens {
+			t.Fatalf("%s: tokens = %d, want %d", fixture.name, got, fixture.tokens)
+		}
+	}
+}
+
+func TestCountTextIsDeterministic(t *testing.T) {
+	counter := NewCounter()
+	source := []byte(referenceCounts[2].source)
+	first, err := counter.CountText(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		next, err := counter.CountText(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next != first {
+			t.Fatalf("count drifted: %d != %d", next, first)
+		}
+	}
+}
+
+func TestCountTextRejectsInvalidInput(t *testing.T) {
+	counter := NewCounter()
+	if _, err := counter.CountText([]byte("package a\x00b")); err == nil {
+		t.Fatal("NUL byte accepted")
+	}
+	if _, err := counter.CountText([]byte{0xff, 0xfe, 0xfd}); err == nil {
+		t.Fatal("invalid UTF-8 accepted")
+	}
+}
+
+func TestCacheDirHonoursOverride(t *testing.T) {
+	t.Setenv(TokenCacheDirEnv, "/tmp/explicit-token-cache")
+	if got := CacheDir(); got != "/tmp/explicit-token-cache" {
+		t.Fatalf("CacheDir = %q", got)
+	}
+	t.Setenv(TokenCacheDirEnv, "")
+	t.Setenv("XDG_CACHE_HOME", "/tmp/xdg-cache")
+	if got := CacheDir(); got != filepath.Join("/tmp/xdg-cache", "reposuite-relay", "tiktoken") {
+		t.Fatalf("CacheDir = %q", got)
+	}
+}
+
+func TestParseRanksRejectsMalformedPayload(t *testing.T) {
+	if _, err := parseRanks([]byte("bm90LWEtcmFuaw==\n")); err == nil {
+		t.Fatal("malformed payload accepted")
+	}
+	if _, err := parseRanks(nil); err == nil {
+		t.Fatal("empty payload accepted")
+	}
+	ranks, err := parseRanks([]byte("YQ== 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ranks["a"] != 0 {
+		t.Fatalf("ranks = %+v", ranks)
+	}
+}
+
+// buildFixture returns Go source whose exact o200k_base token count is
+// the requested value. Whole padding lines get close (their per-line cost
+// is measured once), then a short trailing fragment absorbs the remainder:
+// token counts are monotonic in the input, so a binary search over a few
+// fragment shapes lands exactly.
+func buildFixture(t *testing.T, tokens int) string {
+	t.Helper()
+	counter := NewCounter()
+	count := func(body string) int {
+		n, err := counter.CountText([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	base := "package fixture\n"
+	line := "// padding line for the budget fixture\n"
+	perLine := count(base+line) - count(base)
+	if perLine < 1 {
+		perLine = 1
+	}
+	lines := (tokens - count(base)) / perLine
+	if lines < 0 {
+		lines = 0
+	}
+	body := base + strings.Repeat(line, lines)
+	if count(body) > tokens {
+		body = base
+	}
+	if count(body) == tokens {
+		return body
+	}
+	short := base + strings.Repeat(line, lines-1)
+	if lines == 0 {
+		short = base
+	}
+	shapes := []func(fragment string) string{
+		func(f string) string { return body + "// " + f + "\n" },
+		func(f string) string { return body + f },
+		func(f string) string { return short + "// " + f + "\n" },
+		func(f string) string { return short + f },
+	}
+	fillers := []string{"x", "1", "-", "_", "\u00e9", "9", "z"}
+	for _, shape := range shapes {
+		for _, filler := range fillers {
+			low, high := 0, 4*tokens+16
+			for low < high {
+				mid := (low + high) / 2
+				if count(shape(strings.Repeat(filler, mid))) >= tokens {
+					high = mid
+				} else {
+					low = mid + 1
+				}
+			}
+			candidate := shape(strings.Repeat(filler, low))
+			if count(candidate) == tokens {
+				return candidate
+			}
+		}
+	}
+	t.Fatalf("cannot build a fixture with exactly %d tokens (from %d)", tokens, count(body))
+	return ""
+}
+
+// writeFixture writes a Go file with the given exact token count.
+func writeFixture(t *testing.T, dir, name string, tokens int) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(buildFixture(t, tokens)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+func TestScanBudgetBoundaryAndOrdering(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "at_limit.go", MaxTokens)
+	writeFixture(t, dir, "over_limit.go", MaxTokens+1)
+	writeFixture(t, dir, "small.go", 20)
+	generated := "// Code generated by hand. DO NOT EDIT.\n\npackage fixture\n\nvar Big = \"" +
+		strings.Repeat("x", 40000) + "\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "generated.go"), []byte(generated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{"over_limit.go", "small.go", "at_limit.go", "generated.go"}
+	report, err := NewCounter().Scan(context.Background(), ScanOptions{
+		Root:    dir,
+		Paths:   paths,
+		Workers: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Offending) != 1 || report.Offending[0].Path != "over_limit.go" {
+		t.Fatalf("offending = %+v", report.Offending)
+	}
+	if report.Offending[0].Tokens != MaxTokens+1 {
+		t.Fatalf("offending tokens = %d", report.Offending[0].Tokens)
+	}
+	if report.CountAboveMax != 1 || report.Max.Path != "over_limit.go" {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Path != "generated.go" {
+		t.Fatalf("generated file was not skipped: %+v", report.Skipped)
+	}
+	want := []string{"at_limit.go", "over_limit.go", "small.go"}
+	for i, file := range report.Files {
+		if file.Path != want[i] {
+			t.Fatalf("files[%d] = %q, want %q (ordering must be deterministic)", i, file.Path, want[i])
+		}
+	}
+	if report.TotalTokens != 2*MaxTokens+21 {
+		t.Fatalf("total tokens = %d", report.TotalTokens)
+	}
+}
+
+// TestScanIsConcurrencySafe runs many workers over many files so the race
+// detector exercises shared encoder state.
+func TestScanIsConcurrencySafe(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 0, 24)
+	for i := 0; i < 24; i++ {
+		paths = append(paths, writeFixture(t, dir, "file_"+string(rune('a'+i))+".go", 50+i))
+	}
+	report, err := NewCounter().Scan(context.Background(), ScanOptions{
+		Root:    dir,
+		Paths:   paths,
+		Workers: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Files) != len(paths) {
+		t.Fatalf("files = %d, want %d", len(report.Files), len(paths))
+	}
+	for _, file := range report.Files {
+		want := 50 + int(file.Path[len("file_")]-'a')
+		if file.Tokens != want {
+			t.Fatalf("%s tokens = %d, want %d", file.Path, file.Tokens, want)
+		}
+	}
+}
+
+func TestScanReportsMissingAndInvalidFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.go"), []byte{0xff}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewCounter().Scan(context.Background(), ScanOptions{
+		Root:  dir,
+		Paths: []string{"bad.go", "missing.go"},
+	}); err == nil {
+		t.Fatal("invalid file set accepted")
+	}
+}
