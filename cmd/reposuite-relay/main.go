@@ -19,7 +19,7 @@ import (
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/client"
-	"github.com/rceman/reposuite-relay/internal/codex"
+	"github.com/rceman/reposuite-relay/internal/harness/codex"
 	"github.com/rceman/reposuite-relay/internal/daemon"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/codex"
+	"github.com/rceman/reposuite-relay/internal/harness/codex"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
 )
