@@ -1,3 +1,21 @@
+// transcript.go implements the compact durable transcript primitive:
+// an append-only transcript.jsonl plus a derived transcript.idx of
+// fixed-width uint64 record offsets for O(1) bounded tail reads.
+//
+// The Relay transcript holds presentation/audit/reconnect records only —
+// it is NOT the model context and is never fed back into a harness. The
+// native harness store stays authoritative for conversation state.
+//
+// seq is assigned by the caller's canonical event allocator and only
+// needs to strictly increase: gaps are legal because transient live
+// events may consume sequence values without being persisted.
+//
+// Crash model: append writes the JSONL record and syncs BEFORE the index
+// offset, so the index never intentionally commits ahead of the
+// transcript. A crash between the two leaves an unindexed tail record,
+// which the next Open repairs by rebuilding the derived index. A partial
+// final JSON line is crash residue and is truncated; a malformed complete
+// record in the interior is corruption and fails closed.
 package store
 
 import (

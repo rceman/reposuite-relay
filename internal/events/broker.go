@@ -1,3 +1,39 @@
+// Package events implements the canonical per-session event foundation:
+// a monotonic sequence allocator with durable block reservation, a bounded
+// recent-event replay ring, and bounded live subscribers.
+//
+// This is deliberately a small Relay-specific component, not a generic
+// event bus. Events are the domain currency for HTTP NDJSON streaming, a
+// future TUI, and a future Gateway bridge; they are not transport structs.
+//
+// Sequence semantics: every event (durable or transient) consumes a
+// canonical per-session uint64 seq that strictly increases and is never
+// reused. Transient events are not persisted, so the durable transcript
+// lastSeq alone cannot guarantee non-reuse across restart — the durable
+// SeqHighWatermark in session metadata reserves sequence space in blocks.
+// Gaps (reserved-but-unused, or transient) are legal and expected.
+//
+// Cursor semantics: the canonical event cursor is the highest seq that has
+// been consumed in this generation, and after a restart it is the
+// persisted SeqHighWatermark. The cursor — not the last durable record —
+// is what history snapshots hand to clients for the live cutover.
+//
+// Replay semantics: an explicit replay floor tracks what the bounded ring
+// can no longer prove. Exact replay is possible only for
+// replayFloor <= after <= cursor; below the floor the client must
+// rehydrate durable history, above the cursor the request is rejected.
+//
+// Durability contract: a durable publish appends the canonical transcript
+// record BEFORE exposing the event to any subscriber. A transient event is
+// live-only and may be missed by a reconnecting client once it falls out
+// of the bounded replay ring — durable completed transcript state is what
+// lets clients converge.
+//
+// Resource contract: COLD sessions are cheap. Event state holds no
+// transcript file handles — every operation opens the canonical
+// transcript, works, and closes — and the replay ring is allocated
+// lazily on first publish. A restored idle session costs bookkeeping
+// only.
 package events
 
 import (

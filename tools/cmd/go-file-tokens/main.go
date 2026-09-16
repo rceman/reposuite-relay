@@ -11,7 +11,8 @@
 //	go-file-tokens [--all | --base REV | --files-from -] [--root DIR]
 //	               [--max N] [--verbose] [--json]
 //
-// Exit status is non-zero when any file violates the budget, when a file
+// Exit status is non-zero when any file violates the budget — with or
+// without --json, which still emits its complete report — when a file
 // cannot be counted, or when the file set cannot be enumerated.
 package main
 
@@ -99,9 +100,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	if opts.json {
-		return writeJSON(stdout, report)
+		// The report is emitted first and in full: machine consumers keep
+		// the JSON even when the gate fails.
+		if err := writeJSON(stdout, report); err != nil {
+			return err
+		}
+	} else {
+		writeText(stdout, stderr, report, opts)
 	}
-	writeText(stdout, stderr, report, opts)
 	if len(report.Offending) > 0 {
 		return fmt.Errorf("%d Go file(s) exceed %d %s tokens",
 			len(report.Offending), report.MaxTokens, tokenizer.EncodingName)

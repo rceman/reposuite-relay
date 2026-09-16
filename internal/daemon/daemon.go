@@ -1,3 +1,15 @@
+// Package daemon implements the single persistent RepoSuite Relay daemon:
+// an advisory-locked singleton per RepoSuite state root serving the
+// ADR-006 local control plane — loopback HTTP/JSON commands plus an NDJSON
+// canonical event stream — with runtime discovery through a user-private
+// run/daemon.json descriptor.
+//
+// Singleton authority: an exclusive flock(2) on <relay>/run/relayd.lock.
+// Concurrent `__daemon` contenders race for it; exactly one wins and the
+// rest exit. The listener is bound and the descriptor published only
+// after the lock is held; stale-descriptor cleanup is performed only by
+// the lock owner, and shutdown removes the descriptor only when it still
+// belongs to this daemon instance.
 package daemon
 
 import (

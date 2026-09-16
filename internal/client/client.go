@@ -1,3 +1,8 @@
+// Package client is the single local HTTP client for relayd (ADR-006):
+// descriptor resolution and validation, bearer authentication, bounded
+// requests, stable API error decoding, and typed methods. The CLI (and
+// later the TUI and Gateway bridge) must go through this package — HTTP
+// request construction is never duplicated.
 package client
 
 import (

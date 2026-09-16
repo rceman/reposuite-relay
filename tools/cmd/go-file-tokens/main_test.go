@@ -99,6 +99,47 @@ func TestRunJSONReport(t *testing.T) {
 	if len(payload.Skipped) != 1 || payload.Skipped[0].Path != "generated.go" {
 		t.Fatalf("skipped = %+v", payload.Skipped)
 	}
+	// Empty lists are arrays, never null.
+	if !strings.Contains(stdout.String(), `"offending": []`) {
+		t.Fatalf("empty offending list is not an array: %s", stdout.String())
+	}
+}
+
+// TestRunJSONReportFailsOnViolation: --json changes the output format,
+// never the exit contract — the complete report is emitted, it stays
+// parseable, and the scan still fails.
+func TestRunJSONReportFailsOnViolation(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "big.go", "package fixture\n\n"+strings.Repeat("// padding\n", 40))
+	var stdout, stderr strings.Builder
+	err := run([]string{"--root", dir, "--max", "10", "--json", "--files-from", "-"},
+		strings.NewReader("big.go\n"), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("over-budget file accepted under --json")
+	}
+	var payload struct {
+		Encoding  string `json:"encoding"`
+		MaxTokens int    `json:"maxTokens"`
+		Offending []struct {
+			Path   string `json:"path"`
+			Tokens int    `json:"tokens"`
+		} `json:"offending"`
+		Skipped []struct {
+			Path string `json:"path"`
+		} `json:"skipped"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &payload); err != nil {
+		t.Fatalf("json report missing or malformed: %v (%s)", err, stdout.String())
+	}
+	if payload.Encoding != "o200k_base" || payload.MaxTokens != 10 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if len(payload.Offending) != 1 || payload.Offending[0].Path != "big.go" || payload.Offending[0].Tokens <= 10 {
+		t.Fatalf("offending = %+v", payload.Offending)
+	}
+	if !strings.Contains(stdout.String(), `"skipped": []`) {
+		t.Fatalf("empty skipped list is not an array: %s", stdout.String())
+	}
 }
 
 func TestRunRejectsConflictingSelectors(t *testing.T) {

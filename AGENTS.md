@@ -194,8 +194,10 @@ no giant accumulation files.
   elsewhere per ADR-006).
 - The control plane is the versioned local HTTP API (`/v1`, API version
   in the descriptor) with bounded JSON bodies; it never carries
-  client-supplied commands. The daemon only runs the built-in `fixture`
-  harness today.
+  client-supplied commands. Clients cannot supply executables or
+  arguments: relayd executes only its own built-in harness
+  implementations — the `fixture` test harness and the Codex native
+  adapter (`internal/harness/codex`).
 - The descriptor is local authority: clients validate it strictly
   (loopback 127.0.0.1, http, supported version, well-formed token) and
   fail closed on any incompatible peer — they never auto-start against

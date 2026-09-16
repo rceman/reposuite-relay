@@ -1,3 +1,22 @@
+// Package store implements Relay-owned durable persistence under
+// <relay>/sessions — a small concrete filesystem store, not a framework.
+//
+// Layout per session (<id> is the RelaySession.ID, never the client key):
+//
+//	sessions/<id>/session.json     versioned metadata, atomically replaced
+//	sessions/<id>/transcript.jsonl append-only durable records
+//	sessions/<id>/transcript.idx   derived fixed-width offset index
+//
+// Crash safety: Create writes a `.create-<rand>` directory and renames it
+// into place, so a canonical session directory either exists completely
+// or not at all. Delete renames to a `.delete-<rand>` tombstone before
+// removal. Open cleans only these Relay-owned temp/tombstone prefixes —
+// any other unexpected entry fails closed.
+//
+// Runtime internals (PID, RuntimeID, StartedAt, credentials, handles) are
+// NEVER persisted: a HarnessRuntime is ephemeral and dies with its
+// daemon. The singleton relayd is the only writer; the store relies on
+// that ownership instead of implementing its own locking.
 package store
 
 import (

@@ -21,7 +21,7 @@ rr_tool() {
 	local name="$1" root="$2" cache bin
 	cache="$(rr_cache_dir)"
 	bin="$cache/$name"
-	if [[ ! -x "$bin" ]] || [[ -n "$(find "$root/tools" -name '*.go' -newer "$bin" -print -quit 2>/dev/null)" ]]; then
+	if rr_tool_stale "$root" "$bin"; then
 		mkdir -p "$cache"
 		if ! (cd "$root/tools" && go build -o "$bin" "./cmd/$name"); then
 			echo "hygiene gate: cannot build tools/$name" >&2
@@ -29,6 +29,20 @@ rr_tool() {
 		fi
 	fi
 	printf '%s' "$bin"
+}
+
+# rr_tool_stale <root> <bin> — true when the cached binary must be rebuilt.
+# Invalidation inputs: every tools/**/*.go plus tools/go.mod and
+# tools/go.sum, because a dependency-only change alters the built binary
+# without touching a Go source file.
+rr_tool_stale() {
+	local root="$1" bin="$2"
+	if [[ ! -x "$bin" ]]; then
+		return 0
+	fi
+	[[ -n "$(find "$root/tools" \
+		\( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) \
+		-newer "$bin" -print -quit 2>/dev/null)" ]]
 }
 
 # rr_go_files <--all|BASE> — print the selected repository-relative Go files.

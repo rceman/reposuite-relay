@@ -1,3 +1,11 @@
+// Command reposuite-relay is the RepoSuite Relay standalone CLI.
+// Future umbrella form: `reposuite relay ...` dispatches here.
+//
+// The CLI is a local HTTP client of relayd (ADR-006): every managed
+// command goes through internal/client — descriptor discovery, bearer
+// auth, typed methods. Hidden internal modes `__daemon`, `__fixture`, and
+// `__fake-codex` are implementation details of the single-binary design —
+// never listed in help and not part of the public CLI contract.
 package main
 
 import (
