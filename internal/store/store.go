@@ -45,11 +45,84 @@ const (
 	tmpPrefix    = ".tmp-"
 )
 
+// UncertainError means the operation's commit point may have passed but a
+// post-commit durability step failed — canonical namespace state is
+// ambiguous. Callers MUST fail closed: never treat the operation as
+// rolled back, never silently continue serving ambiguous authority.
+type UncertainError struct {
+	Op  string
+	Err error
+}
+
+func (e *UncertainError) Error() string {
+	return e.Op + ": commit uncertain: " + e.Err.Error()
+}
+func (e *UncertainError) Unwrap() error { return e.Err }
+
+// CleanupError means the operation logically committed; only post-commit
+// cleanup failed. The outcome is safe to apply — leftover artifacts are
+// recovered on the next Open. Callers must NOT roll back a committed
+// operation on this error.
+type CleanupError struct {
+	Op  string
+	Err error
+}
+
+func (e *CleanupError) Error() string {
+	return e.Op + ": cleanup after commit: " + e.Err.Error()
+}
+func (e *CleanupError) Unwrap() error { return e.Err }
+
+// Hooks overrides the store's filesystem primitives — a test seam for
+// deterministic post-commit failure injection. Nil means production.
+type Hooks struct {
+	Rename    func(old, new string) error
+	SyncDir   func(dir string) error
+	RemoveAll func(path string) error
+	WriteFile func(f *os.File, b []byte) (int, error)
+	SyncFile  func(f *os.File) error
+}
+
+func defaultHooks() *Hooks {
+	return &Hooks{
+		Rename:    os.Rename,
+		SyncDir:   syncDir,
+		RemoveAll: os.RemoveAll,
+		WriteFile: func(f *os.File, b []byte) (int, error) { return f.Write(b) },
+		SyncFile:  func(f *os.File) error { return f.Sync() },
+	}
+}
+
 // Sessions is the concrete per-state-root session store rooted at
 // <relay>/sessions.
 type Sessions struct {
 	root  string
 	newID func() (string, error) // temp-name entropy (session.NewSessionID)
+	hooks *Hooks
+}
+
+// SetHooks overrides the store's filesystem primitives. Nil fields keep
+// their production defaults. Test seam only — production never calls it.
+func (s *Sessions) SetHooks(h *Hooks) {
+	d := defaultHooks()
+	if h != nil {
+		if h.Rename != nil {
+			d.Rename = h.Rename
+		}
+		if h.SyncDir != nil {
+			d.SyncDir = h.SyncDir
+		}
+		if h.RemoveAll != nil {
+			d.RemoveAll = h.RemoveAll
+		}
+		if h.WriteFile != nil {
+			d.WriteFile = h.WriteFile
+		}
+		if h.SyncFile != nil {
+			d.SyncFile = h.SyncFile
+		}
+	}
+	s.hooks = d
 }
 
 // meta is the durable session.json schema — exactly the RelaySession
@@ -146,7 +219,7 @@ func OpenSessions(root string, newID func() (string, error)) (*Sessions, error) 
 	if newID == nil {
 		newID = session.NewSessionID
 	}
-	s := &Sessions{root: root, newID: newID}
+	s := &Sessions{root: root, newID: newID, hooks: defaultHooks()}
 	if err := s.cleanTemps(); err != nil {
 		return nil, err
 	}
@@ -176,7 +249,7 @@ func (s *Sessions) cleanTemps() error {
 		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("temp entry %s is not a plain directory (mode %s); refusing cleanup", name, fi.Mode())
 		}
-		if err := os.RemoveAll(p); err != nil {
+		if err := s.hooks.RemoveAll(p); err != nil {
 			return fmt.Errorf("remove stale temp %s: %w", name, err)
 		}
 	}
@@ -284,28 +357,34 @@ func (s *Sessions) Create(rs *session.RelaySession) error {
 	ok := false
 	defer func() {
 		if !ok {
-			_ = os.RemoveAll(tmp)
+			_ = s.hooks.RemoveAll(tmp)
 		}
 	}()
 
-	if err := writeMetaFile(tmp, toMeta(rs)); err != nil {
+	if err := writeMetaFile(s.hooks, tmp, toMeta(rs)); err != nil {
 		return fmt.Errorf("create session %s: %w", rs.ID, err)
 	}
 	for _, f := range []string{transcriptFile, indexFile} {
-		if err := writeEmptyFile(filepath.Join(tmp, f)); err != nil {
+		if err := writeEmptyFile(s.hooks, filepath.Join(tmp, f)); err != nil {
 			return fmt.Errorf("create session %s: %w", rs.ID, err)
 		}
 	}
-	if err := syncDir(tmp); err != nil {
+	if err := s.hooks.SyncDir(tmp); err != nil {
 		return fmt.Errorf("create session %s: %w", rs.ID, err)
 	}
-	if err := os.Rename(tmp, canonical); err != nil {
+	// COMMIT POINT: the rename publishes the canonical session directory.
+	// Everything before this failure is rolled back cleanly; after it the
+	// session exists in the namespace and must not be reported absent.
+	if err := s.hooks.Rename(tmp, canonical); err != nil {
 		return fmt.Errorf("create session %s: rename into place: %w", rs.ID, err)
 	}
-	if err := syncDir(s.root); err != nil {
-		return fmt.Errorf("create session %s: sync root: %w", rs.ID, err)
+	ok = true // committed — the deferred cleanup must not remove it
+	if err := s.hooks.SyncDir(s.root); err != nil {
+		return &UncertainError{
+			Op:  "create session " + rs.ID,
+			Err: fmt.Errorf("canonical directory committed but root sync failed: %w", err),
+		}
 	}
-	ok = true
 	return nil
 }
 
@@ -327,16 +406,22 @@ func (s *Sessions) Save(rs *session.RelaySession) error {
 		return fmt.Errorf("save session %s: %w", rs.ID, err)
 	}
 	tmpPath := filepath.Join(dir, tmpPrefix+tmp)
-	if err := writeFileSync(tmpPath, mustMarshal(m), 0o600); err != nil {
+	if err := writeFileSync(s.hooks, tmpPath, mustMarshal(m), 0o600); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("save session %s: %w", rs.ID, err)
 	}
-	if err := os.Rename(tmpPath, filepath.Join(dir, metaFile)); err != nil {
+	// COMMIT POINT: rename publishes the new metadata. After it succeeds
+	// the namespace holds the NEW record — callers must not assume the old
+	// one is authoritative.
+	if err := s.hooks.Rename(tmpPath, filepath.Join(dir, metaFile)); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("save session %s: rename: %w", rs.ID, err)
 	}
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("save session %s: %w", rs.ID, err)
+	if err := s.hooks.SyncDir(dir); err != nil {
+		return &UncertainError{
+			Op:  "save session " + rs.ID,
+			Err: fmt.Errorf("metadata committed but dir sync failed: %w", err),
+		}
 	}
 	return nil
 }
@@ -359,15 +444,29 @@ func (s *Sessions) Delete(id string) error {
 		return fmt.Errorf("delete session %s: %w", id, err)
 	}
 	tomb := filepath.Join(s.root, deletePrefix+id+"-"+rnd[:8])
-	if err := os.Rename(canonical, tomb); err != nil {
+	// COMMIT POINT: once the canonical name is gone the session is
+	// logically deleted — tombstone removal afterwards is cleanup only,
+	// never a reason to resurrect the session.
+	if err := s.hooks.Rename(canonical, tomb); err != nil {
 		return fmt.Errorf("delete session %s: tombstone rename: %w", id, err)
 	}
-	// The session is logically deleted from this point on.
-	if err := os.RemoveAll(tomb); err != nil {
-		return fmt.Errorf("delete session %s: remove tombstone: %w", id, err)
+	if err := s.hooks.SyncDir(s.root); err != nil {
+		return &UncertainError{
+			Op:  "delete session " + id,
+			Err: fmt.Errorf("deletion committed but root sync failed: %w", err),
+		}
 	}
-	if err := syncDir(s.root); err != nil {
-		return fmt.Errorf("delete session %s: sync root: %w", id, err)
+	if err := s.hooks.RemoveAll(tomb); err != nil {
+		return &CleanupError{
+			Op:  "delete session " + id,
+			Err: fmt.Errorf("remove tombstone: %w", err),
+		}
+	}
+	if err := s.hooks.SyncDir(s.root); err != nil {
+		return &CleanupError{
+			Op:  "delete session " + id,
+			Err: fmt.Errorf("sync root after tombstone removal: %w", err),
+		}
 	}
 	return nil
 }
@@ -383,7 +482,12 @@ func (s *Sessions) Transcript(id string) (*Transcript, error) {
 	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("transcript %s: canonical directory absent", id)
 	}
-	return OpenTranscript(dir)
+	tr, err := OpenTranscript(dir)
+	if err != nil {
+		return nil, err
+	}
+	tr.hooks = s.hooks
+	return tr, nil
 }
 
 // newTemp makes a fresh `.create-<rand>` directory.
@@ -404,8 +508,8 @@ func (s *Sessions) newTemp(prefix string) (string, error) {
 }
 
 // writeMetaFile writes session.json (0600, synced) inside dir.
-func writeMetaFile(dir string, m meta) error {
-	return writeFileSync(filepath.Join(dir, metaFile), mustMarshal(m), 0o600)
+func writeMetaFile(h *Hooks, dir string, m meta) error {
+	return writeFileSync(h, filepath.Join(dir, metaFile), mustMarshal(m), 0o600)
 }
 
 func mustMarshal(m meta) []byte {
@@ -417,21 +521,21 @@ func mustMarshal(m meta) []byte {
 }
 
 // writeEmptyFile creates an empty 0600 synced file.
-func writeEmptyFile(path string) error {
-	return writeFileSync(path, nil, 0o600)
+func writeEmptyFile(h *Hooks, path string) error {
+	return writeFileSync(h, path, nil, 0o600)
 }
 
 // writeFileSync writes path with mode, fsyncs, and closes.
-func writeFileSync(path string, data []byte, mode os.FileMode) error {
+func writeFileSync(h *Hooks, path string, data []byte, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := h.WriteFile(f, data); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := h.SyncFile(f); err != nil {
 		f.Close()
 		return err
 	}

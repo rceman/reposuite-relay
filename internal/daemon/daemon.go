@@ -59,6 +59,9 @@ type Options struct {
 	// WrapStop decorates each session's runtime-stop function — the seam
 	// tests use to pause an in-flight stop under shutdown.
 	WrapStop func(stop func() error) func() error
+	// StoreHooks overrides store filesystem primitives — test seam only
+	// for deterministic post-commit failure injection.
+	StoreHooks *store.Hooks
 }
 
 func (o Options) withDefaults() Options {
@@ -138,6 +141,9 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	if err != nil {
 		d.releaseLock()
 		return nil, err
+	}
+	if d.opts.StoreHooks != nil {
+		ss.SetHooks(d.opts.StoreHooks)
 	}
 	loaded, err := ss.LoadAll()
 	if err != nil {
@@ -476,6 +482,15 @@ func (d *Daemon) serveFixture(req protocol.Request) protocol.Response {
 	if err := d.store.Create(rs); err != nil {
 		// Persistence failed: no durable session — reap the runtime too.
 		_ = child.Stop()
+		var ue *store.UncertainError
+		if errors.As(err, &ue) {
+			// The canonical create commit point may have passed — the
+			// durable outcome is ambiguous. Fail closed: halt the daemon;
+			// the next start reconciles against canonical disk state.
+			go d.initiate()
+			return fail(protocol.Fail(protocol.ErrInternal,
+				"store commit uncertain; daemon halting: "+err.Error()))
+		}
 		return fail(protocol.Fail(protocol.ErrInternal, "persist session: "+err.Error()))
 	}
 	stop := child.Stop
@@ -541,8 +556,26 @@ func (d *Daemon) stopSession(req protocol.Request) protocol.Response {
 		d.registry.ClearRuntime(req.Key)
 	}
 	if err := d.store.Delete(m.Session.ID); err != nil {
-		d.registry.AbortStop(req.Key)
-		return protocol.Fail(protocol.ErrInternal, "delete session: "+err.Error())
+		var ce *store.CleanupError
+		var ue *store.UncertainError
+		switch {
+		case errors.As(err, &ce):
+			// Deletion committed — apply it. The leftover tombstone is
+			// recovered on next daemon start.
+			fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
+			d.registry.CommitStop(req.Key)
+			return protocol.Ok(d.info())
+		case errors.As(err, &ue):
+			// Namespace outcome committed but durability is ambiguous —
+			// apply the outcome, then fail closed and halt.
+			d.registry.CommitStop(req.Key)
+			go d.initiate()
+			return protocol.Fail(protocol.ErrInternal,
+				"store commit uncertain; daemon halting: "+err.Error())
+		default:
+			d.registry.AbortStop(req.Key)
+			return protocol.Fail(protocol.ErrInternal, "delete session: "+err.Error())
+		}
 	}
 	d.registry.CommitStop(req.Key)
 	return protocol.Ok(d.info())

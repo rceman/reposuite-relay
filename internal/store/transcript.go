@@ -60,15 +60,21 @@ func (r Record) validate() error {
 
 // Transcript is the open durable transcript of one session. Appends are
 // serialized internally; Tail reads seek directly through the index.
+// After a canonical-side failure (JSONL write/sync, unrecoverable index
+// error) the instance is poisoned: every subsequent op returns the same
+// error deterministically until Close/reopen — never operating from
+// stale in-memory offsets.
 type Transcript struct {
 	dir   string
 	jsonl *os.File // append + positioned reads
 	idx   *os.File // append + positioned reads
+	hooks *Hooks
 
-	mu      sync.Mutex
-	jsize   int64  // current jsonl byte size
-	n       int    // indexed record count
-	lastSeq uint64 // seq of the last indexed/appended record
+	mu       sync.Mutex
+	jsize    int64  // current jsonl byte size
+	n        int    // indexed record count
+	lastSeq  uint64 // seq of the last indexed/appended record
+	poisoned error  // set on canonical failure; instance is dead
 }
 
 // OpenTranscript opens the transcript pair inside a canonical session
@@ -91,7 +97,7 @@ func OpenTranscript(dir string) (*Transcript, error) {
 		jf.Close()
 		return nil, fmt.Errorf("open %s: %w", ip, err)
 	}
-	t := &Transcript{dir: dir, jsonl: jf, idx: idx}
+	t := &Transcript{dir: dir, jsonl: jf, idx: idx, hooks: defaultHooks()}
 	if err := t.openCheck(); err != nil {
 		jf.Close()
 		idx.Close()
@@ -139,7 +145,7 @@ func (t *Transcript) openCheck() error {
 		return true
 	}
 	if !healthy() {
-		if err := t.rebuild(); err != nil {
+		if err := t.rebuildLocked(); err != nil {
 			return err
 		}
 	}
@@ -189,10 +195,11 @@ func (t *Transcript) scanFrom(off int64) ([]Record, int64, error) {
 	}
 }
 
-// rebuild rescans the canonical transcript once: validates every complete
-// record (strictly increasing seq), truncates a torn final line, and
-// atomically replaces the derived index.
-func (t *Transcript) rebuild() error {
+// rebuildLocked rescans the canonical transcript once: validates every
+// complete record (strictly increasing seq), truncates a torn final
+// line, and atomically replaces the derived index. Called under mu (or
+// during single-threaded Open).
+func (t *Transcript) rebuildLocked() error {
 	recs, tail, err := t.scanFrom(0)
 	if err != nil {
 		return fmt.Errorf("rebuild transcript index: %w", err)
@@ -219,6 +226,11 @@ func (t *Transcript) rebuild() error {
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Chmod(0o600)
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("rebuild transcript index: %w", err)
+	}
 	buf := make([]byte, 8)
 	off := int64(0)
 	sr := io.NewSectionReader(t.jsonl, 0, tail)
@@ -226,38 +238,47 @@ func (t *Transcript) rebuild() error {
 	for i := 0; i < len(recs); i++ {
 		line, err := br.ReadBytes('\n')
 		if err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("rebuild transcript index: rescan: %w", err)
+			return fail(err)
 		}
 		binary.BigEndian.PutUint64(buf, uint64(off))
-		if _, err := tmp.Write(buf); err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("rebuild transcript index: write: %w", err)
+		if _, err := t.hooks.WriteFile(tmp, buf); err != nil {
+			return fail(fmt.Errorf("write: %w", err))
 		}
 		off += int64(len(line))
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("rebuild transcript index: sync: %w", err)
+	if err := t.hooks.SyncFile(tmp); err != nil {
+		return fail(fmt.Errorf("sync: %w", err))
 	}
 	tmp.Close()
-	if err := os.Rename(tmpPath, filepath.Join(t.dir, indexFile)); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rebuild transcript index: rename: %w", err)
+	// COMMIT POINT for the derived index: rename installs the new file.
+	// After it the old handle is unlinked — the live Transcript must swap
+	// to the new path no matter what follows, or be poisoned.
+	if err := t.hooks.Rename(tmpPath, filepath.Join(t.dir, indexFile)); err != nil {
+		return fail(fmt.Errorf("rename: %w", err))
 	}
-	if err := syncDir(t.dir); err != nil {
-		return fmt.Errorf("rebuild transcript index: %w", err)
-	}
-	// Swap the index handle to the rebuilt file.
-	_ = t.idx.Close()
-	idx, err := os.OpenFile(filepath.Join(t.dir, indexFile), os.O_RDWR|os.O_APPEND, 0o600)
+	// Swap the index handle to the rebuilt file FIRST — a failed dir sync
+	// or reopen must never leave the transcript on the obsolete unlinked
+	// handle.
+	newIdx, err := os.OpenFile(filepath.Join(t.dir, indexFile), os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
-		return fmt.Errorf("rebuild transcript index: reopen: %w", err)
+		return &UncertainError{
+			Op:  "rebuild transcript index",
+			Err: fmt.Errorf("index committed but reopen failed: %w", err),
+		}
 	}
-	t.idx = idx
+	_ = t.idx.Close()
+	t.idx = newIdx
+	if err := t.hooks.SyncDir(t.dir); err != nil {
+		// Index is installed and live; only durability of the rename is
+		// uncertain. The transcript stays consistent in-memory.
+		t.jsize = tail
+		t.n = len(recs)
+		t.lastSeq = last
+		return &UncertainError{
+			Op:  "rebuild transcript index",
+			Err: fmt.Errorf("index committed but dir sync failed: %w", err),
+		}
+	}
 	t.jsize = tail
 	t.n = len(recs)
 	t.lastSeq = last
@@ -267,12 +288,20 @@ func (t *Transcript) rebuild() error {
 // Append durably records one entry: JSONL record first (synced), then the
 // index offset (synced). seq must strictly increase — the index is never
 // allowed to commit ahead of the canonical transcript.
+//
+// COMMIT POINT: a successful JSONL sync makes the record canonical. If the
+// index write/sync then fails, the derived index is rebuilt immediately;
+// when repair succeeds the append completes consistently, when it cannot
+// the transcript is poisoned rather than continuing from stale offsets.
 func (t *Transcript) Append(r Record) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.poisoned != nil {
+		return t.poisoned
+	}
 	if r.Seq <= t.lastSeq {
 		return fmt.Errorf("seq %d not after last durable seq %d", r.Seq, t.lastSeq)
 	}
@@ -281,19 +310,41 @@ func (t *Transcript) Append(r Record) error {
 		return err
 	}
 	off := t.jsize
-	if _, err := t.jsonl.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("append record seq %d: %w", r.Seq, err)
+	if _, err := t.hooks.WriteFile(t.jsonl, append(line, '\n')); err != nil {
+		// Bytes may be partially in the file — the transcript can no
+		// longer trust its own offsets.
+		t.poisoned = fmt.Errorf("append record seq %d: %w", r.Seq, err)
+		return t.poisoned
 	}
-	if err := t.jsonl.Sync(); err != nil {
-		return fmt.Errorf("append record seq %d: sync: %w", r.Seq, err)
+	if err := t.hooks.SyncFile(t.jsonl); err != nil {
+		// The record may or may not be durable — ambiguous. Poison.
+		t.poisoned = &UncertainError{
+			Op:  "append record " + fmt.Sprint(r.Seq),
+			Err: fmt.Errorf("transcript sync failed: %w", err),
+		}
+		return t.poisoned
 	}
+	// Canonical record committed. Index write is derived bookkeeping.
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], uint64(off))
-	if _, err := t.idx.Write(b[:]); err != nil {
-		return fmt.Errorf("append index seq %d: %w", r.Seq, err)
+	var ierr error
+	if _, ierr = t.hooks.WriteFile(t.idx, b[:]); ierr == nil {
+		ierr = t.hooks.SyncFile(t.idx)
 	}
-	if err := t.idx.Sync(); err != nil {
-		return fmt.Errorf("append index seq %d: sync: %w", r.Seq, err)
+	if ierr != nil {
+		// The durable record exists but the index is behind — repair
+		// the derived index now so subsequent appends stay consistent.
+		// The record is already in the canonical file, so include it in
+		// the rebuild's scan range first.
+		t.jsize = off + int64(len(line)+1)
+		if rerr := t.rebuildLocked(); rerr != nil {
+			t.poisoned = &UncertainError{
+				Op:  "append record " + fmt.Sprint(r.Seq),
+				Err: fmt.Errorf("index write failed (%v) and repair failed: %w", ierr, rerr),
+			}
+			return t.poisoned
+		}
+		return nil // repaired: durable record + consistent derived index
 	}
 	t.jsize = off + int64(len(line)+1)
 	t.n++
@@ -308,6 +359,9 @@ func (t *Transcript) Append(r Record) error {
 func (t *Transcript) Tail(limit int) ([]Record, uint64, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.poisoned != nil {
+		return nil, 0, t.poisoned
+	}
 	if limit <= 0 || t.n == 0 {
 		return nil, t.lastSeq, nil
 	}
@@ -331,6 +385,13 @@ func (t *Transcript) Len() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.n
+}
+
+// LastSeq returns the highest durable seq (0 on an empty transcript).
+func (t *Transcript) LastSeq() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastSeq
 }
 
 // Close releases the transcript files.
