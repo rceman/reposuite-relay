@@ -127,6 +127,11 @@ report each as PASS/FAIL/N/A with evidence.
 - Runtime death (unexpected) fails in-flight work durably; a deliberate
   stop has no in-flight work by construction. The supervisor reports
   each runtime generation gone exactly once (`OnGone`).
+- Runtime creation is claim-first: the first caller publishes a
+  `starting` claim and spawns outside the lock; concurrent wake-ups WAIT
+  for that generation instead of spawning a second process. The spawn
+  closure returns only when the runtime is usable (process started AND
+  protocol initialized) and owns reaping any process it started.
 - Every process stop is bounded and reaps the whole process group —
   leader, descendants, and the app-server's own children.
 

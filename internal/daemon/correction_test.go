@@ -280,12 +280,9 @@ func (f *fakeHarness) Stop() error {
 func TestStopOwnershipSingleInvocation(t *testing.T) {
 	sup := runtime.New()
 	fake := newFakeHarness(4242)
-	rt, err := sup.Ensure("fixture/abc", session.HarnessFixture, "x", false,
+	rt, err := sup.Ensure(context.Background(), "fixture/abc", session.HarnessFixture, "x", false,
 		func() (runtime.Harness, error) { return fake, nil })
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sup.MarkReady(rt.Key); err != nil {
 		t.Fatal(err)
 	}
 	if err := sup.Bind(rt.Key, "abc"); err != nil {

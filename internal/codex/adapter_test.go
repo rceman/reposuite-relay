@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -600,6 +601,52 @@ func TestMultiSessionSharedRuntimeAndDeleteIsolation(t *testing.T) {
 		if after := e.reload(m.Session.ID).NativeSessionID; after != before {
 			t.Fatalf("session %s native identity drifted %q -> %q", m.Session.Key, before, after)
 		}
+	}
+}
+
+// TestConcurrentColdWakeSpawnsOneProcess: two sessions prompting at the
+// same instant on a COLD runtime must converge on one app-server process
+// (claim-first creation) with two distinct native threads.
+func TestConcurrentColdWakeSpawnsOneProcess(t *testing.T) {
+	e := newEnv(t, "happy")
+	first := e.newSession("wake1", t.TempDir())
+	second := e.newSession("wake2", t.TempDir())
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, m := range []*session.Managed{first, second} {
+		wg.Add(1)
+		go func(i int, m *session.Managed) {
+			defer wg.Done()
+			_, errs[i] = e.adapter.Prompt(context.Background(), m, "hi", "", "")
+		}(i, m)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent prompt %d: %v", i, err)
+		}
+	}
+	e.waitDurable(first.Session.ID, api.EventMessageAgentCompleted)
+	e.waitDurable(second.Session.ID, api.EventMessageAgentCompleted)
+	if e.sup.Len() != 1 {
+		t.Fatalf("runtimes = %d, want exactly 1", e.sup.Len())
+	}
+	va, ok := e.sup.View(first.Session.ID)
+	if !ok {
+		t.Fatal("first session has no runtime")
+	}
+	vb, ok := e.sup.View(second.Session.ID)
+	if !ok {
+		t.Fatal("second session has no runtime")
+	}
+	if va.PID != vb.PID {
+		t.Fatalf("two processes were spawned: %d vs %d", va.PID, vb.PID)
+	}
+	idA := e.reload(first.Session.ID).NativeSessionID
+	idB := e.reload(second.Session.ID).NativeSessionID
+	if idA == "" || idB == "" || idA == idB {
+		t.Fatalf("native threads = %q / %q", idA, idB)
 	}
 }
 

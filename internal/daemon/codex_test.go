@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -284,6 +285,53 @@ func TestCodexCancelOverHTTP(t *testing.T) {
 		t.Fatal("cancel without an active turn must fail")
 	} else {
 		wantAPIErr(t, err, api.ErrNoActiveTurn)
+	}
+}
+
+// TestCodexConcurrentColdWakeOverHTTP: two prompts racing on a COLD
+// runtime produce one app-server process and two native threads.
+func TestCodexConcurrentColdWakeOverHTTP(t *testing.T) {
+	t.Setenv("FAKE_CODEX_MODE", "happy")
+	d, _, c, _ := startInProcess(t, codexOptions)
+	serveCodex(t, c, "race1")
+	serveCodex(t, c, "race2")
+	ctx, cancel := tctx(t)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, key := range []string{"race1", "race2"} {
+		wg.Add(1)
+		go func(i int, key string) {
+			defer wg.Done()
+			_, errs[i] = c.Prompt(ctx, key, "hi", "", "")
+		}(i, key)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent prompt %d: %v", i, err)
+		}
+	}
+	waitDurableTypes(t, c, "race1", api.EventMessageAgentCompleted)
+	waitDurableTypes(t, c, "race2", api.EventMessageAgentCompleted)
+	if d.supervisor.Len() != 1 {
+		t.Fatalf("runtimes = %d, want 1", d.supervisor.Len())
+	}
+	var pids []int
+	native := map[string]bool{}
+	for _, key := range []string{"race1", "race2"} {
+		st, err := c.Status(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pids = append(pids, st.Session.PID)
+		if st.Session.NativeSessionID == "" || native[st.Session.NativeSessionID] {
+			t.Fatalf("%s native id %q", key, st.Session.NativeSessionID)
+		}
+		native[st.Session.NativeSessionID] = true
+	}
+	if pids[0] != pids[1] {
+		t.Fatalf("two app-server processes: %v", pids)
 	}
 }
 

@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rceman/reposuite-relay/internal/session"
 )
 
 // fakeProc is a controlled in-memory harness for supervisor tests.
@@ -39,56 +42,141 @@ func (f *fakeProc) exit(err error) {
 
 func mkRuntime(t *testing.T, sup *Supervisor, key, kind, id string, shared bool, proc *fakeProc) *Runtime {
 	t.Helper()
-	rt, err := sup.Ensure(key, kind, id, shared, func() (Harness, error) { return proc, nil })
+	rt, err := sup.Ensure(context.Background(), key, kind, id, shared,
+		func() (Harness, error) { return proc, nil })
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sup.MarkReady(key); err != nil {
 		t.Fatal(err)
 	}
 	return rt
 }
 
-// TestEnsureConvergesOnOneSpawn: concurrent Ensure for one key spawns
-// exactly one process; losers' processes are stopped, never leaked.
+// TestEnsureConvergesOnOneSpawn: 16 concurrent wake-ups on a cold runtime
+// spawn exactly ONE process and every caller gets the same runtime. The
+// losers wait for the winner's generation instead of starting a second
+// process (claim-first creation).
 func TestEnsureConvergesOnOneSpawn(t *testing.T) {
 	sup := New()
 	var spawns int32
 	const n = 16
-	procs := make([]*fakeProc, n)
+	winner := newFakeProc(1000)
+	rts := make([]*Runtime, n)
+	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
-		procs[i] = newFakeProc(1000 + i)
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			p := procs[i]
-			_, err := sup.Ensure("codex/default", "codex", "rt", true, func() (Harness, error) {
-				atomic.AddInt32(&spawns, 1)
-				time.Sleep(2 * time.Millisecond)
-				return p, nil
-			})
-			if err != nil {
-				t.Errorf("ensure: %v", err)
-			}
+			rts[i], errs[i] = sup.Ensure(context.Background(), "codex/default", "codex", "rt", true,
+				func() (Harness, error) {
+					atomic.AddInt32(&spawns, 1)
+					time.Sleep(2 * time.Millisecond) // hold the claim open
+					return winner, nil
+				})
 		}(i)
 	}
 	wg.Wait()
-	if got := atomic.LoadInt32(&spawns); got != n {
-		t.Fatalf("spawn calls = %d, want %d (each racer attempts)", got, n)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("ensure %d: %v", i, err)
+		}
+		if rts[i] != rts[0] {
+			t.Fatalf("caller %d got a different runtime generation", i)
+		}
+	}
+	if got := atomic.LoadInt32(&spawns); got != 1 {
+		t.Fatalf("spawn calls = %d, want exactly 1", got)
 	}
 	if sup.Len() != 1 {
 		t.Fatalf("runtimes = %d, want 1", sup.Len())
 	}
-	// Every loser's process must have been stopped.
-	var stopped int32
-	for _, p := range procs {
-		stopped += atomic.LoadInt32(&p.stops)
+	if got := atomic.LoadInt32(&winner.stops); got != 0 {
+		t.Fatalf("winner stopped %d times, want 0", got)
 	}
-	if stopped != n-1 {
-		t.Fatalf("loser stops = %d, want %d", stopped, n-1)
+	if rt := rts[0]; rt.PID != winner.PID() || rt.State != session.RuntimeWarm {
+		t.Fatalf("runtime = %+v", rt)
 	}
 	_ = sup.StopAll()
+}
+
+// TestEnsureWaiterRespectsContext: a waiter released by a failed spawn
+// returns the spawn error, and a waiter whose context ends returns
+// promptly instead of blocking on another caller's spawn.
+func TestEnsureWaiterRespectsContext(t *testing.T) {
+	sup := New()
+	release := make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		_, err := sup.Ensure(context.Background(), "codex/default", "codex", "rt", true,
+			func() (Harness, error) {
+				<-release
+				return nil, errors.New("boom")
+			})
+		first <- err
+	}()
+	// Wait until the claim is visible to other callers.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := sup.Get("codex/default"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("claim never appeared")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := sup.Ensure(ctx, "codex/default", "codex", "rt2", true,
+		func() (Harness, error) { t.Error("waiter must not spawn"); return nil, nil }); err == nil {
+		t.Fatal("waiter with an expired context must fail")
+	}
+	close(release)
+	if err := <-first; err == nil || err.Error() != "boom" {
+		t.Fatalf("owner err = %v, want the spawn error", err)
+	}
+	if sup.Len() != 0 {
+		t.Fatal("a failed spawn must leave no runtime registered")
+	}
+	// The claim is released: a later caller can create the runtime.
+	proc := newFakeProc(777)
+	if _, err := sup.Ensure(context.Background(), "codex/default", "codex", "rt3", true,
+		func() (Harness, error) { return proc, nil }); err != nil {
+		t.Fatalf("recreate after failure: %v", err)
+	}
+	if sup.Len() != 1 {
+		t.Fatal("runtime not recreated after a failed claim")
+	}
+}
+
+// TestStopDuringSpawnAbandonsTheClaim: stopping a runtime whose process is
+// still spawning never leaks that process and never registers it.
+func TestStopDuringSpawnAbandonsTheClaim(t *testing.T) {
+	sup := New()
+	proc := newFakeProc(555)
+	started := make(chan struct{})
+	ensureErr := make(chan error, 1)
+	go func() {
+		_, err := sup.Ensure(context.Background(), "codex/default", "codex", "rt", true,
+			func() (Harness, error) {
+				close(started)
+				time.Sleep(30 * time.Millisecond) // still spawning
+				return proc, nil
+			})
+		ensureErr <- err
+	}()
+	<-started
+	if err := sup.Stop("codex/default"); err != nil {
+		t.Fatalf("stop during spawn: %v", err)
+	}
+	if err := <-ensureErr; !errors.Is(err, ErrRuntimeGone) {
+		t.Fatalf("ensure err = %v, want ErrRuntimeGone", err)
+	}
+	if got := atomic.LoadInt32(&proc.stops); got != 1 {
+		t.Fatalf("abandoned process stops = %d, want 1", got)
+	}
+	if sup.Len() != 0 {
+		t.Fatal("abandoned claim must not be registered")
+	}
 }
 
 // TestSharedRuntimeSurvivesSessionDelete: five sessions on one shared
@@ -258,17 +346,18 @@ func TestUnexpectedExitUnbindsSessions(t *testing.T) {
 	}
 }
 
-// TestFailStartReapsWithoutRegistering: a failed handshake stops the
-// process tree and leaves no runtime registered.
-func TestFailStartReapsWithoutRegistering(t *testing.T) {
+// TestSpawnFailureReapsAndRegistersNothing: the spawn closure owns its
+// process; a failed handshake stops it and leaves no runtime registered.
+func TestSpawnFailureReapsAndRegistersNothing(t *testing.T) {
 	sup := New()
 	proc := newFakeProc(8000)
-	if _, err := sup.Ensure("codex/default", "codex", "rt-1", true,
-		func() (Harness, error) { return proc, nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := sup.FailStart("codex/default"); err != nil {
-		t.Fatal(err)
+	_, err := sup.Ensure(context.Background(), "codex/default", "codex", "rt-1", true,
+		func() (Harness, error) {
+			_ = proc.Stop() // the closure reaps what it started
+			return nil, errors.New("initialize failed")
+		})
+	if err == nil {
+		t.Fatal("failed spawn must return an error")
 	}
 	if sup.Len() != 0 {
 		t.Fatal("failed start must not leave a runtime registered")
@@ -308,7 +397,7 @@ func TestStopAllStopsEveryRuntime(t *testing.T) {
 		t.Fatalf("OnGone reasons = %v", reasons)
 	}
 	// The supervisor is closed: no new runtime may be created.
-	if _, err := sup.Ensure("x", "codex", "rt-3", true,
+	if _, err := sup.Ensure(context.Background(), "x", "codex", "rt-3", true,
 		func() (Harness, error) { return newFakeProc(1), nil }); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Ensure after close: want ErrClosed, got %v", err)
 	}

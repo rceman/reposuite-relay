@@ -321,52 +321,54 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd string) (*Server, error
 	if err != nil {
 		return nil, err
 	}
-	rt, err := a.deps.Supervisor.Ensure(RuntimeKey, session.HarnessCodex, rtID, true,
+	// The spawn closure owns the whole generation handshake: spawn the
+	// process, serve the connection, initialize the app-server, install
+	// handlers. It returns only when the runtime is USABLE, so concurrent
+	// wake-ups converge on one process and never observe a half-initialized
+	// server (claim-first creation in the supervisor).
+	var created *Server
+	_, err = a.deps.Supervisor.Ensure(ctx, RuntimeKey, session.HarnessCodex, rtID, true,
 		func() (runtime.Harness, error) {
 			srv, err := StartServer(cmd, cwd)
 			if err != nil {
 				return nil, err
 			}
+			go srv.Serve()
+			initCtx, cancel := context.WithTimeout(ctx, initTimeout)
+			defer cancel()
+			if _, err := srv.Initialize(initCtx, ClientInfo{
+				Name:    "reposuite-relay",
+				Title:   "RepoSuite Relay",
+				Version: a.deps.Version,
+			}); err != nil {
+				_ = srv.Stop() // the closure owns reaping its own process
+				return nil, fmt.Errorf("initialize: %w%s", err, stderrSuffix(srv))
+			}
+			a.installHandlers(srv)
 			a.mu.Lock()
 			a.servers[RuntimeKey] = srv
 			a.mu.Unlock()
-			go srv.Serve()
+			created = srv
 			return srv, nil
 		})
 	if err != nil {
+		if created != nil {
+			// The generation was stopped while spawning: drop our entry so
+			// no later caller can pick up a dead server.
+			a.mu.Lock()
+			if cur, ok := a.servers[RuntimeKey]; ok && cur == created {
+				delete(a.servers, RuntimeKey)
+			}
+			a.mu.Unlock()
+		}
 		return nil, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	a.mu.Lock()
-	srv, ok := a.servers[rt.Key]
+	srv, ok := a.servers[RuntimeKey]
 	a.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("%w: runtime %s has no server", ErrRuntimeUnavailable, rt.Key)
+		return nil, fmt.Errorf("%w: runtime %s has no server", ErrRuntimeUnavailable, RuntimeKey)
 	}
-	// Initialization handshake: until it succeeds the runtime is not
-	// ready (and is not usable by any session).
-	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
-	defer cancel()
-	info, err := srv.Initialize(initCtx, ClientInfo{
-		Name:    "reposuite-relay",
-		Title:   "RepoSuite Relay",
-		Version: a.deps.Version,
-	})
-	if err != nil {
-		_ = a.deps.Supervisor.FailStart(rt.Key)
-		a.mu.Lock()
-		delete(a.servers, RuntimeKey)
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: initialize: %v%s", ErrRuntimeUnavailable, err, stderrSuffix(srv))
-	}
-	_ = info
-	if err := a.deps.Supervisor.MarkReady(rt.Key); err != nil {
-		_ = a.deps.Supervisor.FailStart(rt.Key)
-		a.mu.Lock()
-		delete(a.servers, RuntimeKey)
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
-	}
-	a.installHandlers(srv)
 	return srv, nil
 }
 

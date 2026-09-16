@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -61,11 +62,23 @@ type Runtime struct {
 	StartedAt time.Time
 	State     string // session.Runtime* constant
 
-	h Harness
+	h         Harness
+	abandoned bool          // the claim was stopped while spawning
+	ready     chan struct{} // closed once the claim resolves (ready or gone)
+	readyDone bool
 
 	sessions  map[string]struct{} // bound RelaySession IDs
 	activity  map[string]Activity
 	mutations map[string]struct{} // in-flight native mutations (cancel)
+}
+
+// resolveReadyLocked releases every waiter on this claim exactly once.
+// Caller holds Supervisor.mu.
+func (r *Runtime) resolveReadyLocked() {
+	if !r.readyDone {
+		r.readyDone = true
+		close(r.ready)
+	}
 }
 
 // View is the read-only per-session runtime projection.
@@ -112,57 +125,78 @@ func New() *Supervisor {
 	}
 }
 
-// Ensure returns the runtime for key, spawning one via spawn when absent.
-// newID supplies the ephemeral runtime identity. The returned runtime is
-// in RuntimeStarting state: it becomes usable only after the caller
-// completes its handshake and calls MarkReady (or FailStart on failure).
-// Concurrent Ensure calls for the same key converge on exactly one spawn.
-func (s *Supervisor) Ensure(key, kind, newID string, shared bool, spawn SpawnFunc) (*Runtime, error) {
-	s.mu.Lock()
-	if s.closed {
+// Ensure returns the runtime for key, creating it when absent.
+//
+// Creation is claim-first: the first caller publishes a `starting`
+// placeholder and spawns outside the lock; concurrent callers WAIT for
+// that generation to become ready (or disappear) instead of starting a
+// second process. A cold runtime therefore never spawns twice, however
+// many sessions wake at once.
+//
+// The spawn closure must return only when the runtime is USABLE — process
+// started and protocol initialized. If it returns an error the claim is
+// released and waiters observe the failure; the closure owns reaping any
+// process it started.
+func (s *Supervisor) Ensure(ctx context.Context, key, kind, newID string, shared bool, spawn SpawnFunc) (*Runtime, error) {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, ErrClosed
+		}
+		if rt, ok := s.runtimes[key]; ok {
+			if rt.State != session.RuntimeStarting {
+				s.mu.Unlock()
+				return rt, nil
+			}
+			ready := rt.ready
+			s.mu.Unlock()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue // re-check: ready, gone, or claim it ourselves
+		}
+		rt := &Runtime{
+			ID:        newID,
+			Key:       key,
+			Kind:      kind,
+			Shared:    shared,
+			State:     session.RuntimeStarting,
+			ready:     make(chan struct{}),
+			sessions:  map[string]struct{}{},
+			activity:  map[string]Activity{},
+			mutations: map[string]struct{}{},
+		}
+		s.runtimes[key] = rt
 		s.mu.Unlock()
-		return nil, ErrClosed
-	}
-	if rt, ok := s.runtimes[key]; ok {
+
+		h, err := spawn()
+		s.mu.Lock()
+		if err != nil {
+			if s.runtimes[key] == rt {
+				delete(s.runtimes, key)
+			}
+			rt.resolveReadyLocked()
+			s.mu.Unlock()
+			return nil, err
+		}
+		if rt.abandoned || s.runtimes[key] != rt {
+			// Stopped or closed while spawning: never leak the process.
+			s.mu.Unlock()
+			_ = h.Stop()
+			return nil, ErrRuntimeGone
+		}
+		rt.h = h
+		rt.PID = h.PID()
+		rt.StartedAt = time.Now()
+		rt.State = session.RuntimeWarm
+		rt.resolveReadyLocked()
 		s.mu.Unlock()
+		go s.watch(rt)
 		return rt, nil
 	}
-	s.mu.Unlock()
-
-	// Spawn outside the lock (process startup can block), then converge:
-	// the first runtime to register wins, losers stop their process.
-	h, err := spawn()
-	if err != nil {
-		return nil, err
-	}
-	rt := &Runtime{
-		ID:        newID,
-		Key:       key,
-		Kind:      kind,
-		Shared:    shared,
-		PID:       h.PID(),
-		StartedAt: time.Now(),
-		State:     session.RuntimeStarting,
-		h:         h,
-		sessions:  map[string]struct{}{},
-		activity:  map[string]Activity{},
-		mutations: map[string]struct{}{},
-	}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		_ = h.Stop()
-		return nil, ErrClosed
-	}
-	if existing, ok := s.runtimes[key]; ok {
-		s.mu.Unlock()
-		_ = h.Stop() // lost the race — never leak the extra process
-		return existing, nil
-	}
-	s.runtimes[key] = rt
-	s.mu.Unlock()
-	go s.watch(rt)
-	return rt, nil
 }
 
 // watch observes the runtime process and reacts to an unexpected exit.
@@ -196,21 +230,6 @@ const (
 	ReasonStopped = "runtime stopped"
 )
 
-// MarkReady promotes a runtime from starting to warm after a successful
-// initialization handshake. Spawned is not ready.
-func (s *Supervisor) MarkReady(key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rt, ok := s.runtimes[key]
-	if !ok {
-		return ErrRuntimeGone
-	}
-	if rt.State == session.RuntimeStarting {
-		rt.State = session.RuntimeWarm
-	}
-	return nil
-}
-
 // SetState overrides a runtime's state (warm/active/stopping).
 func (s *Supervisor) SetState(key, state string) {
 	s.mu.Lock()
@@ -218,12 +237,6 @@ func (s *Supervisor) SetState(key, state string) {
 	if rt, ok := s.runtimes[key]; ok {
 		rt.State = state
 	}
-}
-
-// FailStart stops a runtime whose handshake failed: the process tree is
-// reaped and no runtime remains registered.
-func (s *Supervisor) FailStart(key string) error {
-	return s.stopKey(key, false)
 }
 
 // Get returns the runtime registered for key.
@@ -455,10 +468,13 @@ func (s *Supervisor) stopKey(key string, markStopping bool) error {
 }
 
 // finishStop stops the process tree, detaches every bound session, and
-// reports the runtime gone exactly once.
+// reports the runtime gone exactly once. A runtime whose process is still
+// spawning is abandoned instead: the spawn owner stops the process and
+// never registers it.
 func (s *Supervisor) finishStop(rt *Runtime) error {
-	err := rt.h.Stop()
 	s.mu.Lock()
+	rt.abandoned = true
+	rt.resolveReadyLocked()
 	for id := range rt.sessions {
 		if s.bySession[id] == rt.Key {
 			delete(s.bySession, id)
@@ -467,8 +483,13 @@ func (s *Supervisor) finishStop(rt *Runtime) error {
 	rt.sessions = map[string]struct{}{}
 	rt.activity = map[string]Activity{}
 	rt.mutations = map[string]struct{}{}
+	h := rt.h
 	onGone := s.OnGone
 	s.mu.Unlock()
+	var err error
+	if h != nil {
+		err = h.Stop()
+	}
 	if onGone != nil {
 		onGone(rt.Key, rt, ReasonStopped)
 	}

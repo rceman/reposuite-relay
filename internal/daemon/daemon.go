@@ -682,7 +682,7 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 		return
 	}
 	rtKey := fixtureRuntimeKey(sessionID)
-	rt, err := d.supervisor.Ensure(rtKey, session.HarnessFixture, runtimeID, false,
+	rt, err := d.supervisor.Ensure(r.Context(), rtKey, session.HarnessFixture, runtimeID, false,
 		func() (runtime.Harness, error) {
 			h, err := d.opts.SpawnFixture(d.opts.SelfExe, req.Cwd)
 			if err != nil {
@@ -697,13 +697,8 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
 		return
 	}
-	// A fixture runtime is ready as soon as the process is spawned (no
-	// initialization handshake), and it is dedicated: one per session.
-	if err := d.supervisor.MarkReady(rt.Key); err != nil {
-		_ = d.supervisor.Stop(rt.Key)
-		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
-		return
-	}
+	// The fixture runtime is ready as soon as its process is spawned (no
+	// initialization handshake) and it is dedicated: one per session.
 	if err := d.supervisor.Bind(rt.Key, sessionID); err != nil {
 		_ = d.supervisor.Stop(rt.Key)
 		fail(http.StatusInternalServerError, api.ErrInternal, err.Error())
