@@ -81,17 +81,24 @@ func NewRuntimeID() (string, error) { return newID() }
 // how many runtimes have ever been established for it (restart alone does
 // not increment it).
 type RelaySession struct {
-	ID              string    // stable Relay-owned session ID (crypto/rand)
-	Key             string    // human/client session key
-	Harness         string    // fixture today; codex/devin/opencode later
-	Cwd             string    // absolute client working directory
-	NativeSessionID string    // exact native resume identity; "" for fixture
-	State           string    // durable logical state (e.g. StateIdle)
-	Model           string    // optional last-known model; "" = unset
-	Mode            string    // optional last-known mode; "" = unset
-	Generation      int       // runtimes ever established (0 = never awake)
-	CreatedAt       time.Time // session creation
-	UpdatedAt       time.Time // last durable metadata change
+	ID              string // stable Relay-owned session ID (crypto/rand)
+	Key             string // human/client session key
+	Harness         string // fixture today; codex/devin/opencode later
+	Cwd             string // absolute client working directory
+	NativeSessionID string // exact native resume identity; "" for fixture
+	State           string // durable logical state (e.g. StateIdle)
+	Model           string // optional last-known model; "" = unset
+	Mode            string // optional last-known mode; "" = unset
+	Generation      int    // runtimes ever established (0 = never awake)
+	// SeqHighWatermark is durable reserved sequence space for canonical
+	// session events: seq values up to and including it are permanently
+	// consumed (allocated, transient, or gap). It is NOT "last event
+	// emitted" — transient events consume seq without being persisted, so
+	// a restart must resume strictly after this watermark to guarantee no
+	// seq is ever reused.
+	SeqHighWatermark uint64    `json:"seqHighWatermark,omitempty"`
+	CreatedAt        time.Time // session creation
+	UpdatedAt        time.Time // last durable metadata change
 }
 
 // HarnessRuntime is the ephemeral owned runtime for one awake harness
@@ -112,6 +119,13 @@ type Managed struct {
 	Session *RelaySession
 	Runtime *HarnessRuntime // nil = COLD: no harness resources
 	Stop    func() error    // nil when Runtime is nil
+
+	// MetaMu serializes durable metadata mutation (session.json replace)
+	// for this session: seq-block reservation today, future model/mode/
+	// nativeSessionId/generation/state updates. Lock order: MetaMu may be
+	// taken under the events broker's per-session lock and must never be
+	// taken while holding Registry.mu.
+	MetaMu sync.Mutex
 }
 
 // Registry is the daemon-memory session authority: a mutex-guarded map
