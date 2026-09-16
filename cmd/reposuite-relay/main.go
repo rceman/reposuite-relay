@@ -3,9 +3,9 @@
 //
 // The CLI is a local HTTP client of relayd (ADR-006): every managed
 // command goes through internal/client — descriptor discovery, bearer
-// auth, typed methods. Hidden internal modes `__daemon` and `__fixture`
-// are implementation details of the single-binary design — never listed
-// in help and not part of the public CLI contract.
+// auth, typed methods. Hidden internal modes `__daemon`, `__fixture`, and
+// `__fake-codex` are implementation details of the single-binary design —
+// never listed in help and not part of the public CLI contract.
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/client"
+	"github.com/rceman/reposuite-relay/internal/codex"
 	"github.com/rceman/reposuite-relay/internal/daemon"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/paths"
@@ -95,6 +96,10 @@ func run(args []string, selfExe string) int {
 		return runDaemon(selfExe)
 	case "__fixture":
 		return fixture.RunChild()
+	case "__fake-codex":
+		// Deterministic fake Codex app-server (test seam; no model calls,
+		// no network). Reached only by explicit spawn from tests.
+		return codex.RunFakeAppServer(os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "reposuite-relay: unknown command %q\n\n%s", args[0], usage)
 		return 2

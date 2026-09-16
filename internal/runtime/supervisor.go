@@ -97,9 +97,11 @@ type Supervisor struct {
 	bySession map[string]string   // RelaySession ID -> runtime key
 	closed    bool
 
-	// OnExit is called (without the lock) when a runtime's process exits
-	// for any reason. The daemon wires it to adapter cleanup.
-	OnExit func(key string, rt *Runtime)
+	// OnGone is called (without the lock) exactly once per runtime, after
+	// its process tree is gone — whether it exited on its own or was
+	// stopped deliberately. The daemon wires it to adapter cleanup, which
+	// must never keep serving a runtime whose process is gone.
+	OnGone func(key string, rt *Runtime, reason string)
 }
 
 // New returns an empty supervisor.
@@ -177,12 +179,22 @@ func (s *Supervisor) watch(rt *Runtime) {
 			delete(s.bySession, id)
 		}
 	}
-	onExit := s.OnExit
+	onGone := s.OnGone
 	s.mu.Unlock()
-	if onExit != nil {
-		onExit(rt.Key, rt)
+	if onGone != nil {
+		onGone(rt.Key, rt, ReasonExited)
 	}
 }
+
+// Reasons reported to OnGone.
+const (
+	// ReasonExited means the process exited on its own (crash, harness
+	// exit) — in-flight work must fail durably.
+	ReasonExited = "runtime process exited"
+	// ReasonStopped means Relay stopped the runtime deliberately (idle
+	// sleep, session stop, daemon shutdown).
+	ReasonStopped = "runtime stopped"
+)
 
 // MarkReady promotes a runtime from starting to warm after a successful
 // initialization handshake. Spawned is not ready.
@@ -442,7 +454,8 @@ func (s *Supervisor) stopKey(key string, markStopping bool) error {
 	return s.finishStop(rt)
 }
 
-// finishStop stops the process tree and detaches every bound session.
+// finishStop stops the process tree, detaches every bound session, and
+// reports the runtime gone exactly once.
 func (s *Supervisor) finishStop(rt *Runtime) error {
 	err := rt.h.Stop()
 	s.mu.Lock()
@@ -454,7 +467,11 @@ func (s *Supervisor) finishStop(rt *Runtime) error {
 	rt.sessions = map[string]struct{}{}
 	rt.activity = map[string]Activity{}
 	rt.mutations = map[string]struct{}{}
+	onGone := s.OnGone
 	s.mu.Unlock()
+	if onGone != nil {
+		onGone(rt.Key, rt, ReasonStopped)
+	}
 	return err
 }
 

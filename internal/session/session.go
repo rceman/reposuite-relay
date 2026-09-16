@@ -21,15 +21,26 @@ import (
 	"time"
 )
 
-// HarnessFixture is the only built-in harness today: a deterministic
-// same-binary child used to prove daemon/session ownership. It executes
-// no client-supplied command and has no native durable identity.
+// HarnessFixture is the deterministic same-binary child used to prove
+// daemon/session ownership. It executes no client-supplied command and
+// has no native durable identity.
 const HarnessFixture = "fixture"
 
-// StateIdle is the logical session state for a session with no in-flight
-// work. Logical state is NOT process state: a session stays "idle"
-// whether its runtime is warm or entirely absent.
-const StateIdle = "idle"
+// HarnessCodex is the native Codex app-server harness (ADR-005): one
+// shared app-server process, one exact native thread per Relay session.
+const HarnessCodex = "codex"
+
+// Logical session states. Logical state is NOT process state: a session
+// stays "idle" whether its runtime is warm or entirely absent.
+const (
+	// StateIdle means the session has no in-flight native work.
+	StateIdle = "idle"
+	// StateActive means a native turn is in flight.
+	StateActive = "active"
+	// StateWaitingInput means a native requested-input request is
+	// unresolved — the mandatory runtime sleep blocker.
+	StateWaitingInput = "waiting_input"
+)
 
 // HarnessRuntime states (ephemeral, never persisted).
 const (
@@ -112,9 +123,20 @@ type Managed struct {
 	// MetaMu serializes durable metadata mutation (session.json replace)
 	// for this session: seq-block reservation, model/mode, nativeSessionId,
 	// generation, state updates. Lock order: MetaMu may be taken under the
-	// events broker's per-session lock and must never be taken while
-	// holding Registry.mu.
+	// events broker's per-session lock and under Registry.mu, and must
+	// never be held while taking either of them.
 	MetaMu sync.Mutex
+}
+
+// Snapshot returns a copy of the durable session metadata. Every read of a
+// field the daemon may mutate concurrently (state, generation, model,
+// mode, nativeSessionId, seq watermark) must go through Snapshot or hold
+// MetaMu: durable fields are mutated by the harness adapter from its own
+// goroutines, not only from HTTP handlers.
+func (m *Managed) Snapshot() RelaySession {
+	m.MetaMu.Lock()
+	defer m.MetaMu.Unlock()
+	return *m.Session
 }
 
 // Registry is the daemon-memory session authority: a mutex-guarded map

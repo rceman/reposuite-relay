@@ -221,12 +221,18 @@ func TestSleepBlockers(t *testing.T) {
 }
 
 // TestUnexpectedExitUnbindsSessions: when a runtime process dies on its
-// own, bindings disappear (sessions project COLD) and OnExit fires.
+// own, bindings disappear (sessions project COLD) and OnGone fires with
+// the exit reason.
 func TestUnexpectedExitUnbindsSessions(t *testing.T) {
 	sup := New()
 	proc := newFakeProc(7000)
 	exited := make(chan string, 1)
-	sup.OnExit = func(key string, rt *Runtime) { exited <- key }
+	sup.OnGone = func(key string, rt *Runtime, reason string) {
+		if reason != ReasonExited {
+			t.Errorf("reason = %q", reason)
+		}
+		exited <- key
+	}
 	mkRuntime(t, sup, "codex/default", "codex", "rt-1", true, proc)
 	for _, id := range []string{"s1", "s2"} {
 		if err := sup.Bind("codex/default", id); err != nil {
@@ -273,11 +279,18 @@ func TestFailStartReapsWithoutRegistering(t *testing.T) {
 }
 
 // TestStopAllStopsEveryRuntime: daemon shutdown stops dedicated and
-// shared runtimes alike.
+// shared runtimes alike, and reports each one gone as a deliberate stop.
 func TestStopAllStopsEveryRuntime(t *testing.T) {
 	sup := New()
 	a := newFakeProc(9000)
 	b := newFakeProc(9001)
+	var mu sync.Mutex
+	reasons := map[string]string{}
+	sup.OnGone = func(key string, rt *Runtime, reason string) {
+		mu.Lock()
+		reasons[key] = reason
+		mu.Unlock()
+	}
 	mkRuntime(t, sup, "fixture/s1", "fixture", "rt-1", false, a)
 	mkRuntime(t, sup, "codex/default", "codex", "rt-2", true, b)
 	if err := sup.StopAll(); err != nil {
@@ -288,6 +301,11 @@ func TestStopAllStopsEveryRuntime(t *testing.T) {
 	}
 	if atomic.LoadInt32(&a.stops) != 1 || atomic.LoadInt32(&b.stops) != 1 {
 		t.Fatal("not every runtime was stopped")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 2 || reasons["fixture/s1"] != ReasonStopped || reasons["codex/default"] != ReasonStopped {
+		t.Fatalf("OnGone reasons = %v", reasons)
 	}
 	// The supervisor is closed: no new runtime may be created.
 	if _, err := sup.Ensure("x", "codex", "rt-3", true,

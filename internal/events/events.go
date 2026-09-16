@@ -198,20 +198,24 @@ func (b *Broker) Ensure(m *session.Managed) (*Session, error) {
 	}
 	last := tr.LastSeq()
 	_ = tr.Close()
-	if last > m.Session.SeqHighWatermark {
+	// Read the durable watermark under MetaMu: it is the same lock the
+	// seq-block reservation uses, so a concurrent reservation can never
+	// hand out a seq below the value initialized here.
+	watermark := m.Snapshot().SeqHighWatermark
+	if last > watermark {
 		return nil, fmt.Errorf(
 			"events: session %s transcript seq %d exceeds durable watermark %d",
-			id, last, m.Session.SeqHighWatermark)
+			id, last, watermark)
 	}
 	s := &Session{
 		id:     id,
 		rs:     m.Session,
 		metaMu: &m.MetaMu,
 		ss:     b.ss,
-		next:   m.Session.SeqHighWatermark + 1,
-		limit:  m.Session.SeqHighWatermark,
-		cursor: m.Session.SeqHighWatermark,
-		floor:  m.Session.SeqHighWatermark,
+		next:   watermark + 1,
+		limit:  watermark,
+		cursor: watermark,
+		floor:  watermark,
 		subs:   map[*Subscription]struct{}{},
 	}
 	b.sessions[id] = s

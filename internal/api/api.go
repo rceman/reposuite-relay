@@ -52,6 +52,22 @@ const (
 	ErrHistoryRecordTooLarge = "HISTORY_RECORD_TOO_LARGE"
 	ErrShuttingDown          = "DAEMON_SHUTTING_DOWN"
 	ErrInternal              = "INTERNAL"
+
+	// ErrSessionBusy means the session already has an in-flight turn.
+	ErrSessionBusy = "SESSION_BUSY"
+	// ErrNoActiveTurn means cancel was requested with no in-flight turn.
+	ErrNoActiveTurn = "NO_ACTIVE_TURN"
+	// ErrNativeSessionLost means the exact recorded native session could
+	// not be resumed. Relay never substitutes a different native session.
+	ErrNativeSessionLost = "NATIVE_SESSION_LOST"
+	// ErrUnknownInput means the requested-input ID is unknown or already
+	// resolved for this session.
+	ErrUnknownInput = "UNKNOWN_INPUT"
+	// ErrRuntimeUnavailable means the harness runtime could not be started
+	// or initialized.
+	ErrRuntimeUnavailable = "RUNTIME_UNAVAILABLE"
+	// ErrInvalidConfig means the requested model/mode is not acceptable.
+	ErrInvalidConfig = "INVALID_CONFIG"
 )
 
 // Canonical size bounds. These are part of the wire contract and are used
@@ -110,6 +126,107 @@ type SessionInfo struct {
 	PID                 int    `json:"pid"`
 	CreatedAt           string `json:"createdAt"`
 	GenerationStartedAt string `json:"generationStartedAt"`
+}
+
+// Canonical durable event types. These are persisted in the session
+// transcript and replayed to clients; the set is closed and documented.
+const (
+	// EventMessageUser records an accepted user prompt.
+	EventMessageUser = "message.user"
+	// EventMessageAgentCompleted records a completed agent message.
+	EventMessageAgentCompleted = "message.agent.completed"
+	// EventTurnInterrupted records an interrupted turn.
+	EventTurnInterrupted = "turn.interrupted"
+	// EventTurnFailed records a failed turn or prompt submission.
+	EventTurnFailed = "turn.failed"
+	// EventRuntimeExited records the death of a harness runtime generation.
+	EventRuntimeExited = "runtime.exited"
+	// EventHarnessStarted records that a runtime generation took ownership
+	// of a session (native thread started or resumed).
+	EventHarnessStarted = "harness.started"
+	// EventInputRequested records a native requested-input request.
+	EventInputRequested = "input.requested"
+	// EventInputResolved records a user answer to requested input.
+	EventInputResolved = "input.resolved"
+	// EventInputAborted records requested input that can no longer be
+	// answered (runtime death, session stop).
+	EventInputAborted = "input.aborted"
+	// EventNativeSession records proven native materialization: from this
+	// point the exact native session ID is durable.
+	EventNativeSession = "session.native"
+	// EventConfigChanged records an accepted model/mode change.
+	EventConfigChanged = "session.config"
+)
+
+// Canonical transient event types (live stream only, never persisted).
+const (
+	// EventMessageAgentDelta is a streamed agent message chunk.
+	EventMessageAgentDelta = "message.agent.delta"
+	// EventMetricsUpdated carries token usage / rate limit updates.
+	EventMetricsUpdated = "metrics.updated"
+	// EventHarnessError carries a harness-reported error notification.
+	EventHarnessError = "harness.error"
+)
+
+// CodexRequest is the body of POST /v1/sessions/codex. There are no
+// executable/args fields: the daemon runs only its own built-in native
+// Codex adapter. Creating a session is a durable, runtime-free operation
+// (COLD) — no app-server is started until the first prompt.
+type CodexRequest struct {
+	Key   string `json:"key"`
+	Cwd   string `json:"cwd"`
+	Model string `json:"model,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+}
+
+// PromptRequest is the body of POST /v1/sessions/{key}/prompt.
+type PromptRequest struct {
+	Text   string `json:"text"`
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+// PromptResponse reports the accepted native turn.
+type PromptResponse struct {
+	Daemon         DaemonInfo `json:"daemon"`
+	Key            string     `json:"key"`
+	TurnID         string     `json:"turnId"`
+	NativeThreadID string     `json:"nativeThreadId"`
+	RuntimeID      string     `json:"runtimeId"`
+}
+
+// CancelResponse reports an accepted interruption.
+type CancelResponse struct {
+	Daemon DaemonInfo `json:"daemon"`
+	Key    string     `json:"key"`
+	TurnID string     `json:"turnId"`
+}
+
+// InputAnswer is one answer to one requested-input question.
+type InputAnswer struct {
+	QuestionID string   `json:"questionId"`
+	Answers    []string `json:"answers"`
+}
+
+// InputRequest is the body of POST /v1/sessions/{key}/input.
+type InputRequest struct {
+	InputID string        `json:"inputId"`
+	Answers []InputAnswer `json:"answers"`
+}
+
+// InputResponse reports an accepted answer.
+type InputResponse struct {
+	Daemon  DaemonInfo `json:"daemon"`
+	Key     string     `json:"key"`
+	InputID string     `json:"inputId"`
+}
+
+// ConfigRequest is the body of PATCH /v1/sessions/{key}/config. Both
+// fields are optional; an absent field is left unchanged. The accepted
+// values take effect at the next native thread start/resume or turn.
+type ConfigRequest struct {
+	Model *string `json:"model,omitempty"`
+	Mode  *string `json:"mode,omitempty"`
 }
 
 // FixtureRequest is the body of POST /v1/sessions/fixture. There are no
