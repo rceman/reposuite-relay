@@ -134,7 +134,10 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			// Capture the in-flight turn under the lock: it is the turn
 			// this generation owned, and it must not be re-read after a
 			// concurrent prompt has started the next generation.
-			affected = append(affected, boundSession{st: st, current: st.current})
+			affected = append(affected, boundSession{
+				st:      st,
+				current: st.current,
+			})
 		}
 	}
 	for _, entry := range affected {
