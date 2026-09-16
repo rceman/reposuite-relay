@@ -21,7 +21,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/version"
 )
 
-const usage = `reposuite-relay — RepoSuite Relay (managed agent runtime/session relay)
+const usage = `reposuite-relay — RepoSuite Relay (persistent agent-session daemon)
 
 Usage:
   reposuite-relay <command>

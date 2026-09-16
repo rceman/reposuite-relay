@@ -1,5 +1,11 @@
 # Dependency: rceman/xterm-go
 
+> **Superseded (Task A1, ADR-005):** `xterm-go` is no longer a RepoSuite
+> Relay production dependency. The terminal engine and PTY layer were
+> removed from this repository; the pin and policy below are preserved as
+> historical reference. The standalone `rceman/xterm-go` library remains
+> maintained independently.
+
 RepoSuite Relay's terminal engine is our maintained downstream fork of
 `gitpod-io/xterm-go` (a pure-Go port of headless xterm.js, MIT license).
 

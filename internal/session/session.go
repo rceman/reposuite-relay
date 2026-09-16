@@ -59,8 +59,8 @@ type Session struct {
 }
 
 // ActiveGeneration is the ephemeral owned runtime for one awake generation.
-// In this milestone a generation owns exactly one fixture child process;
-// PTY/VirtualTerminal fields arrive with the harness milestone.
+// In this milestone a generation owns exactly one fixture child process.
+// ADR-005 supersedes this concept: HarnessRuntime/RelaySession arrive in A2.
 type ActiveGeneration struct {
 	PID       int
 	StartedAt time.Time

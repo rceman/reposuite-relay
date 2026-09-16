@@ -1,19 +1,23 @@
 # RepoSuite Relay
 
-A managed agent runtime/session relay, implemented in Go.
+A persistent structured agent-session daemon with native harness
+adapters, implemented in Go.
 
-**Status: early development.** Linux-only.
+**Status: early development** — architecture transition to ADR-005/006
+(native harness-first) is in progress.
 
-RepoSuite Relay keeps agent (harness) terminal sessions alive independently
-of any viewer: a persistent per-user daemon owns the PTY, the harness
-process, and an authoritative headless terminal; viewers attach and detach
-without owning the session's lifetime.
+RepoSuite Relay keeps agent sessions alive independently of any viewer:
+a persistent per-user daemon owns durable session identities
+(`RelaySession`), wakes ephemeral native harness runtimes
+(`HarnessRuntime`) on demand, and bridges clients to harness-native
+structured protocols — viewers attach and detach without owning the
+session's lifetime.
 
 - Standalone CLI: `reposuite-relay`
 - Future RepoSuite umbrella invocation: `reposuite relay ...`
-- Terminal engine: [`rceman/xterm-go`](https://github.com/rceman/xterm-go)
-  (maintained downstream fork of `gitpod-io/xterm-go`)
 - Canonical toolchain: exactly `go1.27.1`
+- Production core: **stdlib only** (no third-party dependencies)
+- Product target: Linux, macOS, Windows (ADR-006)
 
 ## Currently implemented
 
@@ -30,20 +34,26 @@ $ reposuite-relay daemon status              # daemon liveness (no autostart)
 $ reposuite-relay daemon stop                # graceful shutdown
 ```
 
-A single persistent daemon (Unix socket `~/.reposuite/relay/run/relayd.sock`,
-singleton-locked) owns in-memory logical sessions. The `fixture` harness is
-a deterministic development/test child — **not** a real agent harness.
-Hibernation, PTY-backed sessions, Codex lifecycle, attach, and durable
-session persistence are designed (`docs/adr/ADR-002`) but **not yet
-implemented**.
+A single persistent daemon (Linux: Unix socket
+`~/.reposuite/relay/run/relayd.sock`, singleton-locked) owns in-memory
+logical sessions. The `fixture` harness is a deterministic
+development/test child — **not** a real agent harness.
+
+**Not yet implemented:** native harness adapters (Codex/OpenCode/Devin),
+durable session persistence (`RelaySession`), the ADR-006 loopback
+HTTP/JSON + NDJSON control plane (the current Linux Unix socket remains
+until that migration), hibernation/sleep-wake, attach, TUI.
 
 ## Layout
 
 - `cmd/reposuite-relay` — CLI
-- `internal/terminal` — headless terminal model (xterm-go + host services)
-- `internal/pty` — Linux PTY runner
+- `internal/daemon` — daemon lifecycle, socket server, control dispatch
+- `internal/session` — logical session registry
+- `internal/fixture` — deterministic fixture harness child
+- `internal/protocol` — bounded JSON control protocol
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
-- `docs/` — domain vocabulary, ADRs, feasibility research, dependency policy
+- `docs/` — domain vocabulary, ADRs, feasibility research
+- `testdata/` — historical captured research data (terminal spike)
 
 ## Development
 

@@ -1,11 +1,47 @@
 # AGENTS.md — reposuite-relay
 
+## Product
+
+RepoSuite Relay is a **persistent structured agent-session daemon with
+native harness adapters** (ADR-005). It is not a terminal relay: no PTY,
+no terminal emulator, no xterm dependency in the production core.
+
+## Accepted target architecture
+
+- `RelaySession` — durable logical session identity; `HarnessRuntime` —
+  the ephemeral native harness process/server. They are distinct: a
+  session may exist with **zero** harness runtime resources.
+- Resume always uses the **exact native session identity** — never
+  "newest"/`--last`/implicit.
+- An idle `HarnessRuntime` may be fully stopped; `waiting_input`
+  (unresolved native input request) blocks runtime sleep.
+- Relay owns durable metadata + compact transcript (next core step, A2);
+  native stores remain authoritative for model context.
+- Native harness servers are **private to relayd** — never exposed to
+  clients.
+- Canonical local protocol (ADR-006): loopback TCP `127.0.0.1:0`,
+  HTTP/JSON commands, streaming NDJSON events, `run/daemon.json`
+  descriptor.
+- Product target: **Linux, macOS, Windows**.
+
+## Current implementation status (transition)
+
+- The daemon/session lifecycle foundation (ADR-003) and the fixture
+  harness exist and pass gates.
+- The current control plane is still the **existing Linux Unix-socket**
+  implementation pending the ADR-006 migration; platform-specific
+  locking (`flock`) is an implementation detail, not an invariant —
+  the invariant is exactly one relayd per state root, fail-closed.
+- Native harness adapters, durable persistence, TUI: **not implemented**.
+
 ## Scope
 
-- Linux-only. Do not add macOS/Windows abstractions or stubs.
 - Go implementation, stdlib-first. No CLI/DI/logging/config frameworks.
-- Production Go toolchain: **exactly go1.27.1** (`go 1.27.1`, no floating
+- Production toolchain: **exactly go1.27.1** (`go 1.27.1`, no floating
   toolchain). CI fails unless `go env GOVERSION == go1.27.1`.
+- Linux-only code while the current implementation is Linux-specific;
+  do not add speculative Windows/macOS abstractions before the
+  control-plane task that actually ports them.
 
 ## Gates
 
@@ -19,36 +55,33 @@ report each as PASS/FAIL/N/A with evidence.
 - **Never** touch `~/.airelay`, `AIRELAY_*`, Airelay sockets/PIDs/state, or
   live Airelay/Codex sessions. Airelay is reference material, not a runtime
   dependency.
-- Tests must use isolated temp roots — never the developer's real
+- Tests must use isolated temporary roots — never the developer's real
   `~/.reposuite` or `~/.airelay`.
-- Private state directories use `0700`.
+- Private state is user-private (mode `0700`/`0600` on Unix).
 
 ## Dependencies
 
-- Terminal engine is `github.com/rceman/xterm-go` at an exact pinned
-  commit (see `docs/dependencies/XTERM_GO.md`). Do not float it, do not
-  `replace` it, and never import `github.com/gitpod-io/xterm-go` in code.
-- Bumping the pin follows the update policy in that document.
+- **stdlib only** in the production core today — `go.mod` must have no
+  third-party `require` entries. Additions need a concrete requirement
+  and Planner approval.
+- Never import `github.com/gitpod-io/xterm-go`, `github.com/rceman/xterm-go`,
+  or `github.com/creack/pty` — all superseded (ADR-005). The standalone
+  `rceman/xterm-go` library is maintained independently; do not touch it
+  here.
 
 ## Architecture invariants
 
-- One daemon per RepoSuite state root; singleton via `flock` on
-  `run/relayd.lock` — never PID files. Socket `run/relayd.sock` is 0600,
-  state dirs 0700.
-- The control protocol (internal/protocol) is versioned bounded JSON; it
-  never carries client-supplied commands. The daemon only runs the built-in
-  `fixture` harness today.
-- Session registry is daemon-memory only — deliberately not durable yet.
-- "Hibernated" means **zero** active runtime resources (no process, no PTY,
-  no xterm object).
-- Session resume requires the **exact native session identity** — never
-  newest/`--last` guessing.
-- Terminal primitives live in `internal/terminal` (generic) and
-  `internal/pty`; session/daemon concepts do not belong there.
-- The headless terminal is the child's terminal peer: PTY output →
-  `terminal.Write`; terminal replies → PTY input. Zero viewers required.
-- Do not modify spike evidence branches casually
-  (`spike/*` are immutable research references).
+- One daemon per RepoSuite state root; exclusive singleton ownership with
+  fail-closed competing startup (flock on Linux; platform-equivalent
+  elsewhere per ADR-006).
+- The control protocol is versioned bounded JSON; it never carries
+  client-supplied commands. The daemon only runs the built-in `fixture`
+  harness today.
+- Relay-owned durable session metadata is the canonical direction (A2);
+  the in-memory registry is current implementation, not the target.
+- "Cold" session means **zero** harness runtime resources.
+- Do not casually modify immutable spike branches (`spike/*` are
+  immutable research references).
 
 ## Style
 

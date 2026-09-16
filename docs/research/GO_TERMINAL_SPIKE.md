@@ -4,6 +4,13 @@ PROMPT_ID: RSR-P-20260914-1205-GO01
 Branch: `spike/go-terminal-runtime`
 Status: research spike — NOT production code, NOT v0.1.0
 
+> **Superseded (Task A1, ADR-005):** RepoSuite Relay is now a native
+> harness-first daemon — the PTY/terminal packages this document promoted
+> (`internal/terminal`, `internal/pty`, `internal/fixtures`) were removed
+> from production. All measurements, verdicts, and evidence below are
+> preserved unchanged as research history. `testdata/codex-startup.raw`
+> remains as static captured data; the code that consumed it is gone.
+
 > **Provenance note (feature/relay-foundation):** this research was performed
 > on the spike branches (`spike/go-terminal-runtime`,
 > `spike/go-terminal-runtime-rceman-xterm`) and is preserved here as
