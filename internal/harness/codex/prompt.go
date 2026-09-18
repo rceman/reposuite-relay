@@ -113,8 +113,15 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 			}
 			threadModel = res.Model
 		}
-		// Bind only after the thread exists in this generation.
+		// Bind only after the thread exists in this generation. The
+		// generation counts successful native runtime BINDINGS: this is a
+		// fresh binding even while the native identity is still provisional
+		// (Generation=1 with NativeSessionID="" is a valid state before the
+		// first completed turn).
 		if err := a.deps.Supervisor.Bind(RuntimeKey, m.Session.ID); err != nil {
+			return fail(err)
+		}
+		if err := a.deps.Materialize(m, harness.SessionUpdate{BumpGeneration: true}); err != nil {
 			return fail(err)
 		}
 		a.mu.Lock()
@@ -129,7 +136,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 		}
 		a.mu.Unlock()
 		if err := a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
-			RuntimeID:       RuntimeKey,
+			RuntimeID:       a.runtimeID(m.Session.ID),
 			NativeSessionID: threadID,
 			Model:           threadModel,
 			Resumed:         resume,
@@ -196,8 +203,18 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	return harness.PromptResult{
 		TurnID:          turnID,
 		NativeSessionID: threadID,
-		RuntimeID:       RuntimeKey,
+		RuntimeID:       a.runtimeID(m.Session.ID),
 	}, nil
+}
+
+// runtimeID returns the actual ephemeral identity of the runtime generation
+// currently bound to the session — never the supervisor's stable key.
+func (a *Adapter) runtimeID(sessionID string) string {
+	v, ok := a.deps.Supervisor.View(sessionID)
+	if !ok {
+		return ""
+	}
+	return v.RuntimeID
 }
 
 // Cancel interrupts the in-flight turn of a session. It is serialized

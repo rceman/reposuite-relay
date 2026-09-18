@@ -24,7 +24,7 @@ func TestCodexPromptLifecycleOverHTTP(t *testing.T) {
 	if info.RuntimeState != session.RuntimeCold || info.RuntimeID != "" || info.PID != 0 {
 		t.Fatalf("create must be COLD: %+v", info)
 	}
-	if info.Harness != session.HarnessCodex || info.NativeSessionID != "" || info.Generation != 1 {
+	if info.Harness != session.HarnessCodex || info.NativeSessionID != "" || info.Generation != 0 {
 		t.Fatalf("fresh session = %+v", info)
 	}
 
@@ -34,7 +34,7 @@ func TestCodexPromptLifecycleOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if res.TurnID == "" || res.NativeSessionID == "" || res.RuntimeID != codex.RuntimeKey {
+	if res.TurnID == "" || res.NativeSessionID == "" || res.RuntimeID == "" || res.RuntimeID == codex.RuntimeKey {
 		t.Fatalf("prompt response = %+v", res)
 	}
 
@@ -54,21 +54,22 @@ func TestCodexPromptLifecycleOverHTTP(t *testing.T) {
 		}
 	}
 
-	// The session is now materialized: exact native identity, generation 2.
+	// The session is now materialized: exact native identity, generation 1
+	// (create 0 -> first native binding 1; materialization does not bump).
 	ctx2, cancel2 := tctx(t)
 	defer cancel2()
 	st, err := c.Status(ctx2, "sess")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Session.NativeSessionID != res.NativeSessionID || st.Session.Generation != 2 {
+	if st.Session.NativeSessionID != res.NativeSessionID || st.Session.Generation != 1 {
 		t.Fatalf("status = %+v", st.Session)
 	}
 	if st.Session.State != session.StateIdle || st.Session.Activity != "idle" {
 		t.Fatalf("session not idle after completion: %+v", st.Session)
 	}
-	if st.Session.RuntimeID == "" || st.Session.RuntimeState != session.RuntimeWarm {
-		t.Fatalf("runtime not warm after a turn: %+v", st.Session)
+	if st.Session.RuntimeID == "" || st.Session.RuntimeID != res.RuntimeID || st.Session.RuntimeState != session.RuntimeWarm {
+		t.Fatalf("runtime not warm after a turn or id mismatch: %+v vs %q", st.Session, res.RuntimeID)
 	}
 	if d.supervisor.Len() != 1 {
 		t.Fatalf("runtimes = %d, want 1", d.supervisor.Len())

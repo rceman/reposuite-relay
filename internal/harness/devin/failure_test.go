@@ -43,7 +43,7 @@ func TestCancelIsNativeAndTerminal(t *testing.T) {
 	if e.DurablePayload(m.Session.ID, api.EventMessageAgentCompleted) != nil {
 		t.Fatal("a cancelled turn must not publish a completed message")
 	}
-	harnessenv.WaitFor(t, "idle after cancel", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "idle after cancel", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if err := a.Cancel(bg(), m); !isNoActiveTurn(err) {
 		t.Fatalf("err = %v, want ErrNoActiveTurn", err)
 	}

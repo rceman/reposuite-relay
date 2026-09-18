@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -20,15 +21,21 @@ func TestMain(m *testing.M) { os.Exit(harnessenv.Main(m)) }
 func newEnv(t *testing.T, mode string) (*harnessenv.Env, *Adapter) {
 	t.Helper()
 	e := harnessenv.New(t)
+	// Every generation gets a distinct ephemeral id — Runtime.Key is stable,
+	// Runtime.ID is not.
+	rtSeq := 0
 	a := NewAdapter(Deps{
 		Broker:     e.Broker,
 		Supervisor: e.Supervisor,
 		Command: func(model string) (acp.Command, error) {
 			return harnessenv.FakeACPCommand(t, acp.FakeVendorDevin, mode, e.ACPState)()
 		},
-		Materialize:   e.Materialize,
-		RandRuntimeID: func() (string, error) { return "rt-devin-1", nil },
-		Version:       "test",
+		Materialize: e.Materialize,
+		RandRuntimeID: func() (string, error) {
+			rtSeq++
+			return fmt.Sprintf("rt-devin-%d", rtSeq), nil
+		},
+		Version: "test",
 	})
 	e.Supervisor.OnGone = a.OnRuntimeGone
 	return e, a
@@ -108,7 +115,7 @@ func TestNativeIdentityPersistedOnlyAfterCompletedTurn(t *testing.T) {
 	if got.NativeSessionID != res.NativeSessionID {
 		t.Fatalf("persisted slug = %q, want %q", got.NativeSessionID, res.NativeSessionID)
 	}
-	// generation 0 → 1 at the first proven materialization.
+	// generation 0 → 1 at the first native BINDING (not at materialization).
 	if got.Generation != 1 {
 		t.Fatalf("generation = %d, want 1", got.Generation)
 	}
@@ -151,7 +158,7 @@ func TestExactColdResumeUsesSessionLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventNativeSession)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if err := e.Supervisor.Stop(RuntimeKeyFor("")); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +173,7 @@ func TestExactColdResumeUsesSessionLoad(t *testing.T) {
 		t.Fatalf("resumed %q, want the exact %q", second.NativeSessionID, first.NativeSessionID)
 	}
 	if got := e.Reload(m.Session.ID).Generation; got != 2 {
-		t.Fatalf("generation = %d, want 2 (materialize + exact resume)", got)
+		t.Fatalf("generation = %d, want 2 (first bind + exact resume)", got)
 	}
 	if n := acp.CountFakeEvents(e.ACPState, "session/load"); n != 1 {
 		t.Fatalf("session/load calls = %d, want 1", n)

@@ -99,7 +99,9 @@ func TestCodexRuntimeDeathAndRecoveryOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Session.NativeSessionID != native || st.Session.Generation != 2 {
+	// Generation counts bindings: create 0, first bind 1, the doomed
+	// resume-bind 2, the recovery resume-bind 3.
+	if st.Session.NativeSessionID != native || st.Session.Generation != 3 {
 		t.Fatalf("identity/generation drifted: %+v", st.Session)
 	}
 }

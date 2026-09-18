@@ -37,9 +37,7 @@ func TestSecondPromptReusesLiveGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "first turn settled", func() bool {
-		return !a.State(m.Session.ID).TurnInFlight
-	})
+	harnessenv.WaitFor(t, "first turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if _, err := a.Prompt(bg(), m, text("two")); err != nil {
 		t.Fatal(err)
 	}

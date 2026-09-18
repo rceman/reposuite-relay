@@ -128,13 +128,13 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	a.mu.Unlock()
 
 	// A completed first turn proves the native session is materialized:
-	// only now is the exact native identity persisted.
+	// only now is the exact native identity persisted. Materialization is
+	// orthogonal to generation — the binding already bumped it.
 	if p.Turn.Status == "completed" && firstTurn && nativeID != "" && !materialized {
 		idle := session.StateIdle
 		if err := a.deps.Materialize(m, harness.SessionUpdate{
 			NativeSessionID: &nativeID,
 			State:           &idle,
-			BumpGeneration:  true,
 		}); err != nil {
 			_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 				TurnID: p.Turn.ID,

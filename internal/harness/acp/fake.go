@@ -46,6 +46,9 @@ const (
 	// (by creating <state>/release-config), so the sleep-blocker behaviour of
 	// a live config mutation is deterministic and sleep-free.
 	FakeConfigSlow = "config-slow"
+	// FakeFailTurn answers every prompt with a non-success stop reason
+	// without the runtime dying: the turn fails but the generation lives.
+	FakeFailTurn = "fail-turn"
 	// FakeNoLoad advertises loadSession: false.
 	FakeNoLoad = "no-load"
 	// FakeLoadError fails every session/load.

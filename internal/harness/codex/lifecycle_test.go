@@ -19,7 +19,7 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 	m := e.newSession("mat", t.TempDir())
 
 	// Before any prompt the session is COLD with no native identity.
-	if got := e.reload(m.Session.ID); got.NativeSessionID != "" || got.Generation != 1 {
+	if got := e.reload(m.Session.ID); got.NativeSessionID != "" || got.Generation != 0 {
 		t.Fatalf("cold session = %+v", got)
 	}
 	res, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hello"})
@@ -35,8 +35,9 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 	if got.NativeSessionID != res.NativeSessionID {
 		t.Fatalf("nativeSessionId = %q, want %q", got.NativeSessionID, res.NativeSessionID)
 	}
-	if got.Generation != 2 {
-		t.Fatalf("generation = %d, want 2 (materialization bumps it once)", got.Generation)
+	if got.Generation != 1 {
+		// Create 0 -> first bind 1; materialization does NOT bump again.
+		t.Fatalf("generation = %d, want 1 (one native binding)", got.Generation)
 	}
 	if got.State != session.StateIdle {
 		t.Fatalf("state = %s", got.State)
@@ -140,10 +141,10 @@ func TestExactColdResume(t *testing.T) {
 	if !started.Resumed {
 		t.Fatal("second generation must report a resume, not a fresh thread")
 	}
-	// Materialization already happened: no second session.native record and
-	// no second generation bump.
+	// Materialization already happened: no second session.native record,
+	// but the fresh binding bumps the generation.
 	if got := e.reload(m.Session.ID); got.Generation != 2 {
-		t.Fatalf("generation = %d, want 2", got.Generation)
+		t.Fatalf("generation = %d, want 2 (first bind + exact resume)", got.Generation)
 	}
 	n := 0
 	for _, typ := range e.durableTypes(m.Session.ID) {
@@ -185,8 +186,9 @@ func TestResumeFailureIsExplicit(t *testing.T) {
 	if got.NativeSessionID != res1.NativeSessionID {
 		t.Fatalf("native id changed to %q", got.NativeSessionID)
 	}
-	if got.Generation != 2 {
-		t.Fatalf("generation = %d, want 2", got.Generation)
+	// The failed resume established no new binding: one binding total.
+	if got.Generation != 1 {
+		t.Fatalf("generation = %d, want 1", got.Generation)
 	}
 	if !e.adapter.Idle(m.Session.ID) {
 		t.Fatal("failed prompt must not leave the session busy")

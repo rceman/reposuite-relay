@@ -111,7 +111,7 @@ func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventTurnInterrupted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if err := e.Supervisor.StopIfIdle(RuntimeKeyFor("")); err != nil {
 		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
 	}

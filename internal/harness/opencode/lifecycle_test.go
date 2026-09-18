@@ -2,12 +2,14 @@ package opencode
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/harnessenv"
+	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
@@ -17,13 +19,19 @@ func TestMain(m *testing.M) { os.Exit(harnessenv.Main(m)) }
 func newEnv(t *testing.T, mode string) (*harnessenv.Env, *Adapter) {
 	t.Helper()
 	e := harnessenv.New(t)
+	// Every generation gets a distinct ephemeral id — Runtime.Key is stable,
+	// Runtime.ID is not.
+	rtSeq := 0
 	a := NewAdapter(Deps{
-		Broker:        e.Broker,
-		Supervisor:    e.Supervisor,
-		Command:       harnessenv.FakeACPCommand(t, acp.FakeVendorOpenCode, mode, e.ACPState),
-		Materialize:   e.Materialize,
-		RandRuntimeID: func() (string, error) { return "rt-opencode-1", nil },
-		Version:       "test",
+		Broker:      e.Broker,
+		Supervisor:  e.Supervisor,
+		Command:     harnessenv.FakeACPCommand(t, acp.FakeVendorOpenCode, mode, e.ACPState),
+		Materialize: e.Materialize,
+		RandRuntimeID: func() (string, error) {
+			rtSeq++
+			return fmt.Sprintf("rt-opencode-%d", rtSeq), nil
+		},
+		Version: "test",
 	})
 	e.Supervisor.OnGone = a.OnRuntimeGone
 	return e, a
@@ -75,8 +83,13 @@ func TestFirstPromptCreatesNativeSessionAndMaterializes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NativeSessionID == "" || res.RuntimeID != RuntimeKey || res.TurnID == "" {
+	if res.NativeSessionID == "" || res.RuntimeID == "" || res.RuntimeID == RuntimeKey || res.TurnID == "" {
 		t.Fatalf("prompt result = %+v", res)
+	}
+	// The prompt result must carry the actual runtime generation ID, never
+	// the stable supervisor key.
+	if v, ok := e.Supervisor.View(m.Session.ID); !ok || v.RuntimeID != res.RuntimeID {
+		t.Fatalf("runtimeId %q does not match the bound generation %+v", res.RuntimeID, v)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
 
@@ -246,4 +259,12 @@ func TestRuntimeDoesNotAdvertiseLoadFailsClosed(t *testing.T) {
 	} else if !isUnsupported(err) {
 		t.Fatalf("err = %v, want UNSUPPORTED_OPERATION", err)
 	}
+}
+
+// turnSettled reports whether a turn is fully done: no in-flight turn AND the
+// supervisor sees the session idle. The stronger condition matters for
+// mutations — clearing the in-flight marker happens before activity resets.
+func turnSettled(e *harnessenv.Env, a *Adapter, sessionID string) bool {
+	return !a.State(sessionID).TurnInFlight &&
+		e.Supervisor.Activity(sessionID) == runtime.ActivityIdle
 }

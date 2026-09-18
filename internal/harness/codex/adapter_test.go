@@ -94,7 +94,7 @@ func (e *env) newSession(key, cwd string) *session.Managed {
 	now := time.Now().UTC()
 	rs := &session.RelaySession{
 		ID: id, Key: key, Harness: session.HarnessCodex, Cwd: cwd,
-		State: session.StateIdle, Generation: 1, CreatedAt: now, UpdatedAt: now,
+		State: session.StateIdle, Generation: 0, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := e.store.Create(rs); err != nil {
 		e.t.Fatal(err)

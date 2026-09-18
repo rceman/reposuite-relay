@@ -162,6 +162,12 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 	for _, entry := range affected {
 		st, current := entry.st, entry.current
 		m := st.m
+		// Every affected session records the generation's end — a deliberate
+		// sleep ends a generation just as surely as a crash does.
+		_ = a.publishDurable(m, api.EventRuntimeExited, api.RuntimeExitedPayload{
+			RuntimeID: rt.ID,
+			Reason:    detail,
+		})
 		if !unexpected {
 			// Deliberate stop: no in-flight turn can exist (it is a sleep
 			// blocker), so only local state is released.
@@ -170,10 +176,6 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			a.mu.Unlock()
 			continue
 		}
-		_ = a.publishDurable(m, api.EventRuntimeExited, api.RuntimeExitedPayload{
-			RuntimeID: rt.ID,
-			Reason:    detail,
-		})
 		if current != nil {
 			_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 				TurnID: current.turnID,

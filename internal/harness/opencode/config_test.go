@@ -20,7 +20,7 @@ func TestConfigModelMutatesLiveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 
 	if err := a.ApplyConfig(bg(), m, harness.ConfigCommand{
 		Model: "fake/model-b",
@@ -55,7 +55,7 @@ func TestConfigRejectsUnadvertisedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 
 	err := a.ApplyConfig(bg(), m, harness.ConfigCommand{Model: "fake/model-zzz"})
 	if !isInvalidConfig(err) {
@@ -81,7 +81,7 @@ func TestConfigModeUsesAdvertisedOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 
 	if err := a.ApplyConfig(bg(), m, harness.ConfigCommand{Mode: "ask"}); err != nil {
 		t.Fatal(err)

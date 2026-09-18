@@ -85,8 +85,17 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	return harness.PromptResult{
 		TurnID:          turn.ID,
 		NativeSessionID: handle.ID(),
-		RuntimeID:       RuntimeKey,
+		RuntimeID:       a.runtimeID(m.Session.ID),
 	}, nil
+}
+
+// runtimeID returns the bound generation's actual Runtime.ID, never the key.
+func (a *Adapter) runtimeID(sessionID string) string {
+	v, ok := a.deps.Supervisor.View(sessionID)
+	if !ok {
+		return ""
+	}
+	return v.RuntimeID
 }
 
 // attach returns a usable session handle for a prompt, waking the runtime only
@@ -208,7 +217,7 @@ func (a *Adapter) recordNative(m *session.Managed, st *sessState, nativeID strin
 // session's native session. It is published AFTER the binding exists.
 func (a *Adapter) publishStarted(m *session.Managed, nativeID string, resumed bool) error {
 	return a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
-		RuntimeID:       RuntimeKey,
+		RuntimeID:       a.runtimeID(m.Session.ID),
 		NativeSessionID: nativeID,
 		Model:           m.Snapshot().Model,
 		Resumed:         resumed,

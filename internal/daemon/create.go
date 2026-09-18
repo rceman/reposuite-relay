@@ -16,12 +16,9 @@ import (
 
 // creationSpec is one built-in creation route. Creation is always a
 // runtime-free (COLD) durable operation: no harness process is spawned
-// until the first prompt. Generation records how many native bindings have
-// been established, and its starting value is adapter semantics:
-//
-//	codex     1  (creation counts as the first generation)
-//	opencode  0  (no native session exists until the first prompt)
-//	devin     0  (no native session exists until the first prompt)
+// until the first prompt. Generation counts successful native runtime
+// BINDINGS, so every native harness session starts at 0 — the first
+// binding happens on the first prompt.
 //
 // There is deliberately no executable/argv field anywhere in this path.
 type creationSpec struct {
@@ -30,7 +27,7 @@ type creationSpec struct {
 }
 
 var creationSpecs = map[string]creationSpec{
-	session.HarnessCodex:    {harness: session.HarnessCodex, generation: 1},
+	session.HarnessCodex:    {harness: session.HarnessCodex, generation: 0},
 	session.HarnessOpenCode: {harness: session.HarnessOpenCode, generation: 0},
 	session.HarnessDevin:    {harness: session.HarnessDevin, generation: 0},
 }

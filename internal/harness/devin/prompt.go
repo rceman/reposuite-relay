@@ -59,7 +59,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 		return harness.PromptResult{}, err
 	}
 
-	handle, runtimeKey, err := a.attach(ctx, m, st)
+	handle, err := a.attach(ctx, m, st)
 	if err != nil {
 		return fail(err)
 	}
@@ -81,8 +81,18 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	return harness.PromptResult{
 		TurnID:          turn.ID,
 		NativeSessionID: handle.ID(),
-		RuntimeID:       runtimeKey,
+		RuntimeID:       a.runtimeID(m.Session.ID),
 	}, nil
+}
+
+// runtimeID returns the actual ephemeral identity of the runtime generation
+// currently bound to the session — never the supervisor's stable key.
+func (a *Adapter) runtimeID(sessionID string) string {
+	v, ok := a.deps.Supervisor.View(sessionID)
+	if !ok {
+		return ""
+	}
+	return v.RuntimeID
 }
 
 // attach returns a usable session handle for a prompt. A live handle is reused
@@ -92,26 +102,26 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 //
 // Devin resumes ONLY a proven slug: an unproven or absent identity creates a
 // new native session, because a zero-turn Devin session cannot be reattached.
-func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState) (*acp.Session, string, error) {
+func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState) (*acp.Session, error) {
 	model := m.Snapshot().Model
 	a.mu.Lock()
 	handle, srv, nativeID := st.handle, st.srv, st.nativeID
 	proven, liveKey := st.materialized, st.liveRuntimeKey
 	a.mu.Unlock()
 	if handle != nil && srv != nil && liveKey == RuntimeKeyFor(model) {
-		return handle, liveKey, nil
+		return handle, nil
 	}
 	// A malformed durable identity is rejected BEFORE any runtime is spawned: a
 	// non-empty slug Relay cannot parse is durable corruption, and it is never
 	// silently replaced by a fresh native session.
 	if nativeID != "" && !harness.ValidNativeID(nativeID) {
-		return nil, "", fmt.Errorf("%w: malformed native session id %q", harness.ErrNativeSessionLost, nativeID)
+		return nil, fmt.Errorf("%w: malformed native session id %q", harness.ErrNativeSessionLost, nativeID)
 	}
 
 	cwd := m.Snapshot().Cwd
 	srv, runtimeKey, err := a.ensureRuntime(ctx, cwd, model)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -121,11 +131,11 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		// with its dead generation — it was never resumable.)
 		newHandle, err := acp.OpenSession(callCtx, srv, cwd)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
+			return nil, fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
 		}
 		if err := a.applyPermissionMode(callCtx, m, newHandle); err != nil {
 			newHandle.Close()
-			return nil, "", err
+			return nil, err
 		}
 		return a.finishAttach(m, runtimeKey, srv, newHandle, "", false)
 	}
@@ -133,11 +143,11 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 	loaded, err := acp.AttachSession(callCtx, srv, cwd, nativeID)
 	if err != nil {
 		// Fail closed: never substitute a fresh session for the exact one.
-		return nil, "", fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
+		return nil, fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
 	}
 	if err := a.applyPermissionMode(callCtx, m, loaded); err != nil {
 		loaded.Close()
-		return nil, "", err
+		return nil, err
 	}
 	return a.finishAttach(m, runtimeKey, srv, loaded, nativeID, true)
 }
@@ -147,23 +157,23 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 // generation counts bindings, not materializations — a failed first turn may
 // legitimately leave Generation=1 with no resumable identity.
 func (a *Adapter) finishAttach(m *session.Managed, runtimeKey string, srv *acp.Server,
-	handle *acp.Session, nativeID string, resumed bool) (*acp.Session, string, error) {
+	handle *acp.Session, nativeID string, resumed bool) (*acp.Session, error) {
 	if err := a.bind(m.Session.ID, runtimeKey, srv, handle); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if err := a.deps.Materialize(m, harness.SessionUpdate{BumpGeneration: true}); err != nil {
 		a.detach(m.Session.ID)
-		return nil, "", err
+		return nil, err
 	}
 	if err := a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
-		RuntimeID:       runtimeKey,
+		RuntimeID:       a.runtimeID(m.Session.ID),
 		NativeSessionID: nativeID,
 		Model:           m.Snapshot().Model,
 		Resumed:         resumed,
 	}); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return handle, runtimeKey, nil
+	return handle, nil
 }
 
 // applyPermissionMode selects the advertised Devin mode that grants Relay's

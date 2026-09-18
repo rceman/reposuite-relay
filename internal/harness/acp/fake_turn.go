@@ -87,6 +87,11 @@ func (a *fakeAgent) runTurn(id int64, turn int, p PromptParams, text string) {
 		a.finish(id, p.SessionID, StopCancelled, nil)
 		return
 	}
+	if a.cfg.Mode == FakeFailTurn {
+		// A refused turn: the turn fails, the runtime stays alive.
+		a.finish(id, p.SessionID, "refusal", nil)
+		return
+	}
 	reply := "echo: " + text
 	for _, part := range chunks(reply, 3) {
 		a.emit(p.SessionID, Update{

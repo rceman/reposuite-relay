@@ -151,7 +151,7 @@ func TestConfigDuringActiveTurnIsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventTurnInterrupted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if got := e.Reload(m.Session.ID).Model; got == "opus" {
 		t.Fatal("a rejected config change must not be recorded")
 	}

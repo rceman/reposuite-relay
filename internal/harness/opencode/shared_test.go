@@ -86,8 +86,11 @@ func TestDeletingOneSessionKeepsSiblingsAndRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RuntimeID != RuntimeKey {
-		t.Fatalf("runtimeId = %q", res.RuntimeID)
+	if res.RuntimeID == "" || res.RuntimeID == RuntimeKey {
+		t.Fatalf("runtimeId %q must be the actual generation id, not the key", res.RuntimeID)
+	}
+	if v := mustView(t, e, first.Session.ID); v.RuntimeID != res.RuntimeID {
+		t.Fatalf("runtimeId %q != bound generation %q", res.RuntimeID, v.RuntimeID)
 	}
 	e.WaitDurable(first.Session.ID, api.EventMessageAgentCompleted)
 	if n := acp.CountFakeEvents(e.ACPState, "initialize"); n != 1 {
@@ -164,9 +167,7 @@ func TestCancelIsNativeAndTerminal(t *testing.T) {
 	if n := acp.CountFakeEvents(e.ACPState, "cancel"); n != 1 {
 		t.Fatalf("cancel notifications = %d, want 1", n)
 	}
-	harnessenv.WaitFor(t, "idle after cancel", func() bool {
-		return !a.State(m.Session.ID).TurnInFlight
-	})
+	harnessenv.WaitFor(t, "idle after cancel", func() bool { return turnSettled(e, a, m.Session.ID) })
 	// A second cancel with no turn is a stable conflict.
 	if err := a.Cancel(bg(), m); !isNoActiveTurn(err) {
 		t.Fatalf("err = %v, want ErrNoActiveTurn", err)
@@ -261,7 +262,7 @@ func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventTurnInterrupted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 	if err := e.Supervisor.StopIfIdle(RuntimeKey); err != nil {
 		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
 	}

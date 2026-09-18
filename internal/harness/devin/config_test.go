@@ -18,7 +18,7 @@ func liveFirstTurn(t *testing.T, e *harnessenv.Env, a *Adapter, m *session.Manag
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
 }
 
 // TestConfigModeAppliesNatively: an advertised mode is applied through the
