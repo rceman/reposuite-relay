@@ -3,8 +3,9 @@
 //
 // The CLI is a local HTTP client of relayd (ADR-006): every managed
 // command goes through internal/client — descriptor discovery, bearer
-// auth, typed methods. Hidden internal modes `__daemon`, `__fixture`, and
-// `__fake-codex` are implementation details of the single-binary design —
+// auth, typed methods. Hidden internal modes `__daemon`, `__fixture`,
+// `__fake-codex`, and `__fake-acp` are implementation details of the
+// single-binary design —
 // never listed in help and not part of the public CLI contract.
 package main
 
@@ -17,6 +18,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/daemon"
 	"github.com/rceman/reposuite-relay/internal/fixture"
+	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
 	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/version"
@@ -112,6 +114,14 @@ func run(args []string, selfExe string) int {
 		// Deterministic fake Codex app-server (test seam; no model calls,
 		// no network). Reached only by explicit spawn from tests.
 		return codex.RunFakeAppServer(os.Stdin, os.Stdout)
+	case "__fake-acp":
+		// Deterministic fake ACP agent (test seam; no model calls, no
+		// network, no quota). Reached only by explicit spawn from tests.
+		return acp.RunFakeAgent(acp.FakeConfig{
+			Vendor:   os.Getenv(acp.EnvFakeACPVendor),
+			Mode:     os.Getenv(acp.EnvFakeACPMode),
+			StateDir: os.Getenv(acp.EnvFakeACPState),
+		}, os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "reposuite-relay: unknown command %q\n\n%s", args[0], usage)
 		return 2
