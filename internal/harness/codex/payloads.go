@@ -1,35 +1,10 @@
 package codex
 
-// --- event payloads -------------------------------------------------
-type messageUserPayload struct {
-	Text   string `json:"text"`
-	Model  string `json:"model,omitempty"`
-	Effort string `json:"effort,omitempty"`
-}
+import "github.com/rceman/reposuite-relay/internal/harness"
 
-type messageCompletedPayload struct {
-	TurnID string `json:"turnId"`
-	ItemID string `json:"itemId,omitempty"`
-	Text   string `json:"text,omitempty"`
-}
-
-type turnEventPayload struct {
-	TurnID string `json:"turnId,omitempty"`
-	Error  string `json:"error,omitempty"`
-}
-
-type runtimeExitedPayload struct {
-	RuntimeID string `json:"runtimeId"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-type harnessStartedPayload struct {
-	RuntimeID       string `json:"runtimeId"`
-	NativeSessionID string `json:"nativeSessionId"`
-	Model           string `json:"model,omitempty"`
-	Resumed         bool   `json:"resumed"`
-}
-
+// --- vendor-specific event payloads ---------------------------------
+// Canonical payloads (message.user, turn.*, harness.started, session.config)
+// live in internal/api so every harness publishes one shape.
 type inputQuestion struct {
 	ID       string                    `json:"id"`
 	Header   string                    `json:"header"`
@@ -56,14 +31,20 @@ type inputAbortedPayload struct {
 	Reason  string `json:"reason"`
 }
 
-type nativeSessionPayload struct {
-	NativeSessionID string `json:"nativeSessionId"`
-	Generation      int    `json:"generation"`
-}
-
 type metricsPayload struct {
 	Kind string `json:"kind"`
 	Metrics
+	// The canonical projection travels with the vendor-rich accounting, so
+	// a client can read harness-neutral fields without knowing Codex.
+	harness.SessionMetrics
 }
 
 // --- runtime lifecycle ----------------------------------------------
+
+// derefMetrics adapts the optional projection to the embedded value field.
+func derefMetrics(m *harness.SessionMetrics) harness.SessionMetrics {
+	if m == nil {
+		return harness.SessionMetrics{}
+	}
+	return *m
+}

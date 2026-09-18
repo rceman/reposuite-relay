@@ -44,9 +44,13 @@ type Server struct {
 	client *Client
 	stderr *tailBuffer
 
-	mu      sync.Mutex
-	serving bool
-	exitErr error
+	mu       sync.Mutex
+	serving  bool
+	exitErr  error
+	sessions map[string]*Session
+
+	cfgMu sync.Mutex
+	cfg   ServerConfig
 
 	// initialized records that the handshake completed (test evidence).
 	initialized atomic.Bool

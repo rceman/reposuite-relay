@@ -171,7 +171,18 @@ func (a *Adapter) Metrics(sessionID string) *harness.SessionMetrics {
 	if st == nil || st.metrics == nil {
 		return nil
 	}
-	m := st.metrics
+	if proj := canonicalMetrics(st.metrics); proj != nil {
+		return proj
+	}
+	return nil
+}
+
+// canonicalMetrics projects the vendor-rich app-server accounting onto the
+// canonical optional shape. Absent measurements stay absent.
+func canonicalMetrics(m *Metrics) *harness.SessionMetrics {
+	if m == nil {
+		return nil
+	}
 	out := &harness.SessionMetrics{}
 	if m.ModelContextWindow != nil {
 		out.ContextLimit = harness.Int64(*m.ModelContextWindow)

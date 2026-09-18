@@ -170,12 +170,12 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			a.mu.Unlock()
 			continue
 		}
-		_ = a.publishDurable(m, api.EventRuntimeExited, runtimeExitedPayload{
+		_ = a.publishDurable(m, api.EventRuntimeExited, api.RuntimeExitedPayload{
 			RuntimeID: rt.ID,
 			Reason:    detail,
 		})
 		if current != nil {
-			_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
+			_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 				TurnID: current.turnID,
 				Error:  "runtime exited: " + detail,
 			})

@@ -19,12 +19,12 @@ import (
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/fixture"
+	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
 	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
-	"github.com/rceman/reposuite-relay/internal/version"
 	"net"
 	"net/http"
 	"os"
@@ -69,6 +69,10 @@ type Options struct {
 	// the installed Codex CLI; tests point at the deterministic fake
 	// app-server (the `__fake-codex` mode).
 	CodexCommand func() (codex.Command, error)
+	// OpenCodeCommand resolves the `opencode acp` command. Production
+	// resolves the installed CLI; tests point at the deterministic fake ACP
+	// agent (the `__fake-acp` mode).
+	OpenCodeCommand func() (acp.Command, error)
 	// StoreHooks overrides store filesystem primitives — test seam only
 	// for deterministic post-commit failure injection.
 	StoreHooks *store.Hooks
@@ -92,10 +96,7 @@ func (o Options) withDefaults() Options {
 	if o.RandRuntimeID == nil {
 		o.RandRuntimeID = session.NewRuntimeID
 	}
-	if o.CodexCommand == nil {
-		o.CodexCommand = codex.DefaultCommand
-	}
-	return o
+	return o.withAdapterDefaults()
 }
 
 // Daemon owns the listener, the descriptor, the registry, the event
@@ -183,17 +184,7 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	d.registry = reg
 	d.broker = events.NewBroker(ss)
 	d.supervisor = runtime.New()
-	d.register(codex.NewAdapter(codex.Deps{
-		Broker:        d.broker,
-		Supervisor:    d.supervisor,
-		Command:       d.opts.CodexCommand,
-		Materialize:   d.materialize,
-		RandRuntimeID: d.opts.RandRuntimeID,
-		Version:       version.Version,
-	}), func() error {
-		_, err := d.opts.CodexCommand()
-		return err
-	})
+	d.registerAdapters()
 	// Runtime removal is authoritative: the owning adapter fails in-flight
 	// work durably on an unexpected exit, and every bound session becomes
 	// COLD in either case (deliberate stop or death).

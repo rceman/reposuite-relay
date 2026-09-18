@@ -52,7 +52,7 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 			t.Fatalf("durable types = %v, want %v", types, want)
 		}
 	}
-	var completed messageCompletedPayload
+	var completed api.MessageCompletedPayload
 	if err := json.Unmarshal(e.durablePayload(m.Session.ID, api.EventMessageAgentCompleted), &completed); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestExactColdResume(t *testing.T) {
 	if v, ok := e.sup.View(m.Session.ID); !ok || v.RuntimeID == rtID1 {
 		t.Fatalf("runtime generation not renewed: %+v", v)
 	}
-	var started harnessStartedPayload
+	var started api.HarnessStartedPayload
 	if err := json.Unmarshal(e.durablePayload(m.Session.ID, api.EventHarnessStarted), &started); err != nil {
 		t.Fatal(err)
 	}

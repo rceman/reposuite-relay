@@ -77,7 +77,7 @@ func (a *Adapter) onAgentMessageDelta(params json.RawMessage) {
 		}
 	}
 	a.mu.Unlock()
-	_ = a.publishTransient(m, api.EventMessageAgentDelta, messageCompletedPayload{
+	_ = a.publishTransient(m, api.EventMessageAgentDelta, api.MessageCompletedPayload{
 		TurnID: p.TurnID,
 		ItemID: p.ItemID,
 		Text:   p.Delta,
@@ -136,7 +136,7 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 			State:           &idle,
 			BumpGeneration:  true,
 		}); err != nil {
-			_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
+			_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 				TurnID: p.Turn.ID,
 				Error:  "persist native session: " + err.Error(),
 			})
@@ -144,7 +144,7 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 			a.mu.Lock()
 			st.materialized = true
 			a.mu.Unlock()
-			_ = a.publishDurable(m, api.EventNativeSession, nativeSessionPayload{
+			_ = a.publishDurable(m, api.EventNativeSession, api.NativeSessionPayload{
 				NativeSessionID: nativeID,
 				Generation:      m.Snapshot().Generation,
 			})
@@ -160,26 +160,26 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 				text, itemID = it.Text, it.ID
 			}
 		}
-		_ = a.publishDurable(m, api.EventMessageAgentCompleted, messageCompletedPayload{
+		_ = a.publishDurable(m, api.EventMessageAgentCompleted, api.MessageCompletedPayload{
 			TurnID: p.Turn.ID,
 			ItemID: itemID,
 			Text:   text,
 		})
 	case "interrupted":
-		_ = a.publishDurable(m, api.EventTurnInterrupted, turnEventPayload{TurnID: p.Turn.ID})
+		_ = a.publishDurable(m, api.EventTurnInterrupted, api.TurnEventPayload{TurnID: p.Turn.ID})
 	case "failed":
 		msg := "turn failed"
 		if p.Turn.Error != nil && p.Turn.Error.Message != "" {
 			msg = p.Turn.Error.Message
 		}
-		_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
+		_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 			TurnID: p.Turn.ID,
 			Error:  msg,
 		})
 	default:
 		// Unknown terminal status: record it rather than inventing a
 		// success or failure.
-		_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{
+		_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
 			TurnID: p.Turn.ID,
 			Error:  "turn ended with status " + p.Turn.Status,
 		})
@@ -214,8 +214,9 @@ func (a *Adapter) onTokenUsage(params json.RawMessage) {
 	metrics := *st.metrics
 	a.mu.Unlock()
 	_ = a.publishTransient(m, api.EventMetricsUpdated, metricsPayload{
-		Kind:    "tokenUsage",
-		Metrics: metrics,
+		Kind:           "tokenUsage",
+		Metrics:        metrics,
+		SessionMetrics: derefMetrics(canonicalMetrics(&metrics)),
 	})
 }
 
@@ -245,8 +246,9 @@ func (a *Adapter) onRateLimits(params json.RawMessage) {
 	m := target.m
 	a.mu.Unlock()
 	_ = a.publishTransient(m, api.EventMetricsUpdated, metricsPayload{
-		Kind:    "rateLimits",
-		Metrics: metrics,
+		Kind:           "rateLimits",
+		Metrics:        metrics,
+		SessionMetrics: derefMetrics(canonicalMetrics(&metrics)),
 	})
 }
 
@@ -266,7 +268,7 @@ func (a *Adapter) onError(params json.RawMessage) {
 	if st == nil {
 		return
 	}
-	_ = a.publishTransient(m, api.EventHarnessError, turnEventPayload{
+	_ = a.publishTransient(m, api.EventHarnessError, api.TurnEventPayload{
 		TurnID: p.TurnID,
 		Error:  p.Message,
 	})

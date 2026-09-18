@@ -159,7 +159,7 @@ func (a *Adapter) handleApproval(_ context.Context, _ int64, params json.RawMess
 	if st != nil {
 		// Transient, not durable: declining does not fail the turn, but a
 		// pinned bypass that the harness ignores must be visible live.
-		_ = a.publishTransient(m, api.EventHarnessError, turnEventPayload{
+		_ = a.publishTransient(m, api.EventHarnessError, api.TurnEventPayload{
 			TurnID: probe.TurnID,
 			Error:  "native approval request received despite approvalPolicy=never; declined",
 		})

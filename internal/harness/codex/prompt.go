@@ -40,7 +40,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 		model = m.Snapshot().Model
 	}
 	mode := m.Snapshot().Mode
-	if err := a.publishDurable(m, api.EventMessageUser, messageUserPayload{
+	if err := a.publishDurable(m, api.EventMessageUser, api.MessageUserPayload{
 		Text:   text,
 		Model:  model,
 		Effort: effort,
@@ -50,7 +50,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	}
 
 	fail := func(err error) (harness.PromptResult, error) {
-		_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{Error: err.Error()})
+		_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{Error: err.Error()})
 		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
 		_ = a.setSessionState(m, session.StateIdle)
 		return harness.PromptResult{}, err
@@ -128,7 +128,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 			firstTurn:      firstTurn,
 		}
 		a.mu.Unlock()
-		if err := a.publishDurable(m, api.EventHarnessStarted, harnessStartedPayload{
+		if err := a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
 			RuntimeID:       RuntimeKey,
 			NativeSessionID: threadID,
 			Model:           threadModel,

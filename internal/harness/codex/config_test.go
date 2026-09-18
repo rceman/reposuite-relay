@@ -71,7 +71,7 @@ func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 		if r.Type != api.EventHarnessStarted {
 			continue
 		}
-		var started harnessStartedPayload
+		var started api.HarnessStartedPayload
 		if err := json.Unmarshal(r.Payload, &started); err != nil {
 			t.Fatal(err)
 		}
@@ -107,7 +107,7 @@ func TestConfigChangeIsAcceptedAndDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventHarnessStarted)
-	var started harnessStartedPayload
+	var started api.HarnessStartedPayload
 	if err := json.Unmarshal(e.durablePayload(m.Session.ID, api.EventHarnessStarted), &started); err != nil {
 		t.Fatal(err)
 	}
