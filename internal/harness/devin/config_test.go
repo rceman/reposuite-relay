@@ -21,50 +21,6 @@ func liveFirstTurn(t *testing.T, e *harnessenv.Env, a *Adapter, m *session.Manag
 	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
 }
 
-// TestConfigModelAppliesToNextGeneration: Devin's model is process-level, so
-// Relay records the durable choice — which really does take effect, because the
-// next runtime generation is keyed by model — without claiming a live mutation.
-func TestConfigModelAppliesToNextGeneration(t *testing.T) {
-	e, a := newEnv(t, acp.FakeHappy)
-	m := newSession(t, e, a, "model", t.TempDir())
-	liveFirstTurn(t, e, a, m)
-	before := acp.CountFakeEvents(e.ACPState, "set_config_option")
-
-	if err := a.ApplyConfig(bg(), m, harness.ConfigCommand{Model: "opus"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := e.Reload(m.Session.ID).Model; got != "opus" {
-		t.Fatalf("model = %q", got)
-	}
-	var cfg api.ConfigChangedPayload
-	if err := json.Unmarshal(e.DurablePayload(m.Session.ID, api.EventConfigChanged), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Model != "opus" {
-		t.Fatalf("session.config = %+v", cfg)
-	}
-	// No live model mutation was attempted or claimed.
-	if after := acp.CountFakeEvents(e.ACPState, "set_config_option"); after != before {
-		t.Fatalf("native mutations went %d -> %d", before, after)
-	}
-	// The recorded model really does partition the next generation.
-	if err := e.Supervisor.Stop(RuntimeKeyFor("")); err != nil {
-		t.Fatal(err)
-	}
-	harnessenv.WaitFor(t, "COLD", func() bool { return !a.State(m.Session.ID).Live })
-	if _, err := a.Prompt(bg(), m, text("two")); err != nil {
-		t.Fatal(err)
-	}
-	e.WaitDurable(m.Session.ID, api.EventNativeSession)
-	view, ok := e.Supervisor.View(m.Session.ID)
-	if !ok || view.Kind != session.HarnessDevin {
-		t.Fatalf("runtime view = %+v ok=%v", view, ok)
-	}
-	if _, ok := e.Supervisor.Get(RuntimeKeyFor("opus")); !ok {
-		t.Fatal("the recorded model must select the model-partitioned runtime")
-	}
-}
-
 // TestConfigModeAppliesNatively: an advertised mode is applied through the
 // native config surface and recorded only after the runtime accepted it.
 func TestConfigModeAppliesNatively(t *testing.T) {
@@ -89,25 +45,6 @@ func TestConfigModeAppliesNatively(t *testing.T) {
 	}
 	if got := e.Reload(m.Session.ID).Mode; got != "ask" {
 		t.Fatalf("mode after rejection = %q, want the accepted value", got)
-	}
-}
-
-// TestConfigColdSessionDoesNotWakeRuntime.
-func TestConfigColdSessionDoesNotWakeRuntime(t *testing.T) {
-	e, a := newEnv(t, acp.FakeHappy)
-	m := newSession(t, e, a, "cold-config", t.TempDir())
-	if err := a.ApplyConfig(bg(), m, harness.ConfigCommand{Model: "opus", Mode: "ask"}); err != nil {
-		t.Fatal(err)
-	}
-	got := e.Reload(m.Session.ID)
-	if got.Model != "opus" || got.Mode != "ask" {
-		t.Fatalf("recorded config = %+v", got)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "initialize"); n != 0 {
-		t.Fatalf("a cold config change must not wake a runtime (initialize = %d)", n)
-	}
-	if e.Supervisor.Len() != 0 {
-		t.Fatalf("runtime count = %d, want 0", e.Supervisor.Len())
 	}
 }
 

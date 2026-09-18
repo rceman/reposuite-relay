@@ -97,33 +97,6 @@ func TestConfigModeUsesAdvertisedOption(t *testing.T) {
 	}
 }
 
-// TestConfigOnColdSessionDoesNotWakeRuntime: a COLD session has nothing native
-// to mutate, so the choice is recorded without waking a process.
-func TestConfigOnColdSessionDoesNotWakeRuntime(t *testing.T) {
-	e, a := newEnv(t, acp.FakeHappy)
-	m := newSession(t, e, a, "cold-config", t.TempDir())
-	if err := a.ApplyConfig(bg(), m, harness.ConfigCommand{Model: "fake/model-b"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := e.Reload(m.Session.ID).Model; got != "fake/model-b" {
-		t.Fatalf("model = %q", got)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "initialize"); n != 0 {
-		t.Fatalf("a cold config change must not wake a runtime (initialize = %d)", n)
-	}
-	if e.Supervisor.Len() != 0 {
-		t.Fatalf("runtime count = %d, want 0", e.Supervisor.Len())
-	}
-	// The recorded model is applied natively on the next materialization.
-	if _, err := a.Prompt(bg(), m, text("hello")); err != nil {
-		t.Fatal(err)
-	}
-	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	if got := e.Reload(m.Session.ID).Model; got != "fake/model-b" {
-		t.Fatalf("model after wake = %q", got)
-	}
-}
-
 // TestNoOpConfigIsNotRecorded: an unchanged configuration is a no-op, so no
 // spurious event is published.
 func TestNoOpConfigIsNotRecorded(t *testing.T) {

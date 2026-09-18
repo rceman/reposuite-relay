@@ -116,6 +116,11 @@ type sessState struct {
 	// COLD.
 	srv    *acp.Server
 	handle *acp.Session
+	// liveRuntimeKey is the runtime key of the generation that currently
+	// owns handle. Ownership is NEVER reconstructed from the desired model:
+	// a handle whose generation was partitioned for another process model
+	// must not serve this session.
+	liveRuntimeKey string
 	// nativeID is the exact native slug in force. Until the first completed
 	// turn it is PROVISIONAL: in memory only, never durable, because a
 	// zero-turn Devin session cannot be resumed.
@@ -200,6 +205,34 @@ func (a *Adapter) StopSession(m *session.Managed) {
 	a.Forget(m.Session.ID)
 }
 
+// detach releases a session's native handle and runtime binding WITHOUT
+// stopping the shared runtime generation: its other sessions keep using it.
+// A proven durable slug survives (it is exactly resumable); an unproven
+// in-memory slug does not — a zero-turn Devin session cannot be resumed.
+func (a *Adapter) detach(sessionID string) {
+	a.mu.Lock()
+	st := a.sessions[sessionID]
+	if st == nil {
+		a.mu.Unlock()
+		return
+	}
+	handle := st.handle
+	if st.nativeID != "" {
+		delete(a.byNative, st.nativeID)
+	}
+	st.srv = nil
+	st.handle = nil
+	st.liveRuntimeKey = ""
+	if !st.materialized {
+		st.nativeID = ""
+	}
+	a.mu.Unlock()
+	if handle != nil {
+		handle.Close()
+	}
+	a.deps.Supervisor.Unbind(sessionID)
+}
+
 // relaySessionFor resolves the Relay session owning a native Devin slug.
 func (a *Adapter) relaySessionFor(nativeID string) (*sessState, bool) {
 	a.mu.Lock()
@@ -234,6 +267,7 @@ func (a *Adapter) Metrics(sessionID string) *harness.SessionMetrics {
 type DebugState struct {
 	NativeSessionID string
 	Live            bool
+	LiveRuntimeKey  string
 	Materialized    bool
 	TurnInFlight    bool
 	TurnID          string
@@ -250,6 +284,7 @@ func (a *Adapter) State(sessionID string) DebugState {
 	return DebugState{
 		NativeSessionID: st.nativeID,
 		Live:            st.handle != nil,
+		LiveRuntimeKey:  st.liveRuntimeKey,
 		Materialized:    st.materialized,
 		TurnInFlight:    st.turn != nil,
 		TurnID:          st.turnID,

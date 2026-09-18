@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 )
 
 // FakeConfig selects one deterministic fake ACP agent personality. The fake
@@ -40,6 +42,10 @@ const (
 	FakePermissionUnknown = "permission-unknown"
 	// FakeConfigReject rejects an unadvertised config value natively.
 	FakeConfigReject = "config-reject"
+	// FakeConfigSlow blocks the native config RPC until the test releases it
+	// (by creating <state>/release-config), so the sleep-blocker behaviour of
+	// a live config mutation is deterministic and sleep-free.
+	FakeConfigSlow = "config-slow"
 	// FakeNoLoad advertises loadSession: false.
 	FakeNoLoad = "no-load"
 	// FakeLoadError fails every session/load.
@@ -282,6 +288,18 @@ func (a *fakeAgent) onSetConfigOption(_ context.Context, _ int64, params json.Ra
 	var p SetConfigOptionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("bad session/set_config_option params: %w", err)
+	}
+	if a.cfg.Mode == FakeConfigSlow {
+		// Block the native mutation until the test releases it.
+		a.events.record("config-blocked", p.ConfigID)
+		release := filepath.Join(a.store.root, "release-config")
+		for i := 0; i < 4000; i++ {
+			if _, err := os.Stat(release); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		a.events.record("config-released", p.ConfigID)
 	}
 	rec, ok := a.store.load(p.SessionID)
 	if !ok {

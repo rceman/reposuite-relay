@@ -29,6 +29,7 @@ func (a *fakeAgent) onSessionPrompt(_ context.Context, id int64, params json.Raw
 	a.turnSeq++
 	turn := a.turnSeq
 	a.mu.Unlock()
+	a.events.record("session/prompt", p.SessionID)
 
 	switch a.cfg.Mode {
 	case FakeDieOnPrompt:

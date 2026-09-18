@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness"
+	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
@@ -13,23 +14,39 @@ import (
 // model and effort, per turn (turn/start). There is no verified
 // thread-level model mutation while a thread is live, so a change takes
 // effect on the next turn or the next resume — Relay records the
-// accepted configuration rather than pretending otherwise. A change
-// during an in-flight turn is accepted and applies to the next turn: the
-// running turn already captured its own model/effort.
+// accepted DESIRED configuration rather than pretending otherwise.
+//
+// A live change while native work is in flight is rejected with
+// SESSION_BUSY: Relay never mutates model/mode underneath an in-flight turn
+// or an unresolved input request, consistently with the ACP adapters. The
+// change is not a native mutation (Codex has no thread-level config RPC), so
+// it needs no supervisor mutation blocker.
 func (a *Adapter) ApplyConfig(_ context.Context, m *session.Managed, cmd harness.ConfigCommand) error {
 	if a.state(m.Session.ID) == nil {
 		return fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
 	}
-	if snap := m.Snapshot(); snap.Model == cmd.Model && snap.Mode == cmd.Mode {
+	snap := m.Snapshot()
+	desired := cmd
+	if desired.Model == "" {
+		desired.Model = snap.Model
+	}
+	if desired.Mode == "" {
+		desired.Mode = snap.Mode
+	}
+	if snap.Model == desired.Model && snap.Mode == desired.Mode {
 		return nil
 	}
+	switch a.deps.Supervisor.Activity(m.Session.ID) {
+	case runtime.ActivityActive, runtime.ActivityWaitingInput:
+		return fmt.Errorf("%w: session %s has native work in flight", ErrBusy, m.Session.ID)
+	}
 	if err := a.deps.Materialize(m, harness.SessionUpdate{
-		Model: &cmd.Model,
-		Mode:  &cmd.Mode,
+		Model: &desired.Model,
+		Mode:  &desired.Mode,
 	}); err != nil {
 		return err
 	}
-	return a.publishDurable(m, api.EventConfigChanged, cmd)
+	return a.publishDurable(m, api.EventConfigChanged, desired)
 }
 
 // StopSession releases adapter state for a session that is being deleted:

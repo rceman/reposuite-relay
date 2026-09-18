@@ -171,7 +171,7 @@ func TestZeroTurnColdResumeIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.persistNative(m, a.state(m.Session.ID), handle.ID(), false); err != nil {
+	if err := a.recordNative(m, a.state(m.Session.ID), handle.ID(), false); err != nil {
 		t.Fatal(err)
 	}
 	handle.Close()

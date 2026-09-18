@@ -121,6 +121,7 @@ func (a *Adapter) bind(sessionID, runtimeKey string, srv *acp.Server, handle *ac
 	}
 	st.srv = srv
 	st.handle = handle
+	st.liveRuntimeKey = runtimeKey
 	st.nativeID = handle.ID()
 	a.byNative[handle.ID()] = sessionID
 	a.mu.Unlock()
@@ -128,48 +129,55 @@ func (a *Adapter) bind(sessionID, runtimeKey string, srv *acp.Server, handle *ac
 }
 
 // OnRuntimeGone implements harness.Adapter: the generation is gone, so every
-// bound session becomes COLD, in-flight work fails durably, and a proven
-// durable slug is retained exactly.
+// session bound to THAT generation becomes COLD, in-flight work fails durably,
+// and a proven durable slug is retained exactly.
 //
 // A slug that was never proven (no completed turn) is NOT retained: a
 // zero-turn Devin session cannot be resumed, so claiming that identity would be
 // a lie the next prompt would have to break.
+//
+// Only sessions bound to the dead key are affected: a session that migrated to
+// a different process-model generation must not be disturbed by the death of
+// the generation it left.
 func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) {
 	a.mu.Lock()
 	delete(a.servers, key)
 	type affected struct {
-		st          *sessState
-		m           *session.Managed
-		provisional string
+		st   *sessState
+		m    *session.Managed
+		turn *acp.Turn
+		id   string
 	}
 	var affectedSessions []affected
 	for _, st := range a.sessions {
-		if st.handle == nil {
+		if st.handle == nil || st.liveRuntimeKey != key {
 			continue
 		}
-		delete(a.byNative, st.nativeID)
-		provisional := ""
-		if !st.materialized {
-			provisional = st.nativeID
+		if st.nativeID != "" {
+			delete(a.byNative, st.nativeID)
 		}
 		st.srv = nil
 		st.handle = nil
+		st.liveRuntimeKey = ""
 		if !st.materialized {
 			// Drop the unproven identity: it must not survive a generation.
 			st.nativeID = ""
 		}
+		// Snapshot the turn under the lock: it must not be re-read after a
+		// concurrent completion or a new prompt has changed it.
 		affectedSessions = append(affectedSessions, affected{
-			st:          st,
-			m:           st.m,
-			provisional: provisional,
+			st:   st,
+			m:    st.m,
+			turn: st.turn,
+			id:   st.turnID,
 		})
 	}
 	a.mu.Unlock()
 
 	for _, e := range affectedSessions {
-		if e.st.turn != nil {
+		if e.turn != nil {
 			_ = a.publishDurable(e.m, api.EventTurnFailed, api.TurnEventPayload{
-				TurnID: e.st.turnID,
+				TurnID: e.id,
 				Error:  "runtime exited: " + reason,
 			})
 			a.deps.Supervisor.SetActivity(e.m.Session.ID, runtime.ActivityIdle)
@@ -215,7 +223,10 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 			Text:   update.Text(),
 		})
 	case acp.UpdateUsage:
-		a.publishMetrics(m, "context", acp.ContextMetrics(update))
+		// Merge onto the last-known set: a partial native measurement must
+		// never erase a value the runtime reported earlier.
+		a.publishMetrics(m, "context", acp.MergeMetrics(
+			a.Metrics(m.Session.ID), acp.ContextMetrics(update)))
 	case acp.UpdateConfigOption, acp.UpdateCurrentMode, acp.UpdateSessionInfo:
 		// The ACP handle refreshes its cached surface; Relay's durable
 		// model/mode only changes through an accepted Relay config request.

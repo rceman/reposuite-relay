@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -11,29 +12,30 @@ import (
 	"github.com/rceman/reposuite-relay/internal/runtime"
 )
 
-// TestConfigChangeDuringTurnAppliesToNextTurn: an accepted change during
-// an in-flight turn never fails and takes effect on the next native
-// thread start/resume.
-func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
+// TestConfigChangeDuringTurnIsBusyAppliesAfterwards: a config change while a
+// turn is in flight is refused with SESSION_BUSY (Relay never mutates
+// model/mode underneath in-flight native work); accepted after the turn, it
+// takes effect on the next native thread start/resume.
+func TestConfigChangeDuringTurnIsBusyAppliesAfterwards(t *testing.T) {
 	e := newEnv(t, "input")
 	m := e.newSession("cfg2", t.TempDir())
 	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hold"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventInputRequested)
-	if err := e.adapter.ApplyConfig(context.Background(), m,
+	err := e.adapter.ApplyConfig(context.Background(), m,
 		harness.ConfigCommand{
 			Model: "m2",
 			Mode:  "fast",
-		}); err != nil {
-		t.Fatalf("config during a turn must be accepted: %v", err)
+		})
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("config during a turn err = %v, want SESSION_BUSY", err)
 	}
-	e.waitDurable(m.Session.ID, api.EventConfigChanged)
-	if got := e.reload(m.Session.ID); got.Model != "m2" || got.Mode != "fast" {
-		t.Fatalf("accepted config = %q/%q", got.Model, got.Mode)
+	if p := e.durablePayload(m.Session.ID, api.EventConfigChanged); p != nil {
+		t.Fatal("a refused config change must not publish session.config")
 	}
-	// Finish the turn, then restart the runtime: the next generation must
-	// reattach the thread with the newly accepted model.
+	// Finish the turn, then the change is accepted and takes effect on the
+	// next generation's reattach.
 	var req inputRequestedPayload
 	if err := json.Unmarshal(e.durablePayload(m.Session.ID, api.EventInputRequested), &req); err != nil {
 		t.Fatal(err)
@@ -43,6 +45,18 @@ func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
+	waitFor(t, "idle", func() bool { return e.adapter.Idle(m.Session.ID) })
+	if err := e.adapter.ApplyConfig(context.Background(), m,
+		harness.ConfigCommand{
+			Model: "m2",
+			Mode:  "fast",
+		}); err != nil {
+		t.Fatalf("config after the turn must be accepted: %v", err)
+	}
+	e.waitDurable(m.Session.ID, api.EventConfigChanged)
+	if got := e.reload(m.Session.ID); got.Model != "m2" || got.Mode != "fast" {
+		t.Fatalf("accepted config = %q/%q", got.Model, got.Mode)
+	}
 	os.Setenv("FAKE_CODEX_MODE", "happy")
 	defer os.Setenv("FAKE_CODEX_MODE", "input")
 	if err := e.sup.StopAll(); err != nil {

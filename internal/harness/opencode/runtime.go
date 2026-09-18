@@ -226,7 +226,10 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 			Text:   update.Text(),
 		})
 	case acp.UpdateUsage:
-		a.publishMetrics(m, "context", acp.ContextMetrics(update))
+		// Merge onto the last-known set: a partial native measurement must
+		// never erase a value the runtime reported earlier.
+		a.publishMetrics(m, "context", acp.MergeMetrics(
+			a.Metrics(m.Session.ID), acp.ContextMetrics(update)))
 	case acp.UpdateConfigOption, acp.UpdateCurrentMode, acp.UpdateSessionInfo:
 		// Native metadata updates: the adapter's cached surface is refreshed
 		// by the ACP handle; Relay's durable model/mode only changes through

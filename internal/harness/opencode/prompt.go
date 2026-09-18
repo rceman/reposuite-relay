@@ -22,6 +22,15 @@ import (
 // acceptance publishes a durable turn.failed record, so an accepted prompt is
 // never erased from history.
 func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.PromptCommand) (harness.PromptResult, error) {
+	// A per-turn model/effort override has no verified OpenCode ACP
+	// equivalent, so Relay rejects it deterministically BEFORE the prompt is
+	// accepted: it is never silently ignored and never reinterpreted as a
+	// persistent config change.
+	if cmd.Model != "" || cmd.Effort != "" {
+		return harness.PromptResult{}, fmt.Errorf(
+			"%w: opencode has no per-turn model/effort override; use session config",
+			harness.ErrUnsupported)
+	}
 	st := a.state(m.Session.ID)
 	if st == nil {
 		return harness.PromptResult{}, fmt.Errorf("session %s not tracked by the opencode adapter", m.Session.ID)
@@ -38,14 +47,10 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	// for the whole submission.
 	a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityActive)
 
-	model := cmd.Model
-	if model == "" {
-		model = m.Snapshot().Model
-	}
+	model := m.Snapshot().Model
 	if err := a.publishDurable(m, api.EventMessageUser, api.MessageUserPayload{
-		Text:   cmd.Text,
-		Model:  model,
-		Effort: cmd.Effort,
+		Text:  cmd.Text,
+		Model: model,
 	}); err != nil {
 		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
 		return harness.PromptResult{}, err
@@ -91,6 +96,12 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 //	durable exact native identity             → session/load (exact resume)
 //	no identity yet                           → session/new
 //
+// A new native session is a coherent bind transaction: open/load → apply the
+// durable DESIRED configuration through the advertised surface → bind to the
+// runtime → persist identity + generation → harness.started. A prompt is only
+// ever submitted after the native session is fully configured, so a partially
+// configured native session is never exposed as ready.
+//
 // There is no fallback from a failed exact load to a new session.
 func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState) (*acp.Session, error) {
 	a.mu.Lock()
@@ -106,6 +117,7 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		return nil, fmt.Errorf("%w: malformed native session id %q", harness.ErrNativeSessionLost, nativeID)
 	}
 	cwd := m.Snapshot().Cwd
+	desired := desiredConfig(m, harness.ConfigCommand{})
 	srv, err := a.ensureRuntime(ctx, cwd)
 	if err != nil {
 		return nil, err
@@ -118,17 +130,7 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		if err != nil {
 			return nil, fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
 		}
-		// OpenCode returns a durable native identity immediately, so it is
-		// persisted now — before any turn — which is what makes a zero-turn
-		// cold resume exact later.
-		if err := a.persistNative(m, st, newHandle.ID(), false); err != nil {
-			newHandle.Close()
-			return nil, err
-		}
-		if err := a.bind(m.Session.ID, srv, newHandle); err != nil {
-			return nil, err
-		}
-		return newHandle, nil
+		return a.finishAttach(callCtx, m, st, srv, newHandle, desired, false)
 	}
 
 	loaded, err := acp.AttachSession(callCtx, srv, cwd, nativeID)
@@ -136,26 +138,51 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		// Fail closed: never substitute a fresh session for the exact one.
 		return nil, fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
 	}
-	if err := a.persistNative(m, st, loaded.ID(), true); err != nil {
-		loaded.Close()
-		return nil, err
-	}
-	if err := a.bind(m.Session.ID, srv, loaded); err != nil {
-		return nil, err
-	}
-	return loaded, nil
+	return a.finishAttach(callCtx, m, st, srv, loaded, desired, true)
 }
 
-// persistNative records the exact native identity durably and publishes
-// harness.started. It runs only when a runtime generation takes ownership of
-// the session, so it always bumps the generation:
+// finishAttach completes the bind transaction for a freshly opened or loaded
+// native session, in the exact order the semantics require: apply desired
+// config natively → persist identity + generation → bind → harness.started.
+func (a *Adapter) finishAttach(ctx context.Context, m *session.Managed, st *sessState,
+	srv *acp.Server, handle *acp.Session, desired harness.ConfigCommand, resumed bool) (*acp.Session, error) {
+	// Desired configuration is applied natively FIRST: a validation failure
+	// must abort the submission before any user turn is sent.
+	if err := a.applyDesired(ctx, handle, desired); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	// OpenCode returns a durable native identity immediately, so it is
+	// persisted now — before any turn — which is what makes a zero-turn
+	// cold resume exact later.
+	if err := a.recordNative(m, st, handle.ID(), resumed); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	if err := a.bind(m.Session.ID, srv, handle); err != nil {
+		return nil, err
+	}
+	// harness.started is published only once the session is bound, so a
+	// reader that sees it always observes a ready binding.
+	if err := a.publishStarted(m, handle.ID(), resumed); err != nil {
+		return nil, err
+	}
+	// The values the runtime now reports are EFFECTIVE — only after a
+	// successful native application do they enter the metrics.
+	a.publishMetrics(m, "config", acp.MergeMetrics(a.Metrics(m.Session.ID), observedConfig(handle)))
+	return handle, nil
+}
+
+// recordNative durably records the exact native identity. It runs only when a
+// runtime generation takes ownership of the session, so it always bumps the
+// generation:
 //
 //	creation 0 → first native bind 1 → exact resume into a new generation 2
 //
 // For OpenCode a returned `ses_*` identity is durable from session/new, so the
 // identity is persisted before any turn — which is what makes a zero-turn cold
 // resume exact later.
-func (a *Adapter) persistNative(m *session.Managed, st *sessState, nativeID string, resumed bool) error {
+func (a *Adapter) recordNative(m *session.Managed, st *sessState, nativeID string, resumed bool) error {
 	if err := a.deps.Materialize(m, harness.SessionUpdate{
 		NativeSessionID: &nativeID,
 		BumpGeneration:  true,
@@ -174,6 +201,12 @@ func (a *Adapter) persistNative(m *session.Managed, st *sessState, nativeID stri
 			Generation:      m.Snapshot().Generation,
 		})
 	}
+	return nil
+}
+
+// publishStarted records that a runtime generation took ownership of the
+// session's native session. It is published AFTER the binding exists.
+func (a *Adapter) publishStarted(m *session.Managed, nativeID string, resumed bool) error {
 	return a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
 		RuntimeID:       RuntimeKey,
 		NativeSessionID: nativeID,

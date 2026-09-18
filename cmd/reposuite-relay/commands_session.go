@@ -60,8 +60,8 @@ func cmdServe(args []string, selfExe string) int {
 func cmdPrompt(args []string, selfExe string) int {
 	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
 	text := fs.String("text", "", "prompt text")
-	model := fs.String("model", "", "per-turn model override")
-	effort := fs.String("effort", "", "per-turn reasoning effort override")
+	model := fs.String("model", "", "per-turn model override (Codex only)")
+	effort := fs.String("effort", "", "per-turn reasoning effort override (Codex only)")
 	if err := fs.Parse(splitKeyFirst(args)); err != nil || fs.NArg() != 1 || *text == "" {
 		fmt.Fprintln(os.Stderr, "usage: reposuite-relay prompt <KEY> --text <TEXT> [--model M] [--effort E]")
 		return 2

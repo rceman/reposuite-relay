@@ -37,7 +37,9 @@ Commands:
   serve codex --key <KEY>        create a Codex session (COLD)
   serve devin --key <KEY>        create a Devin ACP session (COLD)
   serve opencode --key <KEY>     create an OpenCode ACP session (COLD)
-  prompt <KEY> --text <TEXT>     submit a prompt as a native turn
+  prompt <KEY> --text <TEXT> [--model M] [--effort E]
+                                 submit a prompt as a native turn
+                                 (--model/--effort: Codex-only per-turn override)
   cancel <KEY>                   interrupt the in-flight turn
   input <KEY> --input <ID>       answer requested input
   config <KEY> [--model M] [--mode S]
