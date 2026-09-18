@@ -254,3 +254,18 @@ func (a *Adapter) publishTransient(m *session.Managed, typ string, payload any) 
 func diag(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "relayd: codex: "+format+"\n", args...)
 }
+
+// turnsInFlight reports how many sessions have an in-flight turn. It exists so
+// tests can settle a turn's terminal-record writes before their temp root is
+// removed.
+func (a *Adapter) turnsInFlight() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, st := range a.sessions {
+		if st.current != nil {
+			n++
+		}
+	}
+	return n
+}

@@ -47,7 +47,16 @@ func newEnv(t *testing.T, mode string) *env {
 	sup.OnGone = e.adapter.OnRuntimeGone
 	t.Setenv("RELAY_FAKE_APP_SERVER", "1")
 	t.Setenv("FAKE_CODEX_MODE", mode)
-	t.Cleanup(func() { _ = sup.StopAll() })
+	// StopAll runs BEFORE the temp root is removed (t.Cleanup is LIFO, and
+	// t.TempDir was registered first). Waiting for in-flight turns to settle
+	// afterwards keeps the terminal-record writes inside the test's lifetime
+	// instead of racing TempDir cleanup.
+	t.Cleanup(func() {
+		_ = sup.StopAll()
+		waitFor(t, "in-flight turns to settle", func() bool {
+			return e.adapter.turnsInFlight() == 0
+		})
+	})
 	return e
 }
 
