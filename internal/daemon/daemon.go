@@ -73,6 +73,10 @@ type Options struct {
 	// resolves the installed CLI; tests point at the deterministic fake ACP
 	// agent (the `__fake-acp` mode).
 	OpenCodeCommand func() (acp.Command, error)
+	// DevinCommand resolves the `devin acp` command for a process-level
+	// model. Production resolves the installed CLI; tests point at the
+	// deterministic fake ACP agent.
+	DevinCommand func(model string) (acp.Command, error)
 	// StoreHooks overrides store filesystem primitives — test seam only
 	// for deterministic post-commit failure injection.
 	StoreHooks *store.Hooks

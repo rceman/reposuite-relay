@@ -1,4 +1,4 @@
-package opencode
+package devin
 
 import (
 	"context"
@@ -12,20 +12,18 @@ import (
 
 // ApplyConfig applies an accepted model/mode change.
 //
-// Model: OpenCode advertises a `model` config option (category "model") whose
-// values are the runtime's own model ids, and session/set_config_option mutates
-// it mid-session — so a live session is mutated natively and a cold one records
-// the choice for the next native materialization. The option id and the value
-// are DISCOVERED from the protocol; Relay never hard-codes a model list, and it
-// records the change only after the runtime accepted it.
+// Mode: applied through the runtime's advertised mode option and recorded only
+// after the runtime accepted it.
 //
-// Mode: applied through the advertised mode option (category "mode") when the
-// runtime advertises one. A runtime that advertises no mode option yields
-// UNSUPPORTED_OPERATION rather than a fabricated mapping.
+// Model: Devin chooses its model when the PROCESS starts, so a live runtime
+// cannot switch models for a running session. Relay records the choice durably
+// — the next runtime generation is partitioned by that model (RuntimeKeyFor) —
+// and does not claim a native mutation it cannot perform. When the runtime does
+// advertise a model config option, it is used instead.
 func (a *Adapter) ApplyConfig(ctx context.Context, m *session.Managed, cmd harness.ConfigCommand) error {
 	st := a.state(m.Session.ID)
 	if st == nil {
-		return fmt.Errorf("session %s not tracked by the opencode adapter", m.Session.ID)
+		return fmt.Errorf("session %s not tracked by the devin adapter", m.Session.ID)
 	}
 	snap := m.Snapshot()
 	if snap.Model == cmd.Model && snap.Mode == cmd.Mode {
@@ -55,9 +53,9 @@ func (a *Adapter) ApplyConfig(ctx context.Context, m *session.Managed, cmd harne
 	})
 }
 
-// applyMode applies a mode through the runtime's advertised mode option. A
-// cold session has nothing native to mutate yet: the choice is recorded and
-// applied at the next materialization.
+// applyMode applies a mode through the advertised mode option. A COLD session
+// has nothing native to mutate: the choice is recorded and applied at the next
+// materialization.
 func (a *Adapter) applyMode(ctx context.Context, st *sessState, mode string) error {
 	a.mu.Lock()
 	handle := st.handle
@@ -78,9 +76,9 @@ func (a *Adapter) applyMode(ctx context.Context, st *sessState, mode string) err
 	return nil
 }
 
-// applyModel applies a model through the advertised model option. On a cold
-// session the value is only recorded: Relay does not claim a native effect it
-// could not observe.
+// applyModel applies a model through an advertised model option when the
+// runtime offers one. Otherwise the durable preference stands for the next
+// runtime generation, which is a real effect: the generation is keyed by model.
 func (a *Adapter) applyModel(ctx context.Context, st *sessState, model string) error {
 	a.mu.Lock()
 	handle := st.handle
@@ -90,13 +88,13 @@ func (a *Adapter) applyModel(ctx context.Context, st *sessState, model string) e
 	}
 	opt, ok := acp.FindOption(handle.Options(), acp.CategoryModel, "model")
 	if !ok {
-		return fmt.Errorf("%w: runtime advertises no model config option", harness.ErrUnsupported)
+		// Process-level model: no live mutation is possible or claimed.
+		return nil
 	}
 	if !optionHasValue(opt, model) {
 		return fmt.Errorf("%w: model %q is not advertised by the runtime", harness.ErrInvalidConfig, model)
 	}
 	if _, err := handle.SetConfigValue(ctx, opt.ID, model, false); err != nil {
-		// The runtime rejected the value: never record it as applied.
 		return fmt.Errorf("%w: %v", harness.ErrInvalidConfig, err)
 	}
 	return nil
@@ -111,6 +109,3 @@ func optionHasValue(opt acp.ConfigOption, value string) bool {
 	}
 	return false
 }
-
-// compile-time assertion: the adapter satisfies the shared contract.
-var _ harness.Adapter = (*Adapter)(nil)

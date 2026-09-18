@@ -224,7 +224,7 @@ func (a *Adapter) completeTurn(m *session.Managed, handle *acp.Session, turn *ac
 	}
 	a.mu.Unlock()
 
-	if metrics := mergeMetrics(a.Metrics(m.Session.ID), usageMetrics(usage)); metrics != nil {
+	if metrics := acp.MergeMetrics(a.Metrics(m.Session.ID), acp.UsageMetrics(usage)); metrics != nil {
 		a.publishMetrics(m, "turn", metrics)
 	}
 	a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)

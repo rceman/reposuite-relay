@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
+	"github.com/rceman/reposuite-relay/internal/harness/devin"
 	"github.com/rceman/reposuite-relay/internal/harness/opencode"
 	"github.com/rceman/reposuite-relay/internal/version"
 )
@@ -20,6 +21,17 @@ func (d *Daemon) registerAdapters() {
 		Version:       version.Version,
 	}), func() error {
 		_, err := d.opts.CodexCommand()
+		return err
+	})
+	d.register(devin.NewAdapter(devin.Deps{
+		Broker:        d.broker,
+		Supervisor:    d.supervisor,
+		Command:       d.opts.DevinCommand,
+		Materialize:   d.materialize,
+		RandRuntimeID: d.opts.RandRuntimeID,
+		Version:       version.Version,
+	}), func() error {
+		_, err := d.opts.DevinCommand("")
 		return err
 	})
 	d.register(opencode.NewAdapter(opencode.Deps{
@@ -43,6 +55,9 @@ func (o Options) withAdapterDefaults() Options {
 	}
 	if o.OpenCodeCommand == nil {
 		o.OpenCodeCommand = opencode.DefaultCommand
+	}
+	if o.DevinCommand == nil {
+		o.DevinCommand = devin.DefaultCommand
 	}
 	return o
 }
