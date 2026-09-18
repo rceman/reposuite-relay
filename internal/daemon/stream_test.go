@@ -93,6 +93,21 @@ func TestEventStreamReplayThenLive(t *testing.T) {
 	t.Fatalf("subscriber leaked after disconnect: %d", evs.SubscriberCount())
 }
 
+// wrongToken returns a token GUARANTEED to differ from the real one. (The
+// obvious "flip the first character to 0" is a 1-in-16 flake for a hex token:
+// it can produce the valid token and hang the stream forever.)
+func wrongToken(real string) string {
+	if real == "" {
+		return "x"
+	}
+	last := real[len(real)-1]
+	replacement := byte('0')
+	if last == '0' {
+		replacement = '1'
+	}
+	return real[:len(real)-1] + string(replacement)
+}
+
 // TestEventStreamAuthRequired: a wrong token never establishes a
 // subscriber.
 func TestEventStreamAuthRequired(t *testing.T) {
@@ -106,7 +121,7 @@ func TestEventStreamAuthRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+"0"+desc.BearerToken[1:])
+	req.Header.Set("Authorization", "Bearer "+wrongToken(desc.BearerToken))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
