@@ -1,8 +1,10 @@
 package daemon_test
 
 import (
+	"github.com/rceman/reposuite-relay/internal/api"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +19,7 @@ func TestMalformedClient(t *testing.T) {
 
 	pingOK := func() {
 		status, out := rawReq(t, d, http.MethodGet, "/v1/daemon", "", true)
-		if status != 200 || !strings.Contains(out, `"apiVersion":1`) {
+		if status != 200 || !strings.Contains(out, `"apiVersion":`+strconv.Itoa(api.Version)) {
 			t.Fatalf("daemon unhealthy after malformed input: %d %s", status, out)
 		}
 	}

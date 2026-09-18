@@ -7,20 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
-// AnswerSelection is one user answer for one requested-input question.
-type AnswerSelection struct {
-	QuestionID string   `json:"questionId"`
-	Answers    []string `json:"answers"`
-}
-
 // AnswerInput resolves a native requested-input request by exact Relay
 // input ID. The answer is mapped back to the native question IDs and the
 // original JSON-RPC request ID.
-func (a *Adapter) AnswerInput(ctx context.Context, m *session.Managed, inputID string, sel []AnswerSelection) error {
+func (a *Adapter) AnswerInput(ctx context.Context, m *session.Managed, inputID string, sel []harness.InputAnswer) error {
 	st := a.state(m.Session.ID)
 	if st == nil {
 		return fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)

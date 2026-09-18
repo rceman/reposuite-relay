@@ -4,31 +4,53 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
+	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/store"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/harness/codex"
-	"github.com/rceman/reposuite-relay/internal/session"
-	"github.com/rceman/reposuite-relay/internal/store"
 )
 
-// harnessCallTimeout bounds one native control call (prompt submission,
-// cancel, answer). It is a control-plane bound, not a turn bound: a turn
-// completes through notifications and is never bounded here.
-const harnessCallTimeout = 30 * time.Second
+// creationSpec is one built-in creation route. Creation is always a
+// runtime-free (COLD) durable operation: no harness process is spawned
+// until the first prompt. Generation records how many native bindings have
+// been established, and its starting value is adapter semantics:
+//
+//	codex     1  (creation counts as the first generation)
+//	opencode  0  (no native session exists until the first prompt)
+//	devin     0  (no native session exists until the first prompt)
+//
+// There is deliberately no executable/argv field anywhere in this path.
+type creationSpec struct {
+	harness    string
+	generation int
+}
 
-// maxPromptBytes bounds one prompt text.
-const maxPromptBytes = 256 << 10
+var creationSpecs = map[string]creationSpec{
+	session.HarnessCodex:    {harness: session.HarnessCodex, generation: 1},
+	session.HarnessOpenCode: {harness: session.HarnessOpenCode, generation: 0},
+	session.HarnessDevin:    {harness: session.HarnessDevin, generation: 0},
+}
 
-// handleCreateCodex creates a durable Codex session. Creation is a
-// runtime-free (COLD) operation: no app-server is spawned until the first
-// prompt. The adapter command is resolved up front so a machine without
-// the harness fails closed at create instead of at first use.
-func (d *Daemon) handleCreateCodex(w http.ResponseWriter, r *http.Request, _ string) {
-	var req api.CodexRequest
+// handleCreateHarness creates a durable session for one built-in harness.
+// The adapter command is resolved up front so a machine without the
+// harness fails closed at create instead of at first use.
+func (d *Daemon) handleCreateHarness(w http.ResponseWriter, r *http.Request, name string) {
+	spec, ok := creationSpecs[name]
+	if !ok {
+		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown harness "+name)
+		return
+	}
+	entry, ok := d.entryFor(spec.harness)
+	if !ok {
+		writeErr(w, http.StatusServiceUnavailable, api.ErrRuntimeUnavailable,
+			"no adapter for harness "+spec.harness)
+		return
+	}
+	var req api.CreateRequest
 	if err := decodeBody(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "invalid request body: "+err.Error())
 		return
@@ -41,9 +63,9 @@ func (d *Daemon) handleCreateCodex(w http.ResponseWriter, r *http.Request, _ str
 		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "serve requires an absolute client cwd")
 		return
 	}
-	if _, err := d.opts.CodexCommand(); err != nil {
+	if err := entry.available(); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, api.ErrRuntimeUnavailable,
-			"codex harness unavailable: "+err.Error())
+			spec.harness+" harness unavailable: "+err.Error())
 		return
 	}
 	if !d.registry.Reserve(req.Key) {
@@ -63,10 +85,10 @@ func (d *Daemon) handleCreateCodex(w http.ResponseWriter, r *http.Request, _ str
 	rs := &session.RelaySession{
 		ID:         sessionID,
 		Key:        req.Key,
-		Harness:    session.HarnessCodex,
+		Harness:    spec.harness,
 		Cwd:        req.Cwd,
 		State:      session.StateIdle,
-		Generation: 1,
+		Generation: spec.generation,
 		Model:      req.Model,
 		Mode:       req.Mode,
 		CreatedAt:  now,
@@ -96,15 +118,15 @@ func (d *Daemon) handleCreateCodex(w http.ResponseWriter, r *http.Request, _ str
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "event state: "+err.Error())
 		return
 	}
-	d.adapter.Track(m)
+	entry.adapter.Track(m)
 	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
 
 // handlePrompt accepts a user prompt and submits it as a native turn.
 // 202 Accepted means the native harness accepted the turn; the canonical
-// durable message.user event was published first (see codex.Adapter).
+// durable message.user event was published first.
 func (d *Daemon) handlePrompt(w http.ResponseWriter, r *http.Request, key string) {
-	m, ok := d.codexSession(w, key)
+	m, adapter, ok := d.harnessSession(w, key)
 	if !ok {
 		return
 	}
@@ -121,38 +143,44 @@ func (d *Daemon) handlePrompt(w http.ResponseWriter, r *http.Request, key string
 		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "prompt text exceeds the bound")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), harnessCallTimeout)
+	ctx, cancel := contextWithHarnessTimeout(r)
 	defer cancel()
-	res, err := d.adapter.Prompt(ctx, m, req.Text, req.Model, req.Effort)
+	res, err := adapter.Prompt(ctx, m, harness.PromptCommand{
+		Text:   req.Text,
+		Model:  req.Model,
+		Effort: req.Effort,
+	})
 	if err != nil {
-		writeCodexErr(w, err)
+		writeAdapterErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, api.PromptResponse{
 		Daemon: d.info(), Key: key, TurnID: res.TurnID,
-		NativeThreadID: res.NativeThreadID, RuntimeID: res.RuntimeID,
+		NativeSessionID: res.NativeSessionID, RuntimeID: res.RuntimeID,
 	})
 }
 
-// handleCancel interrupts the in-flight native turn.
+// handleCancel interrupts the in-flight native turn through the session's
+// own adapter — each harness receives its native cancel mechanism.
 func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request, key string) {
-	m, ok := d.codexSession(w, key)
+	m, adapter, ok := d.harnessSession(w, key)
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), harnessCallTimeout)
+	ctx, cancel := contextWithHarnessTimeout(r)
 	defer cancel()
-	if err := d.adapter.Cancel(ctx, m); err != nil {
-		writeCodexErr(w, err)
+	if err := adapter.Cancel(ctx, m); err != nil {
+		writeAdapterErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, api.CancelResponse{Daemon: d.info(), Key: key})
 }
 
 // handleInput answers a native requested-input request by exact Relay
-// input ID.
+// input ID. A harness without a verified elicitation path answers
+// UNSUPPORTED_OPERATION, never INTERNAL.
 func (d *Daemon) handleInput(w http.ResponseWriter, r *http.Request, key string) {
-	m, ok := d.codexSession(w, key)
+	m, adapter, ok := d.harnessSession(w, key)
 	if !ok {
 		return
 	}
@@ -165,22 +193,23 @@ func (d *Daemon) handleInput(w http.ResponseWriter, r *http.Request, key string)
 		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest, "inputId is required")
 		return
 	}
-	sel := make([]codex.AnswerSelection, 0, len(req.Answers))
+	answers := make([]harness.InputAnswer, 0, len(req.Answers))
 	for _, a := range req.Answers {
-		sel = append(sel, codex.AnswerSelection{QuestionID: a.QuestionID, Answers: a.Answers})
+		answers = append(answers, harness.InputAnswer{QuestionID: a.QuestionID, Answers: a.Answers})
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), harnessCallTimeout)
+	ctx, cancel := contextWithHarnessTimeout(r)
 	defer cancel()
-	if err := d.adapter.AnswerInput(ctx, m, req.InputID, sel); err != nil {
-		writeCodexErr(w, err)
+	if err := adapter.AnswerInput(ctx, m, req.InputID, answers); err != nil {
+		writeAdapterErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, api.InputResponse{Daemon: d.info(), Key: key, InputID: req.InputID})
 }
 
-// handleConfig accepts a model/mode change for a Codex session.
+// handleConfig accepts a model/mode change for a session through its own
+// adapter. A capability mismatch is UNSUPPORTED_OPERATION.
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request, key string) {
-	m, ok := d.codexSession(w, key)
+	m, adapter, ok := d.harnessSession(w, key)
 	if !ok {
 		return
 	}
@@ -194,59 +223,32 @@ func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request, key string
 		return
 	}
 	snap := m.Snapshot()
-	cmd := codex.ConfigCommand{Model: snap.Model, Mode: snap.Mode}
+	cmd := harness.ConfigCommand{Model: snap.Model, Mode: snap.Mode}
 	if req.Model != nil {
 		cmd.Model = strings.TrimSpace(*req.Model)
 	}
 	if req.Mode != nil {
 		cmd.Mode = strings.TrimSpace(*req.Mode)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), harnessCallTimeout)
+	ctx, cancel := contextWithHarnessTimeout(r)
 	defer cancel()
-	if err := d.adapter.ApplyConfig(ctx, m, cmd); err != nil {
-		writeCodexErr(w, err)
+	if err := adapter.ApplyConfig(ctx, m, cmd); err != nil {
+		writeAdapterErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
 
-// codexSession resolves a key to a live Codex session.
-func (d *Daemon) codexSession(w http.ResponseWriter, key string) (*session.Managed, bool) {
-	if !session.ValidKey(key) {
-		writeErr(w, http.StatusBadRequest, api.ErrInvalidSessionKey, "invalid session key "+key)
-		return nil, false
-	}
-	m, ok := d.registry.Get(key)
-	if !ok {
-		writeErr(w, http.StatusNotFound, api.ErrSessionNotFound, "no session "+key)
-		return nil, false
-	}
-	if m.Snapshot().Harness != session.HarnessCodex {
-		writeErr(w, http.StatusBadRequest, api.ErrInvalidRequest,
-			"session "+key+" is not a codex session")
-		return nil, false
-	}
-	return m, true
+// contextWithHarnessTimeout bounds one native control call. It is a
+// control-plane bound, not a turn bound: a turn completes through native
+// notifications and is never bounded here.
+func contextWithHarnessTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), harnessCallTimeout)
 }
 
-// writeCodexErr maps adapter errors to stable wire codes. A busy session
-// or a missing turn is a conflict; a lost native session or a dead
-// runtime is a conflict too — the caller must re-establish context.
-func writeCodexErr(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, codex.ErrBusy):
-		writeErr(w, http.StatusConflict, api.ErrSessionBusy, err.Error())
-	case errors.Is(err, codex.ErrNoActiveTurn):
-		writeErr(w, http.StatusConflict, api.ErrNoActiveTurn, err.Error())
-	case errors.Is(err, codex.ErrNativeSessionLost):
-		writeErr(w, http.StatusConflict, api.ErrNativeSessionLost, err.Error())
-	case errors.Is(err, codex.ErrNoSuchInput):
-		writeErr(w, http.StatusNotFound, api.ErrUnknownInput, err.Error())
-	case errors.Is(err, codex.ErrRuntimeUnavailable):
-		writeErr(w, http.StatusServiceUnavailable, api.ErrRuntimeUnavailable, err.Error())
-	case errors.Is(err, context.DeadlineExceeded):
-		writeErr(w, http.StatusGatewayTimeout, api.ErrRuntimeUnavailable, err.Error())
-	default:
-		writeErr(w, http.StatusInternalServerError, api.ErrInternal, err.Error())
-	}
-}
+// harnessCallTimeout bounds one native control call (prompt submission,
+// cancel, answer, config).
+const harnessCallTimeout = 30 * time.Second
+
+// maxPromptBytes bounds one prompt text.
+const maxPromptBytes = 256 << 10

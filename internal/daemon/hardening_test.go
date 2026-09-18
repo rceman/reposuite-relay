@@ -170,8 +170,8 @@ func TestDaemonPidAndVersion(t *testing.T) {
 	if pid <= 1 || !alive(pid) {
 		t.Fatalf("daemon pid %d not alive", pid)
 	}
-	if v := field(t, out, "apiVersion"); v != "1" {
-		t.Fatalf("apiVersion=%s", v)
+	if v := field(t, out, "apiVersion"); v != strconv.Itoa(api.Version) {
+		t.Fatalf("apiVersion=%s, want %d", v, api.Version)
 	}
 	stopDaemon(t, home, root)
 }

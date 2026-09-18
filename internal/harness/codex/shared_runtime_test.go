@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
@@ -26,7 +27,7 @@ func TestObserverDoesNotWakeColdRuntime(t *testing.T) {
 	}
 	defer evs.Unsubscribe(sub)
 
-	if _, err := e.adapter.Prompt(context.Background(), active, "wake", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), active, harness.PromptCommand{Text: "wake"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(active.Session.ID, api.EventMessageAgentCompleted)
@@ -41,7 +42,7 @@ func TestObserverDoesNotWakeColdRuntime(t *testing.T) {
 		t.Fatalf("observer session received events: %v", types)
 	}
 	// The observer can still be prompted later — its own runtime wake.
-	if _, err := e.adapter.Prompt(context.Background(), observer, "later", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), observer, harness.PromptCommand{Text: "later"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(observer.Session.ID, api.EventMessageAgentCompleted)
@@ -59,7 +60,7 @@ func TestMultiSessionSharedRuntimeAndDeleteIsolation(t *testing.T) {
 		sessions = append(sessions, e.newSession(key, t.TempDir()))
 	}
 	for i, m := range sessions {
-		if _, err := e.adapter.Prompt(context.Background(), m, "hi", "", ""); err != nil {
+		if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hi"}); err != nil {
 			t.Fatalf("prompt %d: %v", i, err)
 		}
 		e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
@@ -106,7 +107,7 @@ func TestMultiSessionSharedRuntimeAndDeleteIsolation(t *testing.T) {
 			t.Fatalf("session %s lost its runtime binding", m.Session.Key)
 		}
 		before := e.reload(m.Session.ID).NativeSessionID
-		if _, err := e.adapter.Prompt(context.Background(), m, "more", "", ""); err != nil {
+		if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "more"}); err != nil {
 			t.Fatalf("session %s broken after sibling delete: %v", m.Session.Key, err)
 		}
 		waitFor(t, "idle", func() bool { return e.adapter.Idle(m.Session.ID) })
@@ -130,7 +131,7 @@ func TestConcurrentColdWakeSpawnsOneProcess(t *testing.T) {
 		wg.Add(1)
 		go func(i int, m *session.Managed) {
 			defer wg.Done()
-			_, errs[i] = e.adapter.Prompt(context.Background(), m, "hi", "", "")
+			_, errs[i] = e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hi"})
 		}(i, m)
 	}
 	wg.Wait()

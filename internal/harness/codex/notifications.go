@@ -3,6 +3,7 @@ package codex
 import (
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
@@ -130,7 +131,7 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	// only now is the exact native identity persisted.
 	if p.Turn.Status == "completed" && firstTurn && nativeID != "" && !materialized {
 		idle := session.StateIdle
-		if err := a.deps.Materialize(m, SessionUpdate{
+		if err := a.deps.Materialize(m, harness.SessionUpdate{
 			NativeSessionID: &nativeID,
 			State:           &idle,
 			BumpGeneration:  true,

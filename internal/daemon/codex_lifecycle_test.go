@@ -34,7 +34,7 @@ func TestCodexPromptLifecycleOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if res.TurnID == "" || res.NativeThreadID == "" || res.RuntimeID != codex.RuntimeKey {
+	if res.TurnID == "" || res.NativeSessionID == "" || res.RuntimeID != codex.RuntimeKey {
 		t.Fatalf("prompt response = %+v", res)
 	}
 
@@ -61,7 +61,7 @@ func TestCodexPromptLifecycleOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Session.NativeSessionID != res.NativeThreadID || st.Session.Generation != 2 {
+	if st.Session.NativeSessionID != res.NativeSessionID || st.Session.Generation != 2 {
 		t.Fatalf("status = %+v", st.Session)
 	}
 	if st.Session.State != session.StateIdle || st.Session.Activity != "idle" {
@@ -149,7 +149,7 @@ func TestCodexDaemonRestartExactResume(t *testing.T) {
 	c := dialClient(t, p)
 	ctx, cancel := tctx(t)
 	defer cancel()
-	if _, err := c.CreateCodex(ctx, "restart", t.TempDir(), "", ""); err != nil {
+	if _, err := c.CreateSession(ctx, session.HarnessCodex, "restart", t.TempDir(), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Prompt(ctx, "restart", "hello", "", ""); err != nil {
@@ -209,14 +209,14 @@ func TestCodexDaemonRestartExactResume(t *testing.T) {
 			continue
 		}
 		var started struct {
-			NativeThreadID string `json:"nativeThreadId"`
-			Resumed        bool   `json:"resumed"`
+			NativeSessionID string `json:"nativeSessionId"`
+			Resumed         bool   `json:"resumed"`
 		}
 		if err := json.Unmarshal(r.Payload, &started); err != nil {
 			t.Fatal(err)
 		}
 		if started.Resumed {
-			resumedID = started.NativeThreadID
+			resumedID = started.NativeSessionID
 		}
 	}
 	if resumedID != native {

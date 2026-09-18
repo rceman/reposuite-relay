@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 )
 
 // TestRuntimeDeathFailsInFlightWork: process death is authoritative — the
@@ -14,7 +15,7 @@ import (
 func TestRuntimeDeathFailsInFlightWork(t *testing.T) {
 	e := newEnv(t, "die-on-turn")
 	m := e.newSession("death", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "die", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "die"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventRuntimeExited)
@@ -30,16 +31,16 @@ func TestRuntimeDeathFailsInFlightWork(t *testing.T) {
 	// nothing was materialized).
 	os.Setenv("FAKE_CODEX_MODE", "happy")
 	defer os.Setenv("FAKE_CODEX_MODE", "die-on-turn")
-	res, err := e.adapter.Prompt(context.Background(), m, "again", "", "")
+	res, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "again"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventNativeSession)
-	if res.NativeThreadID == "" {
+	if res.NativeSessionID == "" {
 		t.Fatal("recovery prompt produced no thread")
 	}
-	if got := e.reload(m.Session.ID); got.NativeSessionID != res.NativeThreadID {
-		t.Fatalf("recovered native id = %q, want %q", got.NativeSessionID, res.NativeThreadID)
+	if got := e.reload(m.Session.ID); got.NativeSessionID != res.NativeSessionID {
+		t.Fatalf("recovered native id = %q, want %q", got.NativeSessionID, res.NativeSessionID)
 	}
 }
 
@@ -47,11 +48,11 @@ func TestRuntimeDeathFailsInFlightWork(t *testing.T) {
 func TestBusySessionRejectsSecondPrompt(t *testing.T) {
 	e := newEnv(t, "input")
 	m := e.newSession("busy", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "one", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "one"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventInputRequested)
-	if _, err := e.adapter.Prompt(context.Background(), m, "two", "", ""); !errors.Is(err, ErrBusy) {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "two"}); !errors.Is(err, ErrBusy) {
 		t.Fatalf("err = %v, want ErrBusy", err)
 	}
 }
@@ -67,7 +68,7 @@ func TestMalformedNativeIdentityFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.adapter.Track(m)
-	_, err := e.adapter.Prompt(context.Background(), m, "hello", "", "")
+	_, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hello"})
 	if !errors.Is(err, ErrNativeSessionLost) {
 		t.Fatalf("err = %v, want ErrNativeSessionLost", err)
 	}

@@ -9,12 +9,15 @@ package api
 import (
 	"encoding/json"
 
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/store"
 )
 
 // Version is the local API version, published in the daemon descriptor
-// and enforced by clients.
-const Version = 1
+// and enforced by clients. Version 2 hard-cut the prompt response to the
+// harness-neutral nativeSessionId field (it replaced the Codex-specific
+// nativeThreadId); no legacy compatibility is carried.
+const Version = 2
 
 // DescriptorVersion is the descriptor schema version.
 const DescriptorVersion = 1
@@ -68,6 +71,9 @@ const (
 	ErrRuntimeUnavailable = "RUNTIME_UNAVAILABLE"
 	// ErrInvalidConfig means the requested model/mode is not acceptable.
 	ErrInvalidConfig = "INVALID_CONFIG"
+	// ErrUnsupportedOperation means the operation is not supported by this
+	// harness — a capability mismatch, never an internal failure.
+	ErrUnsupportedOperation = "UNSUPPORTED_OPERATION"
 )
 
 // Canonical size bounds. These are part of the wire contract and are used
@@ -126,6 +132,10 @@ type SessionInfo struct {
 	PID                 int    `json:"pid"`
 	CreatedAt           string `json:"createdAt"`
 	GenerationStartedAt string `json:"generationStartedAt"`
+	// Metrics is the last-known in-memory harness accounting, when the
+	// harness reported any. It is never persisted and never wakes a
+	// runtime to produce.
+	Metrics *harness.SessionMetrics `json:"metrics,omitempty"`
 }
 
 // Canonical durable event types. These are persisted in the session
@@ -168,11 +178,12 @@ const (
 	EventHarnessError = "harness.error"
 )
 
-// CodexRequest is the body of POST /v1/sessions/codex. There are no
-// executable/args fields: the daemon runs only its own built-in native
-// Codex adapter. Creating a session is a durable, runtime-free operation
-// (COLD) — no app-server is started until the first prompt.
-type CodexRequest struct {
+// CreateRequest is the body of every built-in creation route
+// (POST /v1/sessions/{codex|devin|opencode}). There are no executable/args
+// fields: the daemon runs only its own built-in native adapters. Creating a
+// session is a durable, runtime-free operation (COLD) — no harness process
+// is started until the first prompt.
+type CreateRequest struct {
 	Key   string `json:"key"`
 	Cwd   string `json:"cwd"`
 	Model string `json:"model,omitempty"`
@@ -186,13 +197,15 @@ type PromptRequest struct {
 	Effort string `json:"effort,omitempty"`
 }
 
-// PromptResponse reports the accepted native turn.
+// PromptResponse reports the accepted native turn. NativeSessionID is the
+// exact native session identity in force for that turn, whatever the
+// harness calls it (a Codex thread, an OpenCode `ses_*`, a Devin slug).
 type PromptResponse struct {
-	Daemon         DaemonInfo `json:"daemon"`
-	Key            string     `json:"key"`
-	TurnID         string     `json:"turnId"`
-	NativeThreadID string     `json:"nativeThreadId"`
-	RuntimeID      string     `json:"runtimeId"`
+	Daemon          DaemonInfo `json:"daemon"`
+	Key             string     `json:"key"`
+	TurnID          string     `json:"turnId"`
+	NativeSessionID string     `json:"nativeSessionId"`
+	RuntimeID       string     `json:"runtimeId"`
 }
 
 // CancelResponse reports an accepted interruption.

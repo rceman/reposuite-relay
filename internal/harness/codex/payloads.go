@@ -24,10 +24,10 @@ type runtimeExitedPayload struct {
 }
 
 type harnessStartedPayload struct {
-	RuntimeID      string `json:"runtimeId"`
-	NativeThreadID string `json:"nativeThreadId"`
-	Model          string `json:"model,omitempty"`
-	Resumed        bool   `json:"resumed"`
+	RuntimeID       string `json:"runtimeId"`
+	NativeSessionID string `json:"nativeSessionId"`
+	Model           string `json:"model,omitempty"`
+	Resumed         bool   `json:"resumed"`
 }
 
 type inputQuestion struct {

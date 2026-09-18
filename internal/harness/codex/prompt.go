@@ -5,16 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
-
-// PromptResult reports the accepted turn.
-type PromptResult struct {
-	TurnID         string `json:"turnId"`
-	NativeThreadID string `json:"nativeThreadId"`
-	RuntimeID      string `json:"runtimeId"`
-}
 
 // Prompt accepts a user prompt and submits it as a native turn:
 //
@@ -24,16 +18,17 @@ type PromptResult struct {
 //
 // A failure after acceptance publishes a durable turn.failed event, so
 // the prompt is never erased from history.
-func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, effort string) (PromptResult, error) {
+func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.PromptCommand) (harness.PromptResult, error) {
+	text, model, effort := cmd.Text, cmd.Model, cmd.Effort
 	st := a.state(m.Session.ID)
 	if st == nil {
-		return PromptResult{}, fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
+		return harness.PromptResult{}, fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
 	}
 	a.mu.Lock()
 	if st.current != nil {
 		turn := st.current.turnID
 		a.mu.Unlock()
-		return PromptResult{}, fmt.Errorf("%w: turn %s in flight", ErrBusy, turn)
+		return harness.PromptResult{}, fmt.Errorf("%w: turn %s in flight", ErrBusy, turn)
 	}
 	a.mu.Unlock()
 
@@ -51,14 +46,14 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 		Effort: effort,
 	}); err != nil {
 		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
-		return PromptResult{}, err
+		return harness.PromptResult{}, err
 	}
 
-	fail := func(err error) (PromptResult, error) {
+	fail := func(err error) (harness.PromptResult, error) {
 		_ = a.publishDurable(m, api.EventTurnFailed, turnEventPayload{Error: err.Error()})
 		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
 		_ = a.setSessionState(m, session.StateIdle)
-		return PromptResult{}, err
+		return harness.PromptResult{}, err
 	}
 
 	// Reuse the live thread when this exact runtime generation already
@@ -70,7 +65,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 	live := st.liveKey == RuntimeKey
 	a.mu.Unlock()
 	resume := !live && threadID != ""
-	if resume && !validNativeID(threadID) {
+	if resume && !harness.ValidNativeID(threadID) {
 		return fail(fmt.Errorf("%w: malformed native session id %q",
 			ErrNativeSessionLost, threadID))
 	}
@@ -134,10 +129,10 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 		}
 		a.mu.Unlock()
 		if err := a.publishDurable(m, api.EventHarnessStarted, harnessStartedPayload{
-			RuntimeID:      RuntimeKey,
-			NativeThreadID: threadID,
-			Model:          threadModel,
-			Resumed:        resume,
+			RuntimeID:       RuntimeKey,
+			NativeSessionID: threadID,
+			Model:           threadModel,
+			Resumed:         resume,
 		}); err != nil {
 			return fail(err)
 		}
@@ -190,7 +185,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 		// The runtime died between acceptance and this write: the death
 		// handler already failed the turn.
 		a.mu.Unlock()
-		return PromptResult{}, fmt.Errorf("%w: runtime exited during turn submission",
+		return harness.PromptResult{}, fmt.Errorf("%w: runtime exited during turn submission",
 			ErrRuntimeUnavailable)
 	}
 	st.current.turnID = res.Turn.ID
@@ -198,10 +193,10 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, text, model, e
 	st.current.agentItemID = ""
 	turnID := st.current.turnID
 	a.mu.Unlock()
-	return PromptResult{
-		TurnID:         turnID,
-		NativeThreadID: threadID,
-		RuntimeID:      RuntimeKey,
+	return harness.PromptResult{
+		TurnID:          turnID,
+		NativeSessionID: threadID,
+		RuntimeID:       RuntimeKey,
 	}, nil
 }
 

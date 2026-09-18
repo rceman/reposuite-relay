@@ -30,6 +30,16 @@ const HarnessFixture = "fixture"
 // shared app-server process, one exact native thread per Relay session.
 const HarnessCodex = "codex"
 
+// HarnessOpenCode is the OpenCode ACP harness: one shared `opencode acp`
+// process speaking ACP JSON-RPC over stdio, one exact native `ses_*`
+// session per Relay session.
+const HarnessOpenCode = "opencode"
+
+// HarnessDevin is the Devin ACP harness: `devin acp` over stdio, one
+// runtime per process-level model, one exact native slug session per
+// Relay session.
+const HarnessDevin = "devin"
+
 // Logical session states. Logical state is NOT process state: a session
 // stays "idle" whether its runtime is warm or entirely absent.
 const (

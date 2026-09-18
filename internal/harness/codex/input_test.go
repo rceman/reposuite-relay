@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"testing"
@@ -16,7 +17,7 @@ import (
 func TestRequestedInputBlocksSleepAndResumes(t *testing.T) {
 	e := newEnv(t, "input")
 	m := e.newSession("input", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "ask me", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "ask me"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventInputRequested)
@@ -52,12 +53,12 @@ func TestRequestedInputBlocksSleepAndResumes(t *testing.T) {
 
 	// A wrong question ID is rejected.
 	err := e.adapter.AnswerInput(context.Background(), m, req.InputID,
-		[]AnswerSelection{{QuestionID: "nope", Answers: []string{"alpha"}}})
+		[]harness.InputAnswer{{QuestionID: "nope", Answers: []string{"alpha"}}})
 	if !errors.Is(err, ErrNoSuchInput) {
 		t.Fatalf("err = %v, want ErrNoSuchInput", err)
 	}
 	if err := e.adapter.AnswerInput(context.Background(), m, req.InputID,
-		[]AnswerSelection{{QuestionID: "q1", Answers: []string{"alpha"}}}); err != nil {
+		[]harness.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
@@ -76,7 +77,7 @@ func TestRequestedInputBlocksSleepAndResumes(t *testing.T) {
 	}
 	// Answering the same input twice is a stable error.
 	if err := e.adapter.AnswerInput(context.Background(), m, req.InputID,
-		[]AnswerSelection{{QuestionID: "q1", Answers: []string{"alpha"}}}); !errors.Is(err, ErrNoSuchInput) {
+		[]harness.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}}); !errors.Is(err, ErrNoSuchInput) {
 		t.Fatalf("second answer err = %v, want ErrNoSuchInput", err)
 	}
 }
@@ -86,7 +87,7 @@ func TestRequestedInputBlocksSleepAndResumes(t *testing.T) {
 func TestCancelInterruptsInFlightTurn(t *testing.T) {
 	e := newEnv(t, "input")
 	m := e.newSession("cancel", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "hold", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hold"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventInputRequested)

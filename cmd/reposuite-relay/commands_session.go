@@ -11,19 +11,21 @@ import (
 	"time"
 )
 
-// cmdServe implements `serve fixture --key <KEY>`.
+// cmdServe implements `serve <harness> --key <KEY>` for the built-in
+// harnesses. It never accepts an executable or native arguments: the
+// daemon runs only its own adapters.
 func cmdServe(args []string, selfExe string) int {
-	if len(args) == 0 || (args[0] != "fixture" && args[0] != "codex") {
-		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex --key <KEY> [--model M] [--mode S]")
+	if len(args) == 0 || !servableHarness(args[0]) {
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex|devin|opencode --key <KEY> [--model M] [--mode S]")
 		return 2
 	}
 	harness := args[0]
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	key := fs.String("key", "", "session key")
-	model := fs.String("model", "", "model id (codex)")
-	mode := fs.String("mode", "", "service tier / mode (codex)")
+	model := fs.String("model", "", "model id")
+	mode := fs.String("mode", "", "mode / service tier")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex --key <KEY> [--model M] [--mode S]")
+		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex|devin|opencode --key <KEY> [--model M] [--mode S]")
 		return 2
 	}
 	if !session.ValidKey(*key) {
@@ -41,10 +43,10 @@ func cmdServe(args []string, selfExe string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var resp api.SessionResponse
-	if harness == "codex" {
-		resp, err = c.CreateCodex(ctx, *key, cwd, *model, *mode)
-	} else {
+	if harness == session.HarnessFixture {
 		resp, err = c.ServeFixture(ctx, *key, cwd)
+	} else {
+		resp, err = c.CreateSession(ctx, harness, *key, cwd, *model, *mode)
 	}
 	if err != nil {
 		return failAPI(err)
@@ -75,8 +77,8 @@ func cmdPrompt(args []string, selfExe string) int {
 	if err != nil {
 		return failAPI(err)
 	}
-	fmt.Printf("key=%s turn_id=%s native_thread_id=%s runtime_id=%s\n",
-		resp.Key, resp.TurnID, resp.NativeThreadID, resp.RuntimeID)
+	fmt.Printf("key=%s turn_id=%s native_session_id=%s runtime_id=%s\n",
+		resp.Key, resp.TurnID, resp.NativeSessionID, resp.RuntimeID)
 	return 0
 }
 
@@ -221,8 +223,30 @@ func cmdStop(selfExe, key string) int {
 	return 0
 }
 
+// servableHarness reports whether the CLI exposes a creation route for a
+// harness name.
+func servableHarness(name string) bool {
+	switch name {
+	case session.HarnessFixture, session.HarnessCodex, session.HarnessDevin, session.HarnessOpenCode:
+		return true
+	}
+	return false
+}
+
+// printSession prints the harness-neutral session projection. It never
+// prints credentials, native transport details, or harness stderr.
 func printSession(s api.SessionInfo) {
-	fmt.Printf("key=%s sessionId=%s runtimeId=%s runtimeState=%s harness=%s state=%s generation=%d pid=%d cwd=%s createdAt=%s generationStartedAt=%s\n",
+	fmt.Printf("key=%s sessionId=%s runtimeId=%s runtimeState=%s harness=%s state=%s activity=%s generation=%d pid=%d cwd=%s createdAt=%s generationStartedAt=%s",
 		s.Key, s.SessionID, s.RuntimeID, s.RuntimeState, s.Harness, s.State,
-		s.Generation, s.PID, s.Cwd, s.CreatedAt, s.GenerationStartedAt)
+		s.Activity, s.Generation, s.PID, s.Cwd, s.CreatedAt, s.GenerationStartedAt)
+	if s.NativeSessionID != "" {
+		fmt.Printf(" nativeSessionId=%s", s.NativeSessionID)
+	}
+	if s.Model != "" {
+		fmt.Printf(" model=%s", s.Model)
+	}
+	if s.Mode != "" {
+		fmt.Printf(" mode=%s", s.Mode)
+	}
+	fmt.Println()
 }

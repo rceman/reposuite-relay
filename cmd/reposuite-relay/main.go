@@ -33,6 +33,8 @@ Commands:
   paths                          print resolved RepoSuite/Relay state paths
   serve fixture --key <KEY>      start a fixture session
   serve codex --key <KEY>        create a Codex session (COLD)
+  serve devin --key <KEY>        create a Devin ACP session (COLD)
+  serve opencode --key <KEY>     create an OpenCode ACP session (COLD)
   prompt <KEY> --text <TEXT>     submit a prompt as a native turn
   cancel <KEY>                   interrupt the in-flight turn
   input <KEY> --input <ID>       answer requested input

@@ -5,6 +5,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
 	"github.com/rceman/reposuite-relay/internal/paths"
+	"github.com/rceman/reposuite-relay/internal/session"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +28,7 @@ func serveCodex(t *testing.T, c *client.Client, key string) api.SessionInfo {
 	cwd := t.TempDir()
 	ctx, cancel := tctx(t)
 	defer cancel()
-	resp, err := c.CreateCodex(ctx, key, cwd, "", "")
+	resp, err := c.CreateSession(ctx, session.HarnessCodex, key, cwd, "", "")
 	if err != nil {
 		t.Fatalf("create codex session: %v", err)
 	}

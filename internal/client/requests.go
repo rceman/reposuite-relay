@@ -34,12 +34,13 @@ func (c *Client) ServeFixture(ctx context.Context, key, cwd string) (api.Session
 	return resp, err
 }
 
-// CreateCodex creates a durable Codex session (COLD — no app-server is
-// started until the first prompt).
-func (c *Client) CreateCodex(ctx context.Context, key, cwd, model, mode string) (api.SessionResponse, error) {
+// CreateSession creates a durable session for one built-in harness (COLD —
+// no harness process is started until the first prompt). The harness name
+// selects the creation route; it is never an executable or an argument.
+func (c *Client) CreateSession(ctx context.Context, harness, key, cwd, model, mode string) (api.SessionResponse, error) {
 	var resp api.SessionResponse
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/codex",
-		api.CodexRequest{Key: key, Cwd: cwd, Model: model, Mode: mode}, &resp)
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+harness,
+		api.CreateRequest{Key: key, Cwd: cwd, Model: model, Mode: mode}, &resp)
 	return resp, err
 }
 

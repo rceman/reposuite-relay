@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/harness/codex"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
@@ -70,6 +70,10 @@ func (d *Daemon) sessionInfo(m *session.Managed) api.SessionInfo {
 		info.PID = v.PID
 		info.GenerationStartedAt = v.StartedAt.UTC().Format(time.RFC3339)
 		info.Activity = v.Activity
+	}
+	// Last-known metrics are in-memory only and must never wake a runtime.
+	if a, ok := d.adapterFor(s.Harness); ok {
+		info.Metrics = a.Metrics(s.ID)
 	}
 	return info
 }
@@ -185,12 +189,12 @@ func (d *Daemon) handleServeFixture(w http.ResponseWriter, r *http.Request, _ st
 	writeJSON(w, http.StatusOK, api.SessionResponse{Daemon: d.info(), Session: d.sessionInfo(m)})
 }
 
-// materialize applies a durable session metadata mutation requested by
-// the Codex adapter. It is the ONLY path by which native identity,
+// materialize applies a durable session metadata mutation requested by a
+// harness adapter. It is the ONLY path by which native identity,
 // generation, model/mode, and logical state become durable — always under
 // the session's MetaMu, so a concurrent seq-block reservation (which uses
 // the same mutex) can never interleave a partial write.
-func (d *Daemon) materialize(m *session.Managed, upd codex.SessionUpdate) error {
+func (d *Daemon) materialize(m *session.Managed, upd harness.SessionUpdate) error {
 	m.MetaMu.Lock()
 	defer m.MetaMu.Unlock()
 	rs := m.Session

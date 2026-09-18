@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/events"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
@@ -51,7 +52,7 @@ func newEnv(t *testing.T, mode string) *env {
 }
 
 // materialize mirrors the daemon's durable metadata mutation.
-func (e *env) materialize(m *session.Managed, upd SessionUpdate) error {
+func (e *env) materialize(m *session.Managed, upd harness.SessionUpdate) error {
 	m.MetaMu.Lock()
 	defer m.MetaMu.Unlock()
 	rs := m.Session

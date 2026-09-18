@@ -109,7 +109,7 @@ type Daemon struct {
 	store      *store.Sessions
 	broker     *events.Broker
 	supervisor *runtime.Supervisor
-	adapter    *codex.Adapter
+	adapters   map[string]adapterEntry
 	instanceID string
 	token      string
 
@@ -156,6 +156,7 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 		started:  time.Now(),
 		shutdown: make(chan struct{}),
 		conns:    map[net.Conn]http.ConnState{},
+		adapters: map[string]adapterEntry{},
 	}
 	if err := d.acquireLock(); err != nil {
 		return nil, err
@@ -182,21 +183,24 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	d.registry = reg
 	d.broker = events.NewBroker(ss)
 	d.supervisor = runtime.New()
-	d.adapter = codex.NewAdapter(codex.Deps{
+	d.register(codex.NewAdapter(codex.Deps{
 		Broker:        d.broker,
 		Supervisor:    d.supervisor,
 		Command:       d.opts.CodexCommand,
 		Materialize:   d.materialize,
 		RandRuntimeID: d.opts.RandRuntimeID,
 		Version:       version.Version,
+	}), func() error {
+		_, err := d.opts.CodexCommand()
+		return err
 	})
-	// Runtime removal is authoritative: the adapter fails in-flight work
-	// durably on an unexpected exit, and every bound session becomes COLD
-	// in either case (deliberate stop or death).
-	d.supervisor.OnGone = d.adapter.OnRuntimeGone
+	// Runtime removal is authoritative: the owning adapter fails in-flight
+	// work durably on an unexpected exit, and every bound session becomes
+	// COLD in either case (deliberate stop or death).
+	d.supervisor.OnGone = d.onRuntimeGone
 	for _, m := range reg.List() {
-		if m.Snapshot().Harness == session.HarnessCodex {
-			d.adapter.Track(m)
+		if a, ok := d.adapterFor(m.Snapshot().Harness); ok {
+			a.Track(m)
 		}
 	}
 	// Event state for every restored session: open transcripts via the

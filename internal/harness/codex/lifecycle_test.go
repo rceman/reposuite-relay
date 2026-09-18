@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"os"
@@ -21,18 +22,18 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 	if got := e.reload(m.Session.ID); got.NativeSessionID != "" || got.Generation != 1 {
 		t.Fatalf("cold session = %+v", got)
 	}
-	res, err := e.adapter.Prompt(context.Background(), m, "hello", "", "")
+	res, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NativeThreadID == "" || res.TurnID == "" {
+	if res.NativeSessionID == "" || res.TurnID == "" {
 		t.Fatalf("prompt result = %+v", res)
 	}
 	e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
 
 	got := e.reload(m.Session.ID)
-	if got.NativeSessionID != res.NativeThreadID {
-		t.Fatalf("nativeSessionId = %q, want %q", got.NativeSessionID, res.NativeThreadID)
+	if got.NativeSessionID != res.NativeSessionID {
+		t.Fatalf("nativeSessionId = %q, want %q", got.NativeSessionID, res.NativeSessionID)
 	}
 	if got.Generation != 2 {
 		t.Fatalf("generation = %d, want 2 (materialization bumps it once)", got.Generation)
@@ -59,10 +60,10 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 		t.Fatalf("completed text = %q", completed.Text)
 	}
 	waitFor(t, "token usage metrics", func() bool {
-		mm := e.adapter.Metrics(m.Session.ID)
+		mm := e.adapter.RawMetrics(m.Session.ID)
 		return mm != nil && mm.Total != nil
 	})
-	metrics := e.adapter.Metrics(m.Session.ID)
+	metrics := e.adapter.RawMetrics(m.Session.ID)
 	if metrics.Total.TotalTokens != 15 || metrics.ModelContextWindow == nil || *metrics.ModelContextWindow != 200000 {
 		t.Fatalf("metrics = %+v", metrics)
 	}
@@ -74,7 +75,7 @@ func TestMaterializationOnFirstCompletedTurn(t *testing.T) {
 func TestNoMaterializationOnFailedTurn(t *testing.T) {
 	e := newEnv(t, "fail-turn")
 	m := e.newSession("fail", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "hello", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventTurnFailed)
@@ -96,13 +97,13 @@ func TestNoMaterializationOnFailedTurn(t *testing.T) {
 func TestExactColdResume(t *testing.T) {
 	e := newEnv(t, "happy")
 	m := e.newSession("resume", t.TempDir())
-	res1, err := e.adapter.Prompt(context.Background(), m, "first", "", "")
+	res1, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "first"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
 	first := e.reload(m.Session.ID)
-	if first.NativeSessionID != res1.NativeThreadID {
+	if first.NativeSessionID != res1.NativeSessionID {
 		t.Fatalf("native id = %q", first.NativeSessionID)
 	}
 	rtID1 := ""
@@ -120,12 +121,12 @@ func TestExactColdResume(t *testing.T) {
 	e.sup = runtime.New()
 	e.sup.OnGone = e.adapter.OnRuntimeGone
 	e.adapter.deps.Supervisor = e.sup
-	res2, err := e.adapter.Prompt(context.Background(), m, "second", "", "")
+	res2, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "second"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res2.NativeThreadID != res1.NativeThreadID {
-		t.Fatalf("resumed thread = %q, want the exact %q", res2.NativeThreadID, res1.NativeThreadID)
+	if res2.NativeSessionID != res1.NativeSessionID {
+		t.Fatalf("resumed thread = %q, want the exact %q", res2.NativeSessionID, res1.NativeSessionID)
 	}
 	e.waitDurable(m.Session.ID, api.EventHarnessStarted)
 	waitFor(t, "second completion", func() bool { return e.adapter.Idle(m.Session.ID) })
@@ -160,7 +161,7 @@ func TestExactColdResume(t *testing.T) {
 func TestResumeFailureIsExplicit(t *testing.T) {
 	e := newEnv(t, "happy")
 	m := e.newSession("lost", t.TempDir())
-	res1, err := e.adapter.Prompt(context.Background(), m, "first", "", "")
+	res1, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "first"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,12 +177,12 @@ func TestResumeFailureIsExplicit(t *testing.T) {
 	e.sup.OnGone = e.adapter.OnRuntimeGone
 	e.adapter.deps.Supervisor = e.sup
 
-	_, err = e.adapter.Prompt(context.Background(), m, "second", "", "")
+	_, err = e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "second"})
 	if !errors.Is(err, ErrNativeSessionLost) {
 		t.Fatalf("err = %v, want ErrNativeSessionLost", err)
 	}
 	got := e.reload(m.Session.ID)
-	if got.NativeSessionID != res1.NativeThreadID {
+	if got.NativeSessionID != res1.NativeSessionID {
 		t.Fatalf("native id changed to %q", got.NativeSessionID)
 	}
 	if got.Generation != 2 {

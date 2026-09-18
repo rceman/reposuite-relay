@@ -3,6 +3,7 @@ package daemon
 import (
 	"crypto/subtle"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/session"
 	"net/http"
 	"strings"
 )
@@ -25,7 +26,11 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 	case p == "/v1/sessions/fixture" && r.Method == http.MethodPost:
 		d.lifecycle(d.handleServeFixture)(w, r, "")
 	case p == "/v1/sessions/codex" && r.Method == http.MethodPost:
-		d.lifecycle(d.handleCreateCodex)(w, r, "")
+		d.lifecycle(d.handleCreateHarness)(w, r, session.HarnessCodex)
+	case p == "/v1/sessions/devin" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleCreateHarness)(w, r, session.HarnessDevin)
+	case p == "/v1/sessions/opencode" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleCreateHarness)(w, r, session.HarnessOpenCode)
 	case strings.HasPrefix(p, "/v1/sessions/"):
 		d.routeSession(w, r, strings.TrimPrefix(p, "/v1/sessions/"))
 	default:

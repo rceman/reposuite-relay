@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
@@ -208,7 +209,7 @@ func (a *Adapter) abortInputs(st *sessState, reason string) {
 // reading durable metadata here would race with the adapter's own
 // notification goroutines.
 func (a *Adapter) setSessionState(m *session.Managed, state string) error {
-	return a.deps.Materialize(m, SessionUpdate{State: &state})
+	return a.deps.Materialize(m, harness.SessionUpdate{State: &state})
 }
 
 // --- prompt / turn --------------------------------------------------

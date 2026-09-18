@@ -4,14 +4,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
-
-// ConfigCommand is an accepted configuration change.
-type ConfigCommand struct {
-	Model string `json:"model"`
-	Mode  string `json:"mode"`
-}
 
 // ApplyConfig records an accepted configuration change. The verified
 // app-server surface applies model/mode at thread start/resume and, for
@@ -21,23 +16,20 @@ type ConfigCommand struct {
 // accepted configuration rather than pretending otherwise. A change
 // during an in-flight turn is accepted and applies to the next turn: the
 // running turn already captured its own model/effort.
-func (a *Adapter) ApplyConfig(_ context.Context, m *session.Managed, cmd ConfigCommand) error {
+func (a *Adapter) ApplyConfig(_ context.Context, m *session.Managed, cmd harness.ConfigCommand) error {
 	if a.state(m.Session.ID) == nil {
 		return fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
 	}
 	if snap := m.Snapshot(); snap.Model == cmd.Model && snap.Mode == cmd.Mode {
 		return nil
 	}
-	if err := a.deps.Materialize(m, SessionUpdate{
+	if err := a.deps.Materialize(m, harness.SessionUpdate{
 		Model: &cmd.Model,
 		Mode:  &cmd.Mode,
 	}); err != nil {
 		return err
 	}
-	return a.publishDurable(m, api.EventConfigChanged, ConfigCommand{
-		Model: cmd.Model,
-		Mode:  cmd.Mode,
-	})
+	return a.publishDurable(m, api.EventConfigChanged, cmd)
 }
 
 // StopSession releases adapter state for a session that is being deleted:
@@ -88,10 +80,10 @@ func (a *Adapter) Idle(sessionID string) bool {
 
 // DebugState is a diagnostic snapshot (never persisted).
 type DebugState struct {
-	NativeThreadID string
-	Live           bool
-	Materialized   bool
-	PendingInputs  int
+	NativeSessionID string
+	Live            bool
+	Materialized    bool
+	PendingInputs   int
 }
 
 // State reports adapter state for tests and diagnostics.
@@ -103,9 +95,9 @@ func (a *Adapter) State(sessionID string) DebugState {
 		return DebugState{}
 	}
 	return DebugState{
-		NativeThreadID: st.nativeID,
-		Live:           st.liveKey != "",
-		Materialized:   st.materialized,
-		PendingInputs:  len(st.inputs),
+		NativeSessionID: st.nativeID,
+		Live:            st.liveKey != "",
+		Materialized:    st.materialized,
+		PendingInputs:   len(st.inputs),
 	}
 }

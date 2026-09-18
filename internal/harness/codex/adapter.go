@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/events"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
@@ -19,21 +19,8 @@ import (
 // app-server process hosts many native threads, one per Relay session.
 const RuntimeKey = "codex/default"
 
-// Stable adapter errors (mapped to API codes by the control layer).
-var (
-	// ErrBusy means the session already has an in-flight turn.
-	ErrBusy = errors.New("session busy")
-	// ErrNoActiveTurn means cancel was requested with no in-flight turn.
-	ErrNoActiveTurn = errors.New("no active turn")
-	// ErrNativeSessionLost means exact resume of the recorded native
-	// session failed. Relay never substitutes a different thread.
-	ErrNativeSessionLost = errors.New("native session unavailable")
-	// ErrNoSuchInput means the requested-input ID is unknown or already
-	// resolved.
-	ErrNoSuchInput = errors.New("unknown requested input")
-	// ErrRuntimeUnavailable means the harness runtime could not be started.
-	ErrRuntimeUnavailable = errors.New("harness runtime unavailable")
-)
+// Name implements harness.Adapter.
+func (a *Adapter) Name() string { return session.HarnessCodex }
 
 // Deps wires the adapter to the daemon facilities it must use. The
 // adapter never writes durable session state directly: it calls the
@@ -46,24 +33,13 @@ type Deps struct {
 	Command func() (Command, error)
 	// Materialize performs a durable session metadata mutation under the
 	// session's MetaMu. The adapter never writes session state itself.
-	Materialize func(m *session.Managed, upd SessionUpdate) error
+	Materialize func(m *session.Managed, upd harness.SessionUpdate) error
 	// RandRuntimeID generates an ephemeral runtime identity.
 	RandRuntimeID func() (string, error)
 	// Version is reported in the initialize clientInfo.
 	Version string
 	// Now is a clock seam.
 	Now func() time.Time
-}
-
-// SessionUpdate is one durable metadata mutation requested by the
-// adapter. Nil fields are left unchanged; BumpGeneration increments the
-// session generation in the same atomic write.
-type SessionUpdate struct {
-	NativeSessionID *string
-	Model           *string
-	Mode            *string
-	State           *string
-	BumpGeneration  bool
 }
 
 // Adapter maps Codex app-server protocol traffic to canonical Relay
@@ -163,29 +139,10 @@ func (a *Adapter) Track(m *session.Managed) {
 		st.m = m
 	}
 	snap := m.Snapshot()
-	st.materialized = validNativeID(snap.NativeSessionID)
+	st.materialized = harness.ValidNativeID(snap.NativeSessionID)
 	if st.nativeID == "" {
 		st.nativeID = snap.NativeSessionID // exact identity from disk
 	}
-}
-
-// validNativeID reports whether a durable native session identity is
-// plausible enough to resume. A malformed value is never sent to the
-// harness and never substituted: it fails closed as
-// ErrNativeSessionLost (Relay never guesses a native session).
-func validNativeID(id string) bool {
-	if id == "" || len(id) > 128 {
-		return false
-	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-' || r == '_' || r == '.' || r == ':':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // Forget drops a session's adapter state (durable delete).
@@ -204,8 +161,37 @@ func (a *Adapter) forgetLocked(sessionID string) {
 	delete(a.sessions, sessionID)
 }
 
-// Metrics returns the last-known metrics for a session (nil when none).
-func (a *Adapter) Metrics(sessionID string) *Metrics {
+// Metrics returns the canonical projection of the last-known metrics for
+// a session (nil when none). It implements harness.Adapter; the rich
+// app-server-specific accounting stays available through RawMetrics.
+func (a *Adapter) Metrics(sessionID string) *harness.SessionMetrics {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	st := a.sessions[sessionID]
+	if st == nil || st.metrics == nil {
+		return nil
+	}
+	m := st.metrics
+	out := &harness.SessionMetrics{}
+	if m.ModelContextWindow != nil {
+		out.ContextLimit = harness.Int64(*m.ModelContextWindow)
+	}
+	if m.Last != nil {
+		out.InputTokens = harness.Int64(m.Last.InputTokens)
+		out.OutputTokens = harness.Int64(m.Last.OutputTokens)
+		out.ReasoningTokens = harness.Int64(m.Last.ReasoningOutputTokens)
+		out.CacheTokens = harness.Int64(m.Last.CachedInputTokens)
+	}
+	if m.RateLimits != nil && m.RateLimits.Primary != nil && m.RateLimits.Primary.UsedPercent != nil {
+		used := *m.RateLimits.Primary.UsedPercent
+		out.QuotaUsed = &used
+	}
+	return out
+}
+
+// RawMetrics returns the last-known app-server accounting for a session
+// (nil when none).
+func (a *Adapter) RawMetrics(sessionID string) *Metrics {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	st := a.sessions[sessionID]

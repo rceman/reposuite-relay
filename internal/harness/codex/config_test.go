@@ -7,6 +7,7 @@ import (
 
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 )
 
@@ -16,12 +17,12 @@ import (
 func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 	e := newEnv(t, "input")
 	m := e.newSession("cfg2", t.TempDir())
-	if _, err := e.adapter.Prompt(context.Background(), m, "hold", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hold"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventInputRequested)
 	if err := e.adapter.ApplyConfig(context.Background(), m,
-		ConfigCommand{
+		harness.ConfigCommand{
 			Model: "m2",
 			Mode:  "fast",
 		}); err != nil {
@@ -38,7 +39,7 @@ func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := e.adapter.AnswerInput(context.Background(), m, req.InputID,
-		[]AnswerSelection{{QuestionID: "q1", Answers: []string{"alpha"}}}); err != nil {
+		[]harness.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventMessageAgentCompleted)
@@ -50,7 +51,7 @@ func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 	e.sup = runtime.New()
 	e.sup.OnGone = e.adapter.OnRuntimeGone
 	e.adapter.deps.Supervisor = e.sup
-	if _, err := e.adapter.Prompt(context.Background(), m, "again", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "again"}); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "resume record", func() bool {
@@ -88,7 +89,7 @@ func TestConfigChangeDuringTurnAppliesToNextTurn(t *testing.T) {
 func TestConfigChangeIsAcceptedAndDurable(t *testing.T) {
 	e := newEnv(t, "happy")
 	m := e.newSession("cfg", t.TempDir())
-	if err := e.adapter.ApplyConfig(context.Background(), m, ConfigCommand{
+	if err := e.adapter.ApplyConfig(context.Background(), m, harness.ConfigCommand{
 		Model: "m1",
 		Mode:  "fast",
 	}); err != nil {
@@ -102,7 +103,7 @@ func TestConfigChangeIsAcceptedAndDurable(t *testing.T) {
 		t.Fatal("no durable session.config record")
 	}
 	// The accepted model is what the native thread start receives.
-	if _, err := e.adapter.Prompt(context.Background(), m, "hello", "", ""); err != nil {
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitDurable(m.Session.ID, api.EventHarnessStarted)

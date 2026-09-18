@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
+	"github.com/rceman/reposuite-relay/internal/session"
 	"io"
 	"net/http"
 	"os"
@@ -77,14 +78,14 @@ func TestCodexRuntimeDeathAndRecoveryOverHTTP(t *testing.T) {
 			continue
 		}
 		var started struct {
-			NativeThreadID string `json:"nativeThreadId"`
-			Resumed        bool   `json:"resumed"`
+			NativeSessionID string `json:"nativeSessionId"`
+			Resumed         bool   `json:"resumed"`
 		}
 		if err := json.Unmarshal(r.Payload, &started); err != nil {
 			t.Fatal(err)
 		}
-		if started.NativeThreadID != native {
-			t.Fatalf("thread %q, want the exact %q", started.NativeThreadID, native)
+		if started.NativeSessionID != native {
+			t.Fatalf("thread %q, want the exact %q", started.NativeSessionID, native)
 		}
 		if started.Resumed {
 			resumed++
@@ -113,13 +114,13 @@ func TestCodexMissingHarnessFailsClosed(t *testing.T) {
 	})
 	ctx, cancel := tctx(t)
 	defer cancel()
-	_, err := c.CreateCodex(ctx, "nope", t.TempDir(), "", "")
+	_, err := c.CreateSession(ctx, session.HarnessCodex, "nope", t.TempDir(), "", "")
 	if err == nil {
 		t.Fatal("create must fail without the harness")
 	}
 	wantAPIErr(t, err, api.ErrRuntimeUnavailable)
 	// The key stays free.
-	if _, err := c.CreateCodex(ctx, "nope", t.TempDir(), "", ""); err == nil {
+	if _, err := c.CreateSession(ctx, session.HarnessCodex, "nope", t.TempDir(), "", ""); err == nil {
 		t.Fatal("expected failure again")
 	}
 }
@@ -211,7 +212,13 @@ func TestCodexNativeServerNotExposed(t *testing.T) {
 		t.Fatal(err)
 	}
 	lower := strings.ToLower(string(body))
-	for _, forbidden := range []string{"port", "endpoint", "socket", "listen", "stdio", "token"} {
+	for _, forbidden := range []string{"port", "endpoint", "socket", "listen", "stdio"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("session DTO leaks %q: %s", forbidden, body)
+		}
+	}
+	// Token accounting is legitimate session data; a credential is not.
+	for _, forbidden := range []string{`"token":`, "bearertoken", "credential", "password", "secret"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("session DTO leaks %q: %s", forbidden, body)
 		}

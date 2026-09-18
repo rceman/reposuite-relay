@@ -34,8 +34,8 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 	// Adapter cleanup first (still bound): an in-flight native turn is
 	// interrupted, unresolved requested input is aborted durably, and the
 	// session's native thread tracking is dropped.
-	if m.Snapshot().Harness == session.HarnessCodex {
-		d.adapter.StopSession(m)
+	if a, ok := d.adapterFor(m.Snapshot().Harness); ok {
+		a.StopSession(m)
 	}
 	// Runtime ownership: a dedicated runtime (fixture) is stopped and
 	// reaped; a shared runtime (Codex) is only detached — deleting one
