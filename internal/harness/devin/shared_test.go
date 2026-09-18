@@ -1,10 +1,13 @@
 package devin
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
+	"github.com/rceman/reposuite-relay/internal/harness/harnessenv"
+	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
@@ -90,5 +93,26 @@ func TestStopSessionOnRuntimelessSessionIsSafe(t *testing.T) {
 	}
 	if a.Metrics(m.Session.ID) != nil {
 		t.Fatal("adapter state must be released")
+	}
+}
+
+// TestInFlightTurnBlocksRuntimeSleep: an active turn is a sleep blocker.
+func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
+	e, a := newEnv(t, acp.FakeCancel)
+	m := newSession(t, e, a, "sleep-block", t.TempDir())
+	if _, err := a.Prompt(bg(), m, text("hold")); err != nil {
+		t.Fatal(err)
+	}
+	harnessenv.WaitFor(t, "turn in flight", func() bool { return a.State(m.Session.ID).TurnInFlight })
+	if err := e.Supervisor.StopIfIdle(RuntimeKeyFor("")); !errors.Is(err, runtime.ErrRuntimeBusy) {
+		t.Fatalf("StopIfIdle err = %v, want ErrRuntimeBusy while a turn is in flight", err)
+	}
+	if err := a.Cancel(bg(), m); err != nil {
+		t.Fatal(err)
+	}
+	e.WaitDurable(m.Session.ID, api.EventTurnInterrupted)
+	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	if err := e.Supervisor.StopIfIdle(RuntimeKeyFor("")); err != nil {
+		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
 	}
 }

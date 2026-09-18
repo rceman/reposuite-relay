@@ -58,6 +58,10 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	if err != nil {
 		return fail(err)
 	}
+	// Re-assert the blocker AFTER attach: activity is only recorded for a
+	// BOUND session, so the wake path (which binds) must re-assert it or the
+	// first turn of a COLD session would not block runtime sleep.
+	a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityActive)
 	turn, err := handle.StartPrompt(cmd.Text)
 	if err != nil {
 		return fail(err)

@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -242,3 +243,26 @@ func collectEvents(t *testing.T, sub *events.Subscription) map[string]int {
 }
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+// TestInFlightTurnBlocksRuntimeSleep: an active turn is a sleep blocker, so an
+// idle-sleep sweep cannot tear the runtime out from under it.
+func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
+	e, a := newEnv(t, acp.FakeCancel)
+	m := newSession(t, e, a, "sleep-block", t.TempDir())
+	if _, err := a.Prompt(bg(), m, text("hold")); err != nil {
+		t.Fatal(err)
+	}
+	harnessenv.WaitFor(t, "turn in flight", func() bool { return a.State(m.Session.ID).TurnInFlight })
+	err := e.Supervisor.StopIfIdle(RuntimeKey)
+	if !errors.Is(err, runtime.ErrRuntimeBusy) {
+		t.Fatalf("StopIfIdle err = %v, want ErrRuntimeBusy while a turn is in flight", err)
+	}
+	if err := a.Cancel(bg(), m); err != nil {
+		t.Fatal(err)
+	}
+	e.WaitDurable(m.Session.ID, api.EventTurnInterrupted)
+	harnessenv.WaitFor(t, "turn settled", func() bool { return !a.State(m.Session.ID).TurnInFlight })
+	if err := e.Supervisor.StopIfIdle(RuntimeKey); err != nil {
+		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
+	}
+}
