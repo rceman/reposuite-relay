@@ -56,11 +56,23 @@ routing, `session/cancel`, the advertised config surface, approval
 requests, and the deterministic fake agent. Vendor differences live in
 the vendor adapter, never here.
 
-**Runtime key** *(current)* — the supervisor key that partitions runtime
-generations. Codex uses one shared app-server per generation; OpenCode
-uses one shared ACP runtime (`opencode/acp`); Devin uses one runtime PER
-PROCESS MODEL (`devin/acp/<model>`), because `devin acp --model` chooses
-the model for every new session in that process.
+**Runtime key vs Runtime ID** *(current)* — the supervisor key
+(`codex/default`, `opencode/acp`, `devin/acp/<model>`) is a STABLE
+internal grouping that partitions runtime generations: Codex uses one
+shared app-server per generation; OpenCode uses one shared ACP runtime;
+Devin uses one runtime PER PROCESS MODEL, because `devin acp --model`
+chooses the model for every new session in that process. `Runtime.ID` is
+the ephemeral identity of ONE process generation — `runtimeId` in prompt
+responses, `harness.started`, `runtime.exited`, and `SessionInfo` always
+names the generation id, never the key.
+
+**Generation** *(current)* — `RelaySession.Generation` counts successful
+native runtime BINDINGS: create is 0, the first native bind is 1,
+prompts on the same live binding leave it unchanged, and an exact cold
+resume into a fresh generation bumps it by one. It is orthogonal to
+materialization: a failed first turn may leave `Generation=1` with
+`nativeSessionId=""` — a binding existed but no resumable identity was
+proven.
 
 **Native materialization** *(current)* — the moment a native identity is
 proven durable and therefore persisted. It is per-vendor: Codex and Devin
@@ -69,6 +81,33 @@ first turn persists nothing), while OpenCode's `ses_*` identity is
 durable from `session/new`, so a zero-turn OpenCode session resumes
 exactly after a cold sleep. An unproven Devin slug is dropped with its
 generation — it is never resumed.
+
+**Desired vs effective config** *(current)* — `RelaySession.Model`/`Mode`
+are the durable DESIRED values; `SessionMetrics.Model`/`Mode` are
+last-known EFFECTIVE values, populated only from runtime-observed state.
+A config write on a COLD session stores desired state and wakes nothing;
+deferred values are applied through the advertised native config surface
+at the next materialization, BEFORE the first prompt — a rejected
+deferred value fails the bind before `session/prompt` and never becomes
+effective. A live native mutation is a supervisor sleep blocker, and a
+config change during a turn or unresolved input is `SESSION_BUSY`.
+Per-turn `prompt --model`/`--effort` overrides are Codex-only: the ACP
+adapters reject them with `UNSUPPORTED_OPERATION` before `message.user`
+is persisted.
+
+**Turn terminalization** *(current)* — exactly one code path may own an
+ACP turn's terminal durable record. `acp.Turn` carries an atomic
+terminal claim: the prompt-response path or the runtime-death `Fail`
+wins, the loser is discarded. `completeTurn` is the sole publisher of
+`turn.*` terminal records; `OnRuntimeGone` snapshots the in-flight turn
+under the adapter lock, `Fail`s it so the owner publishes `turn.failed`,
+and separately publishes `runtime.exited` once per affected session.
+
+**ACP RPC correlation** *(current)* — a response id is routed to its
+pending call; a late response to a context-abandoned call is legal,
+consumed once from a bounded set (64 entries); any other response id is
+protocol corruption and fails the connection closed
+(`ErrProtocolCorruption`).
 
 **Permission policy** *(current)* — how Relay answers a native approval
 request. Relay runs harnesses with full permissions, so the strongest

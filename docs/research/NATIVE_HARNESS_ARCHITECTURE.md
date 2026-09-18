@@ -535,8 +535,10 @@ persisted immediately and a ZERO-TURN session resumes exactly after a cold
 sleep. Devin returns a slug that is only resumable after a completed turn,
 so Relay persists it only then; an unproven slug is dropped with its dead
 generation and the next prompt creates a new native session. Generation
-accounting: 0 at create, +1 per runtime generation that takes ownership
-(first bind, then each exact `session/load`).
+counts successful native runtime BINDINGS: 0 at create, 1 at first bind,
+unchanged on same-runtime prompts, +1 per exact cold resume — orthogonal
+to materialization, so a failed first turn leaves `Generation=1` with
+`nativeSessionId=""`.
 
 **Exact resume, fail closed.** Resume is `session/load` with the
 persisted identity and nothing else: a failure is `NATIVE_SESSION_LOST`,
@@ -550,13 +552,27 @@ delivery and lets the runtime's own prompt response produce the terminal
 `turn.interrupted` (never a synthesized one). A cancel is a native
 mutation: it blocks sleep and serializes against overlapping cancels.
 
-**Configuration.** Model and mode are discovered from the runtime's
-advertised config options — Relay never hard-codes a model list. A value
-the runtime does not advertise, or rejects, is `INVALID_CONFIG` and is
-NEVER recorded as applied. On a COLD session nothing native is mutated and
-no runtime is woken; the recorded choice applies at the next
-materialization. Devin additionally selects the advertised `bypass` mode
-explicitly at materialization and records no mode it did not set.
+**Configuration (desired vs effective).** `RelaySession.Model`/`Mode` are
+the durable DESIRED values; `SessionMetrics.Model`/`Mode` are last-known
+EFFECTIVE values populated only from runtime-observed state — a deferred
+COLD change never fabricates an effective value. Model and mode are
+discovered from the runtime's advertised config options — Relay never
+hard-codes a model list. A value the runtime does not advertise, or
+rejects, is `INVALID_CONFIG` and is NEVER recorded as applied. A COLD
+config write stores desired state and wakes nothing; deferred values are
+applied through the advertised surface at the next materialization,
+BEFORE the first `session/prompt` (a rejected deferred value fails the
+bind, never becomes effective). A live native mutation is a supervisor
+sleep blocker; any config change during a turn or unresolved input is
+`SESSION_BUSY` on all three native harnesses. Per-turn
+`prompt --model`/`--effort` overrides are Codex-only — the ACP adapters
+reject them with `UNSUPPORTED_OPERATION` before `message.user` is
+persisted. Devin additionally selects the advertised `bypass` mode
+explicitly at materialization and records no mode it did not set, and a
+WARM idle process-model change detaches the session from the
+incompatible generation (the shared old runtime survives) so the next
+prompt binds the desired-model generation and `session/load`s the exact
+proven slug.
 
 **Approvals.** Relay runs harnesses with full permissions, so the
 strongest advertised allow option is selected BY KIND (never by
@@ -574,10 +590,25 @@ id, so each adapter resolves native → Relay session and ignores unknown
 native sessions.
 
 **Sleep blockers.** An in-flight turn blocks runtime sleep
-(`StopIfIdle` → `ErrRuntimeBusy`). Implementation note: activity is only
-recorded for a BOUND session, so the wake path re-asserts the blocker
-after binding — otherwise the first turn of a COLD session would not
-block sleep.
+(`StopIfIdle` → `ErrRuntimeBusy`), as does a live native mutation
+(config RPCs run under `BeginMutation`/`EndMutation`). Implementation
+note: activity is only recorded for a BOUND session, so the wake path
+re-asserts the blocker after binding — otherwise the first turn of a
+COLD session would not block sleep.
+
+**Runtime identity and terminal ownership.** `Runtime.Key` is a stable
+internal grouping (`codex/default`, `opencode/acp`, `devin/acp/<model>`),
+never an API value; `Runtime.ID` is one process generation's ephemeral
+identity and is what `runtimeId` names in prompt responses,
+`harness.started`, `runtime.exited`, and `SessionInfo`. An ACP turn's
+terminal durable record is written exactly once: `acp.Turn` carries an
+atomic terminal claim (the prompt response or the runtime-death `Fail`
+wins), `completeTurn` is the sole publisher of `turn.*` records, and
+`OnRuntimeGone` only `Fail`s the snapshotted turn and publishes
+`runtime.exited` per affected session. RPC response correlation is
+hardened the same way: a late response to a context-abandoned call is
+consumed once from a bounded set (64); any other response id is protocol
+corruption (`ErrProtocolCorruption`) and fails the connection closed.
 
 ## 12. Open questions / risks
 

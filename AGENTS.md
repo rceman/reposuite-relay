@@ -143,8 +143,11 @@ report each as PASS/FAIL/N/A with evidence.
   durable identity that cannot be parsed is `NATIVE_SESSION_LOST` before
   any process is spawned.
 - Devin's model is a PROCESS-level choice (`devin acp --model`), so Devin
-  runtime keys are partitioned by model; a model change applies to the next
-  generation and is never reported as a live mutation. Relay selects the
+  runtime keys are partitioned by model. A WARM idle model change detaches
+  the session from the incompatible generation (the shared old runtime
+  stays alive) and the next prompt enters the desired-model generation
+  with the exact proven slug via `session/load`; a model change during a
+  turn or unresolved input is `SESSION_BUSY`. Relay selects the
   advertised `bypass` mode explicitly and records no mode it did not set.
 - Approvals are answered by the shared permission policy: select by
   advertised kind, never by position, and fail closed (outcome
@@ -172,6 +175,42 @@ report each as PASS/FAIL/N/A with evidence.
 - Every process stop is bounded and reaps the whole process group —
   leader, descendants, and the app-server's own children.
 
+### Cross-harness semantics (hardened)
+
+- **Desired vs effective config:** `RelaySession.Model`/`Mode` are the
+  durable DESIRED values; `SessionMetrics.Model`/`Mode` are last-known
+  EFFECTIVE values, populated only from runtime-observed state. A COLD
+  config change writes desired state and wakes nothing; the deferred
+  values are applied through the advertised native config surface at the
+  next materialization, BEFORE the first prompt (a rejected deferred
+  value fails before `session/prompt` and never becomes "effective").
+  A live native mutation is a supervisor sleep blocker
+  (`BeginMutation`), and any config change during a turn or unresolved
+  input is `SESSION_BUSY` on all native harnesses.
+- **Per-turn overrides:** `prompt --model`/`--effort` are Codex-only;
+  OpenCode and Devin reject non-empty overrides with
+  `UNSUPPORTED_OPERATION` before `message.user` is persisted.
+- **Runtime.Key vs Runtime.ID:** the supervisor key (`codex/default`,
+  `opencode/acp`, `devin/acp/<model>`) is a stable internal grouping —
+  never an API value. `Runtime.ID` is one process generation's
+  ephemeral id; `runtimeId` in prompt responses, `harness.started`,
+  `runtime.exited`, and `SessionInfo` all name the same generation.
+- **Generation = successful native runtime bindings:** create 0, first
+  bind 1, same-runtime prompts unchanged, cold exact resume +1.
+  Materialization is orthogonal: a failed first turn may leave
+  `Generation=1` with `nativeSessionId=""` (a binding existed, no
+  resumable identity was proven).
+- **Terminal exactly-once:** `acp.Turn` carries an atomic terminal
+  claim — the prompt-response path or the runtime-death `Fail` wins,
+  the loser is discarded. `completeTurn` is the sole publisher of
+  `turn.*` terminal records; `OnRuntimeGone` snapshots the in-flight
+  turn under the adapter lock and only `Fail`s it, then publishes
+  `runtime.exited` per affected session.
+- **ACP RPC correlation:** responses are delivered to pending calls;
+  late responses to context-abandoned calls are consumed once from a
+  bounded set (64); any other response id is protocol corruption and
+  closes the connection (`ErrProtocolCorruption`).
+
 ## Test seams
 
 - `__fixture` — deterministic same-binary child (fixture harness).
@@ -184,7 +223,8 @@ report each as PASS/FAIL/N/A with evidence.
   same rule: scripted ACP over stdio, no model call, no network, no quota.
   Selected with `FAKE_ACP_VENDOR` (`opencode`, `devin`), `FAKE_ACP_MODE`
   (`happy`, `thought`, `cancel`, `permission`, `permission-unknown`,
-  `no-load`, `load-error`, `die-on-prompt`, `unknown-request`,
+  `config-reject`, `config-slow`, `fail-turn`, `no-load`, `load-error`,
+  `die-on-prompt`, `die-on-permission`, `die-idle`, `unknown-request`,
   `malformed`, `oversized`, `stubborn`, `child`) and `FAKE_ACP_STATE`
   (the fake's own on-disk native session store, so exact resume and
   zero-turn behavior are observable from outside).
