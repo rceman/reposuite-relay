@@ -42,10 +42,40 @@ app-server); sleep authority is per-runtime.
 
 **HarnessAdapter** *(current)* — the protocol-specific bridge between a
 native harness protocol and Relay's canonical session/event model.
-Implemented: `internal/harness/codex` (Codex app-server over stdio). Planned:
-OpenCode ACP, Devin ACP. An adapter owns only daemon-memory state; it
-never writes durable session metadata itself (the daemon's `Materialize`
-hook does that under `MetaMu`).
+Implemented: `internal/harness/codex` (Codex app-server over stdio),
+`internal/harness/opencode` and `internal/harness/devin` (both over the
+shared ACP layer `internal/harness/acp`). An adapter owns only
+daemon-memory state; it never writes durable session metadata itself (the
+daemon's `Materialize` hook does that under `MetaMu`).
+
+**ACP** *(current)* — the Agent Client Protocol, spoken over stdio by
+both the OpenCode and the Devin runtime. `internal/harness/acp` owns the
+protocol family only: JSON-RPC framing, the `initialize` handshake and
+capabilities, session open/load, prompt turns, streaming `session/update`
+routing, `session/cancel`, the advertised config surface, approval
+requests, and the deterministic fake agent. Vendor differences live in
+the vendor adapter, never here.
+
+**Runtime key** *(current)* — the supervisor key that partitions runtime
+generations. Codex uses one shared app-server per generation; OpenCode
+uses one shared ACP runtime (`opencode/acp`); Devin uses one runtime PER
+PROCESS MODEL (`devin/acp/<model>`), because `devin acp --model` chooses
+the model for every new session in that process.
+
+**Native materialization** *(current)* — the moment a native identity is
+proven durable and therefore persisted. It is per-vendor: Codex and Devin
+persist only after the first COMPLETED turn (an interrupted or failed
+first turn persists nothing), while OpenCode's `ses_*` identity is
+durable from `session/new`, so a zero-turn OpenCode session resumes
+exactly after a cold sleep. An unproven Devin slug is dropped with its
+generation — it is never resumed.
+
+**Permission policy** *(current)* — how Relay answers a native approval
+request. Relay runs harnesses with full permissions, so the strongest
+advertised allow option is selected BY KIND (`allow_always` before
+`allow_once`), never by position; a request with no recognizable allow
+option is answered `cancelled` (fail closed). An approval is never
+converted into Relay `RequestedInput`.
 
 **RuntimeSupervisor** *(current)* — owns runtime wake/sleep/lifecycle:
 ensure-awake, protocol init, exact native resume, prompt dispatch,
@@ -61,8 +91,10 @@ whether a runtime may sleep.
 
 **NativeSessionID** *(current)* — the exact harness-native resume
 identity stored on `RelaySession` (empty for fixture, which has no
-native durable identity). Resume always uses the exact identity — never
-"newest", `--last`, timestamps, or implicit current session.
+native durable identity, and empty for an ACP session whose identity is
+not yet proven). Resume always uses the exact identity — never "newest",
+`--last`, timestamps, or implicit current session. A malformed durable
+identity is `NATIVE_SESSION_LOST` and never spawns a process.
 
 **RuntimePolicy** *(target)* — per-adapter/runtime sleep policy:
 conceptually `warmGrace`, `coldResumeSupported`, `sleepBlockers`. No
@@ -82,8 +114,10 @@ suspension; the runtime is gone and is re-created on wake.
 ## Requests
 
 **RequestedInput** *(current)* — a blocking question/input request a
-harness surfaces through the adapter (permission prompt, choice,
-free-text). It is responder-agnostic: any attached client may answer by
+harness surfaces through the adapter (choice, free-text). Implemented for
+Codex only: neither ACP harness exposes Relay's input surface, so
+`input` on an ACP session is `UNSUPPORTED_OPERATION` and ACP approvals
+are handled entirely by the permission policy. It is responder-agnostic: any attached client may answer by
 its Relay input ID. An unresolved `RequestedInput` is a **sleep
 blocker** — a runtime must not sleep while one is pending (native
 pending-request state is not resumable), and the logical session state

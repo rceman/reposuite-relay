@@ -33,6 +33,9 @@ toolchain: exactly **go1.27.1**.
 | 24 | Process tree + COLD projection | covered by gate 5 — stopping a Codex runtime reaps the app-server and its own child process, the session survives COLD with its native identity, and a live event subscriber on a COLD session never wakes or retains a runtime |
 | 25 | Native server privacy | covered by gate 5 — driving a real turn opens no new listening socket (Linux `/proc/self/net/tcp*`), the session DTO carries no harness transport/credential field, and no API route proxies the native app-server |
 
+| 30 | ACP protocol engine | covered by gate 5 (`internal/harness/acp`) — line-delimited JSON-RPC framing, out-of-order responses, notifications, inbound server requests incl. deferred responses, unknown/unimplemented agent requests answered with an explicit error, malformed and oversized frames fail closed, pending calls failed when the connection ends, approval selected by advertised KIND (never by position) and failing closed when unclassifiable, plus the deterministic fake agent's vendor personalities |
+| 31 | ACP harness lifecycle | covered by gate 5 (`internal/harness/opencode`, `internal/harness/devin`) — COLD create spawns nothing, per-vendor materialization (OpenCode persists `ses_*` from `session/new` so a ZERO-TURN cold resume is exact; Devin persists its slug only after a completed turn and never resumes an unproven one), exact `session/load` with no substitution (`NATIVE_SESSION_LOST`), malformed durable identity never spawning a runtime, one in-flight turn (`ErrBusy`), cancel → `turn.interrupted` via the runtime's own stop reason, canonical event order, transient deltas/metrics never persisted, model/mode config through advertised options only, Devin model-partitioned runtime keys and explicit bypass-mode selection, in-flight turn as a sleep blocker |
+| 32 | ACP cross-adapter isolation | covered by gate 5 (`internal/daemon`) — one daemon routing both ACP harnesses to separate adapters and separate native stores (no shared native identity), `UNSUPPORTED_OPERATION` for requested input on an ACP session, observer/status reads of a COLD session waking nothing, session projection leaking no transport/credential field, daemon restart restoring ACP sessions COLD with exact resume (one `session/load`, no `session/new`) |
 | 26 | Go file token budget | `scripts/check-go-files.sh --all` — every hand-written tracked/untracked Go file is <=3000 o200k_base tokens (complete file: code, comments, strings, tests). Generated files with the standard `// Code generated ... DO NOT EDIT.` header are excluded; no hand-written allowlist, no baseline file |
 | 27 | Structural Go formatting | `scripts/check-go-format.sh --all` — package-aware gofmt-struct is clean over the whole tree (multi-field keyed struct literals vertical); `gofmt -l .` is empty (gate 2) |
 | 28 | Harness namespace topology | vendor-specific adapters live under `internal/harness/<name>`; the old `internal/codex` path is absent from code and current authority docs (`grep -rn "internal/codex"` returns nothing outside historical research notes) |
@@ -57,8 +60,12 @@ toolchain: exactly **go1.27.1**.
   capture machinery was removed with the terminal layer).
 - Live harness invocations and model-quota operations are **never**
   part of canonical gates. Harness gates use the deterministic fake
-  app-server (hidden `__fake-codex` mode): scripted JSON-RPC only, no
-  model call, no network, no quota.
+  app-server (hidden `__fake-codex` mode) or the deterministic fake ACP
+  agent (hidden `__fake-acp` mode, selected by `FAKE_ACP_VENDOR` /
+  `FAKE_ACP_MODE` / `FAKE_ACP_STATE`): scripted JSON-RPC only, no model
+  call, no network, no quota. The fake ACP agent keeps a real on-disk
+  "native" session store, which is what makes exact resume, zero-turn
+  differences, and cross-adapter isolation observable from outside.
 - Gate 9's native surface check needs a `codex` on `PATH` that is the
   fake app-server (a one-line shell shim exec'ing
   `reposuite-relay __fake-codex`); production resolves the real CLI.

@@ -507,6 +507,78 @@ No adapter-bundling: one vertical slice (Codex) first.
   index rebuild/recovery; partial-tail/crash handling.
 - No brittle RSS thresholds before baselines exist.
 
+## 11c. Implemented ACP adapter semantics (Task A3 — OpenCode + Devin)
+
+Both ACP adapters are implemented on the shared protocol layer
+`internal/harness/acp`; all of the following is verified by the
+deterministic fake ACP agent (`__fake-acp`) and the adapter/daemon test
+suites. No model call, no network, no quota.
+
+**Wire schema (static, from the installed binaries).** `opencode`
+1.17.20 ships its uncompressed JS with the ACP zod schemas, and
+`devin` 3000.10.31 links the Rust `agent-client-protocol` 1.0.0 crate, so
+the exact method/notification/type names were read out of the binaries
+rather than guessed. `devin acp --help` confirms `--model` is the
+"default model for every new ACP session" — a PROCESS-level choice.
+
+**One shared ACP runtime per key.**
+`opencode/acp` hosts many native sessions in one process. Devin's key is
+`devin/acp/<model>` because the model is fixed per process: two sessions
+with different models never share a runtime, two with the same model do.
+The claim-first spawn closure performs the handshake and the fail-closed
+`loadSession` capability check, so a runtime is only published once it is
+usable.
+
+**Materialization rules (the two vendors differ).**
+OpenCode returns a durable `ses_*` identity from `session/new`, so it is
+persisted immediately and a ZERO-TURN session resumes exactly after a cold
+sleep. Devin returns a slug that is only resumable after a completed turn,
+so Relay persists it only then; an unproven slug is dropped with its dead
+generation and the next prompt creates a new native session. Generation
+accounting: 0 at create, +1 per runtime generation that takes ownership
+(first bind, then each exact `session/load`).
+
+**Exact resume, fail closed.** Resume is `session/load` with the
+persisted identity and nothing else: a failure is `NATIVE_SESSION_LOST`,
+a runtime that reports a different identity is a hard failure, and a
+malformed durable identity is rejected before any process is spawned. The
+fake agent can be told to fail loads and to refuse zero-turn loads, which
+is what makes "no substitution" testable.
+
+**Cancellation.** `session/cancel` is a notification, so Relay reports
+delivery and lets the runtime's own prompt response produce the terminal
+`turn.interrupted` (never a synthesized one). A cancel is a native
+mutation: it blocks sleep and serializes against overlapping cancels.
+
+**Configuration.** Model and mode are discovered from the runtime's
+advertised config options — Relay never hard-codes a model list. A value
+the runtime does not advertise, or rejects, is `INVALID_CONFIG` and is
+NEVER recorded as applied. On a COLD session nothing native is mutated and
+no runtime is woken; the recorded choice applies at the next
+materialization. Devin additionally selects the advertised `bypass` mode
+explicitly at materialization and records no mode it did not set.
+
+**Approvals.** Relay runs harnesses with full permissions, so the
+strongest advertised allow option is selected BY KIND (never by
+position); an unclassifiable request is answered `cancelled`. Neither ACP
+harness exposes Relay's requested-input surface, so `input` on an ACP
+session is `UNSUPPORTED_OPERATION` — an approval is never converted into
+input.
+
+**Metrics and streaming.** ACP usage/context measurements are projected
+onto the canonical optional shape (absent stays absent, never zero) and
+published as transient `metrics.updated`; assistant chunks stream as
+transient `message.agent.delta`; hidden reasoning chunks are neither
+surfaced nor persisted. Streaming notifications carry the NATIVE session
+id, so each adapter resolves native → Relay session and ignores unknown
+native sessions.
+
+**Sleep blockers.** An in-flight turn blocks runtime sleep
+(`StopIfIdle` → `ErrRuntimeBusy`). Implementation note: activity is only
+recorded for a BOUND session, so the wake path re-asserts the blocker
+after binding — otherwise the first turn of a COLD session would not
+block sleep.
+
 ## 12. Open questions / risks
 
 - Codex `request_user_input` is environment-gated — which config enables
@@ -524,3 +596,12 @@ No adapter-bundling: one vertical slice (Codex) first.
   (configId=`model`) switches mid-session on OpenCode ACP; Devin exposes
   mode via configOptions (`bypass` etc.) — exact Devin model setter
   verify at adapter build (`--model` covers creation-time).
+- ~~Devin model setter / mode policy~~ — **answered (A3):**
+  `devin acp --model` is process-level (verified in `--help`), so Devin
+  runtimes are partitioned per model and no live per-session model
+  mutation is claimed; `bypass` is selected through the advertised mode
+  config option.
+- ACP requested-input: not implemented for either ACP harness (no
+  observed non-approval question surface). If a vendor adds one, it needs
+  a real mapping to `input.requested` plus the `waiting_input` sleep
+  blocker — not a reinterpretation of approvals.

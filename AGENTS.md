@@ -63,7 +63,12 @@ IMPLEMENTED:
 - Native harness adapters under `internal/harness/<name>`: the Codex
   app-server adapter (`internal/harness/codex`) with stdio JSON-RPC,
   thread/turn handling, requested-input mapping, and the deterministic
-  fake app-server test seam.
+  fake app-server test seam; the shared ACP protocol layer
+  (`internal/harness/acp`) with the Devin (`internal/harness/devin`) and
+  OpenCode (`internal/harness/opencode`) adapters on top of it.
+- Canonical event payloads are shared by every adapter
+  (`internal/api/events.go`): one wire shape per event regardless of the
+  harness that produced it.
 - `internal/runtime` supervisor: one shared or dedicated harness process
   per runtime key, claim-first creation, activity/sleep-blocker policy,
   bounded process-group teardown, runtime-gone notification.
@@ -73,8 +78,14 @@ IMPLEMENTED:
 
 NOT YET IMPLEMENTED:
 
-- Devin/OpenCode adapters; Codex approval flows and `turn/steer`;
-  rate-limit surfaces.
+- Codex approval flows and `turn/steer`; rate-limit surfaces beyond the
+  canonical metrics projection.
+- ACP requested-input: neither ACP harness exposes Relay's input surface,
+  so `input` is `UNSUPPORTED_OPERATION` there (approvals are handled by
+  policy, never converted into input).
+- ACP session listing/deletion beyond Relay's own registry, ACP
+  `authenticate` beyond the initialize handshake, and native ACP tool-call
+  or plan surfacing (ignored deliberately, not guessed at).
 - TUI, Gateway/WSS bridge.
 - Cross-platform singleton locking (currently Linux `flock`; the
   invariant is one relayd per state root, fail-closed).
@@ -120,7 +131,25 @@ report each as PASS/FAIL/N/A with evidence.
   supply executables or arguments; `internal/harness/codex` resolves the
   installed `codex` CLI itself and runs `codex app-server`.
 - Native harness servers are private to relayd: never exposed on a
-  socket, descriptor, or API surface.
+  socket, descriptor, or API surface. This holds for ACP too: the ACP
+  agent is a stdio child of relayd, and no API route proxies it.
+- ACP streaming notifications carry the **native** session identity, so
+  every ACP adapter resolves native → Relay session before publishing; an
+  unknown native session is ignored, never guessed at.
+- Materialization is per-vendor and must be honored exactly: OpenCode's
+  `ses_*` is durable from `session/new` (so a zero-turn cold resume is
+  exact), Devin's slug is durable only after a completed turn (an unproven
+  slug is dropped with its generation and never resumed). A non-empty
+  durable identity that cannot be parsed is `NATIVE_SESSION_LOST` before
+  any process is spawned.
+- Devin's model is a PROCESS-level choice (`devin acp --model`), so Devin
+  runtime keys are partitioned by model; a model change applies to the next
+  generation and is never reported as a live mutation. Relay selects the
+  advertised `bypass` mode explicitly and records no mode it did not set.
+- Approvals are answered by the shared permission policy: select by
+  advertised kind, never by position, and fail closed (outcome
+  `cancelled`) when unclassifiable. An approval is never converted into
+  Relay requested input.
 - Exact resume only: `thread/resume` uses the persisted
   `nativeSessionId`; a mismatch or failure is `NATIVE_SESSION_LOST` —
   never "newest"/`--last`/implicit.
@@ -151,6 +180,17 @@ report each as PASS/FAIL/N/A with evidence.
   `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `die-on-turn`,
   `resume-error`, `stubborn`, `child`). Hidden modes are never listed in
   help and never part of the public CLI contract.
+- `__fake-acp` — deterministic fake ACP agent (both vendors) behind the
+  same rule: scripted ACP over stdio, no model call, no network, no quota.
+  Selected with `FAKE_ACP_VENDOR` (`opencode`, `devin`), `FAKE_ACP_MODE`
+  (`happy`, `thought`, `cancel`, `permission`, `permission-unknown`,
+  `no-load`, `load-error`, `die-on-prompt`, `unknown-request`,
+  `malformed`, `oversized`, `stubborn`, `child`) and `FAKE_ACP_STATE`
+  (the fake's own on-disk native session store, so exact resume and
+  zero-turn behavior are observable from outside).
+- `internal/harness/harnessenv` is **test-only** scaffolding (real store +
+  broker + supervisor + fake-agent command) shared by the adapter suites.
+  It is not imported by production code.
 
 ## Repository hygiene
 
@@ -162,6 +202,13 @@ report each as PASS/FAIL/N/A with evidence.
   responsibility stays generic — `internal/runtime` (process
   supervision), `internal/events`, `internal/session`, `internal/store`,
   `internal/daemon` (orchestration + HTTP).
+- **`internal/harness/acp` owns only ACP protocol-family concerns** —
+  framing, handshake, session/turn mechanics, streaming update routing,
+  approval policy, the fake ACP agent. It must never contain
+  vendor-specific behavior or Relay session policy. Vendor differences
+  (identity shape, materialization rule, process-level model, mode
+  policy) stay in `internal/harness/devin` and
+  `internal/harness/opencode`.
 - **Hand-written Go file hard limit: <=3000 o200k_base tokens**, counting
   the complete file (code, comments, strings, tests, tooling). Files with
   the standard `// Code generated ... DO NOT EDIT.` header are excluded;

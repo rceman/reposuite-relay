@@ -4,8 +4,8 @@ A persistent structured agent-session daemon with native harness
 adapters, implemented in Go.
 
 **Status: early development** — the ADR-006 local control plane, the
-canonical event-stream foundation, and the first real native harness
-adapter (Codex app-server) are implemented.
+canonical event-stream foundation, and three native harness adapters
+(Codex app-server, Devin ACP, OpenCode ACP) are implemented.
 
 RepoSuite Relay keeps agent sessions alive independently of any viewer:
 a persistent per-user daemon owns durable session identities
@@ -28,6 +28,8 @@ reposuite-relay 0.1.0-dev
 $ reposuite-relay help
 $ reposuite-relay paths                      # resolved RepoSuite/Relay state paths
 $ reposuite-relay serve codex --key work     # create a Codex session (COLD: no process yet)
+$ reposuite-relay serve opencode --key oc    # create an OpenCode ACP session (COLD)
+$ reposuite-relay serve devin --key dv       # create a Devin ACP session (COLD)
 $ reposuite-relay prompt work --text "..."   # submit a prompt as a native turn
 $ reposuite-relay status work                # state, runtime, activity, generation
 $ reposuite-relay input work --input in_... --answer q1=alpha   # answer requested input
@@ -79,8 +81,19 @@ count-bounded durable history (`hasMoreBefore`). COLD sessions hold no
 transcript file descriptors and no replay rings — a daemon restoring
 1000 durable sessions costs bookkeeping only.
 
-**Not yet implemented:** OpenCode/Devin adapters, Codex approval
-requests and `turn/steer`, rate-limit surfaces, TUI, Gateway/WSS,
+**Native ACP sessions.** `serve opencode` and `serve devin` create
+durable sessions over the Agent Client Protocol. OpenCode shares one
+`opencode acp` runtime; Devin's runtime is partitioned per process model
+(`devin acp --model`). Resume is always the exact native session
+(`session/load`) — OpenCode's identity is durable from `session/new` (so
+a zero-turn cold resume is exact), while Devin's is persisted only after
+a completed turn and an unproven one is never resumed. Model/mode changes
+go through the runtime's own advertised config options; approvals are
+answered by policy (never converted into requested input, which is
+`UNSUPPORTED_OPERATION` for ACP harnesses).
+
+**Not yet implemented:** Codex approval requests and `turn/steer`,
+rate-limit surfaces, ACP requested-input, TUI, Gateway/WSS,
 cross-platform singleton locking.
 
 ## Layout
@@ -96,6 +109,9 @@ cross-platform singleton locking.
   activity, sleep blockers, bounded process-tree teardown
 - `internal/harness/codex` — Codex app-server adapter (JSON-RPC, protocol types,
   event mapping, deterministic fake app-server for tests)
+- `internal/harness/acp` — shared ACP protocol layer (framing, session/turn
+  mechanics, update routing, approval policy, deterministic fake ACP agent)
+- `internal/harness/devin`, `internal/harness/opencode` — ACP adapters
 - `internal/fixture` — deterministic fixture harness child
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
 - `tools/` — nested developer-tool module: exact `o200k_base` token
@@ -119,8 +135,8 @@ Relay state defaults to `~/.reposuite/relay`
 (`$REPOSUITE_HOME` overrides the RepoSuite root). Nothing is read or written
 under `~/.airelay` — Airelay is a separate legacy product.
 
-The Codex adapter resolves the installed `codex` CLI
-(`exec.LookPath("codex")`) and runs only its own built-in
-`codex app-server` command — clients can never supply a command. Tests
-never call a model: they spawn a deterministic fake app-server (the
-hidden `__fake-codex` mode of the same binary).
+Each adapter resolves the installed CLI itself (`codex` →
+`codex app-server`, `opencode` → `opencode acp`, `devin` → `devin acp
+[--model M]`) — clients can never supply a command or executable. Tests
+never call a model: they spawn a deterministic fake app-server
+(`__fake-codex`) or fake ACP agent (`__fake-acp`) in the same binary.
