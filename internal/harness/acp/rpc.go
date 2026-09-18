@@ -24,7 +24,16 @@ var (
 	// ErrPendingResponse is returned by a server-request handler that will
 	// respond later (deferred permission decisions).
 	ErrPendingResponse = errors.New("response pending")
+	// ErrProtocolCorruption means a response arrived for a request id Relay
+	// never issued or no longer recognizes — the peer is mismatched or
+	// corrupt, so the connection fails closed.
+	ErrProtocolCorruption = errors.New("acp protocol correlation failure")
 )
+
+// maxAbandonedResponses bounds the set of cancelled-request ids whose late
+// responses may still legally arrive. A peer that never answers cancelled
+// calls cannot grow this set; exhausting it is a protocol failure.
+const maxAbandonedResponses = 64
 
 // Handler handles one agent→client request. The request ID is supplied so a
 // handler may defer its response and answer later through Conn.Respond.
@@ -67,13 +76,14 @@ type Conn struct {
 
 	writeMu sync.Mutex
 
-	mu       sync.Mutex
-	nextID   int64
-	pending  map[int64]*Call
-	handlers map[string]Handler
-	onNotify func(method string, params json.RawMessage)
-	closed   bool
-	closeErr error
+	mu        sync.Mutex
+	nextID    int64
+	pending   map[int64]*Call
+	abandoned map[int64]struct{}
+	handlers  map[string]Handler
+	onNotify  func(method string, params json.RawMessage)
+	closed    bool
+	closeErr  error
 
 	scanner *bufio.Scanner
 	done    chan struct{}
@@ -85,11 +95,12 @@ func NewConn(stdin io.Writer, stdout io.Reader) *Conn {
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), MaxFrameBytes)
 	return &Conn{
-		stdin:    stdin,
-		scanner:  sc,
-		pending:  map[int64]*Call{},
-		handlers: map[string]Handler{},
-		done:     make(chan struct{}),
+		stdin:     stdin,
+		scanner:   sc,
+		pending:   map[int64]*Call{},
+		abandoned: map[int64]struct{}{},
+		handlers:  map[string]Handler{},
+		done:      make(chan struct{}),
 	}
 }
 
@@ -142,7 +153,9 @@ func (c *Conn) Start() error {
 		case m.Method != "":
 			c.dispatchNotification(m)
 		case m.ID != nil:
-			c.deliver(*m.ID, m)
+			if !c.deliver(*m.ID, m) {
+				return c.Err()
+			}
 		default:
 			c.fail(fmt.Errorf("%w: frame has neither id nor method", ErrMalformedFrame))
 			return c.Err()
@@ -186,105 +199,32 @@ func (c *Conn) dispatchServerRequest(id int64, m rpcMessage) {
 	_ = c.Respond(id, res)
 }
 
-func (c *Conn) deliver(id int64, m rpcMessage) {
+// deliver routes one response frame to its caller and reports whether the
+// connection may continue. Three cases are distinguished:
+//
+//   - pending:   the live caller consumes the response.
+//   - abandoned: the caller's context ended first — a legal late response,
+//     consumed and forgotten exactly once.
+//   - neither:   an id Relay never issued or no longer recognizes. That is
+//     protocol corruption, not an abandoned call — the connection fails
+//     closed rather than guessing.
+func (c *Conn) deliver(id int64, m rpcMessage) bool {
 	c.mu.Lock()
 	call, ok := c.pending[id]
 	if ok {
 		delete(c.pending, id)
+		c.mu.Unlock()
+		call.ch <- m
+		return true
+	}
+	if _, ok := c.abandoned[id]; ok {
+		delete(c.abandoned, id)
+		c.mu.Unlock()
+		return true
 	}
 	c.mu.Unlock()
-	if !ok {
-		return // response to an abandoned call (caller cancelled)
-	}
-	call.ch <- m
-}
-
-// Call sends one request and waits for its response or ctx/conn end.
-func (c *Conn) Call(ctx context.Context, method string, params any, out any) error {
-	call, err := c.StartCall(method, params)
-	if err != nil {
-		return err
-	}
-	return call.Wait(ctx, out)
-}
-
-// Call is one in-flight request whose response may arrive arbitrarily later
-// (an ACP prompt resolves only when the turn ends).
-type Call struct {
-	conn   *Conn
-	id     int64
-	method string
-	ch     chan rpcMessage
-}
-
-// StartCall writes one request and returns a handle to await. It returns
-// once the frame is written, so a caller can report "accepted" without
-// blocking on a turn.
-func (c *Conn) StartCall(method string, params any) (*Call, error) {
-	raw, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("marshal %s params: %w", method, err)
-	}
-	c.mu.Lock()
-	if c.closed {
-		err := c.closeErr
-		c.mu.Unlock()
-		return nil, err
-	}
-	c.nextID++
-	id := c.nextID
-	call := &Call{
-		conn:   c,
-		id:     id,
-		method: method,
-		ch:     make(chan rpcMessage, 1),
-	}
-	c.pending[id] = call
-	c.mu.Unlock()
-
-	frame := struct {
-		Jsonrpc string          `json:"jsonrpc"`
-		ID      int64           `json:"id"`
-		Method  string          `json:"method"`
-		Params  json.RawMessage `json:"params,omitempty"`
-	}{
-		Jsonrpc: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  raw,
-	}
-	if err := c.write(frame); err != nil {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, fmt.Errorf("write %s: %w", method, err)
-	}
-	return call, nil
-}
-
-// Wait awaits the call's response. A terminal response error, ctx
-// cancellation, or connection end all fail the call.
-func (call *Call) Wait(ctx context.Context, out any) error {
-	c := call.conn
-	select {
-	case m := <-call.ch:
-		if m.Error != nil {
-			return fmt.Errorf("%s: %w", call.method, m.Error)
-		}
-		if out != nil {
-			if err := json.Unmarshal(m.Result, out); err != nil {
-				return fmt.Errorf("decode %s result: %w", call.method, err)
-			}
-		}
-		return nil
-	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.pending, call.id)
-		c.mu.Unlock()
-		return fmt.Errorf("%s: %w", call.method, ctx.Err())
-	case <-c.done:
-		return fmt.Errorf("%s: %w", call.method, c.Err())
-	}
+	c.fail(fmt.Errorf("%w: unexpected response id %d", ErrProtocolCorruption, id))
+	return false
 }
 
 // Notify sends a notification (no response expected).
