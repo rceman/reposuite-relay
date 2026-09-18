@@ -41,7 +41,9 @@ func TestTailBoundedBudget(t *testing.T) {
 	defer tr.Close()
 	appendN(t, tr, 1, 20)
 
-	// Source size of one record.
+	// Source size of one record. Record sizes are NOT uniform (the seq digits
+	// and the nanosecond timestamp length vary), so the byte budget below is
+	// computed from the exact three newest records rather than assumed.
 	recs, _, _, err := tr.TailBounded(1, 0)
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("one-record read: %v %v", recs, err)
@@ -57,13 +59,21 @@ func TestTailBoundedBudget(t *testing.T) {
 		t.Fatalf("tail must be the newest records: %v", seqs(recs))
 	}
 
-	// Byte budget: three records fit exactly; the fourth does not.
-	recs, _, hasMore, err = tr.TailBounded(20, 3*one)
+	// Byte budget: the three newest records fit exactly; the fourth does not.
+	all, _, _, err := tr.TailBounded(20, 0)
+	if err != nil || len(all) != 20 {
+		t.Fatalf("full read: %d %v", len(all), err)
+	}
+	budget := int64(0)
+	for _, r := range all[17:] {
+		budget += int64(len(mustJSON(t, r)) + 1)
+	}
+	recs, _, hasMore, err = tr.TailBounded(20, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(recs) != 3 || !hasMore || recs[0].Seq != 18 {
-		t.Fatalf("byte bound: %v hasMore=%v", seqs(recs), hasMore)
+		t.Fatalf("byte bound: %v hasMore=%v (budget %d, one %d)", seqs(recs), hasMore, budget, one)
 	}
 
 	// Budget for everything: no more-before.
