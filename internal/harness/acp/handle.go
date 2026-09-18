@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Stable handle errors. Adapters map them onto the canonical harness errors.
@@ -47,6 +48,12 @@ type Turn struct {
 
 	done chan struct{}
 
+	// terminal is the terminal-ownership claim: exactly one code path —
+	// the normal prompt response or a runtime-death Fail — may settle the
+	// turn. The loser is discarded, so a turn can never produce two
+	// terminal outcomes under a runtime-death race.
+	terminal atomic.Bool
+
 	mu         sync.Mutex
 	stopReason string
 	usage      *Usage
@@ -64,6 +71,28 @@ func (t *Turn) Result() (stopReason, text, messageID string, usage *Usage, err e
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.stopReason, t.text.String(), t.messageID, t.usage, t.err
+}
+
+// settle records the terminal outcome and unblocks Result exactly once:
+// whichever path runs first owns the result; the loser is discarded.
+func (t *Turn) settle(stopReason string, usage *Usage, err error) bool {
+	if !t.terminal.CompareAndSwap(false, true) {
+		return false
+	}
+	t.mu.Lock()
+	t.stopReason = stopReason
+	t.usage = usage
+	t.err = err
+	t.mu.Unlock()
+	close(t.done)
+	return true
+}
+
+// Fail settles a turn whose prompt response can never arrive — the runtime
+// generation died and took the connection with it. Exactly once with
+// settle: a response that still arrives on a dying connection loses.
+func (t *Turn) Fail(err error) {
+	t.settle("", nil, err)
 }
 
 // Text returns the assistant text accumulated so far (live view).
@@ -219,16 +248,11 @@ func (h *Session) StartPrompt(text string) (*Turn, error) {
 	return turn, nil
 }
 
-// finish records the terminal turn state exactly once.
+// finish records the terminal turn state. The terminal is owned by whichever
+// path settles first: a runtime-death Fail that already won discards this
+// native outcome — the death is the truth.
 func (h *Session) finish(turn *Turn, stopReason string, usage *Usage, err error) {
-	turn.mu.Lock()
-	turn.stopReason = stopReason
-	turn.usage = usage
-	turn.err = err
-	if err != nil && turn.messageID == "" {
-		turn.messageID = ""
-	}
-	turn.mu.Unlock()
+	turn.settle(stopReason, usage, err)
 
 	h.mu.Lock()
 	if h.turn == turn {
@@ -236,7 +260,6 @@ func (h *Session) finish(turn *Turn, stopReason string, usage *Usage, err error)
 	}
 	h.lastText = turn.Text()
 	h.mu.Unlock()
-	close(turn.done)
 }
 
 // Turn returns the in-flight turn, or nil.

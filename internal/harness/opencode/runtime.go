@@ -136,13 +136,12 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 	a.mu.Lock()
 	a.servers = map[string]*acp.Server{}
 	type affected struct {
-		st *sessState
-		m  *session.Managed
+		m    *session.Managed
+		turn *acp.Turn
 	}
 	var (
-		ids      []affected
-		rtID     = rt.ID
-		inFlight []affected
+		ids  []affected
+		rtID = rt.ID
 	)
 	for _, st := range a.sessions {
 		if st.handle == nil {
@@ -153,29 +152,23 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 		}
 		st.srv = nil
 		st.handle = nil
+		// Snapshot the in-flight turn under the lock: it is the ONLY
+		// sessState field the death path may read after unlocking.
 		ids = append(ids, affected{
-			st: st,
-			m:  st.m,
+			m:    st.m,
+			turn: st.turn,
 		})
-		if st.turn != nil {
-			inFlight = append(inFlight, affected{
-				st: st,
-				m:  st.m,
-			})
-		}
 	}
 	a.mu.Unlock()
 
-	// A dead runtime cannot answer: the in-flight turn fails durably and the
-	// session goes COLD with its exact native identity intact.
-	for _, e := range inFlight {
-		_ = a.publishDurable(e.m, api.EventTurnFailed, api.TurnEventPayload{
-			TurnID: e.st.turnID,
-			Error:  "runtime exited: " + reason,
-		})
-		a.deps.Supervisor.SetActivity(e.m.Session.ID, runtime.ActivityIdle)
-	}
 	for _, e := range ids {
+		// The in-flight turn's terminal durable record is owned by
+		// completeTurn — exactly once. Fail only settles the ACP turn so
+		// that single owner publishes it; the death path never publishes
+		// a turn.* record itself.
+		if e.turn != nil {
+			e.turn.Fail(fmt.Errorf("runtime exited: %s", reason))
+		}
 		// Logical state first: runtime.exited is the canonical "this
 		// generation is gone" record, so a reader that sees it must already
 		// observe a settled session.

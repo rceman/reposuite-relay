@@ -143,10 +143,8 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 	a.mu.Lock()
 	delete(a.servers, key)
 	type affected struct {
-		st   *sessState
 		m    *session.Managed
 		turn *acp.Turn
-		id   string
 	}
 	var affectedSessions []affected
 	for _, st := range a.sessions {
@@ -163,24 +161,22 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			// Drop the unproven identity: it must not survive a generation.
 			st.nativeID = ""
 		}
-		// Snapshot the turn under the lock: it must not be re-read after a
-		// concurrent completion or a new prompt has changed it.
+		// Snapshot the turn under the lock: it is the ONLY sessState field
+		// the death path may read after unlocking.
 		affectedSessions = append(affectedSessions, affected{
-			st:   st,
 			m:    st.m,
 			turn: st.turn,
-			id:   st.turnID,
 		})
 	}
 	a.mu.Unlock()
 
 	for _, e := range affectedSessions {
+		// The in-flight turn's terminal durable record is owned by
+		// completeTurn — exactly once. Fail only settles the ACP turn so
+		// that single owner publishes it; the death path never publishes
+		// a turn.* record itself.
 		if e.turn != nil {
-			_ = a.publishDurable(e.m, api.EventTurnFailed, api.TurnEventPayload{
-				TurnID: e.id,
-				Error:  "runtime exited: " + reason,
-			})
-			a.deps.Supervisor.SetActivity(e.m.Session.ID, runtime.ActivityIdle)
+			e.turn.Fail(fmt.Errorf("runtime exited: %s", reason))
 		}
 		_ = a.setSessionState(e.m, session.StateIdle)
 		a.deps.Supervisor.SetActivity(e.m.Session.ID, runtime.ActivityIdle)
