@@ -173,7 +173,13 @@ report each as PASS/FAIL/N/A with evidence.
   closure returns only when the runtime is usable (process started AND
   protocol initialized) and owns reaping any process it started.
 - Every process stop is bounded and reaps the whole process group —
-  leader, descendants, and the app-server's own children.
+  leader, descendants, and the app-server's own children. Process reap
+  alone is not quiescence: adapter-owned goroutines (transport readers,
+  turn-completion workers) may still be finishing durable writes, and
+  crash-path `OnRuntimeGone` runs on a supervisor watcher goroutine.
+  `Supervisor.WaitWatchers()` and each adapter's `WaitQuiescent()` are
+  the drain seams teardown (daemon shutdown, tests) must call after
+  `StopAll` before reclaiming state those goroutines could still touch.
 
 ### Cross-harness semantics (hardened)
 
@@ -231,6 +237,21 @@ report each as PASS/FAIL/N/A with evidence.
 - `internal/harness/harnessenv` is **test-only** scaffolding (real store +
   broker + supervisor + fake-agent command) shared by the adapter suites.
   It is not imported by production code.
+
+## Git remotes
+
+- `origin` is HTTPS (`https://github.com/rceman/reposuite-relay`) and this
+  environment has no HTTPS credential helper or `gh` — `git push` to it
+  fails with "could not read Username". Push over SSH instead, with the
+  explicit URL (no config change needed):
+
+  `git push git@github.com:rceman/reposuite-relay.git <branch>`
+
+  SSH auth as `rceman` works via `~/.ssh/config` (`Host github.com` →
+  `id_rsa_github_rceman`). Verify with `git ls-remote
+  git@github.com:rceman/reposuite-relay.git refs/heads/<branch>` — the
+  local `origin/*` tracking refs do not refresh from URL pushes, so
+  `ls-remote` is the authority on remote state.
 
 ## Repository hygiene
 
