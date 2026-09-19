@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/harnessenv"
 	"github.com/rceman/reposuite-relay/internal/runtime"
@@ -115,4 +116,18 @@ func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
 	if err := e.Supervisor.StopIfIdle(RuntimeKeyFor("")); err != nil {
 		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
 	}
+}
+
+// waitMetrics waits for the adapter's metrics projection to satisfy pred.
+// Usage metrics are merged by the turn-completion worker AFTER the terminal
+// durable record is published, so waiting on message.agent.completed alone
+// does not order against the projection — wait for the value itself.
+func waitMetrics(t *testing.T, a *Adapter, sessionID string, pred func(*harness.SessionMetrics) bool) *harness.SessionMetrics {
+	t.Helper()
+	var got *harness.SessionMetrics
+	harnessenv.WaitFor(t, "metrics projection", func() bool {
+		got = a.Metrics(sessionID)
+		return got != nil && pred(got)
+	})
+	return got
 }

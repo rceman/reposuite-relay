@@ -7,6 +7,7 @@ import (
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/events"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/harnessenv"
 	"github.com/rceman/reposuite-relay/internal/runtime"
@@ -195,6 +196,11 @@ func TestStreamingDeltasAndMetricsAreTransient(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
+	// The usage merge runs on the completion worker after the terminal
+	// durable record — wait for the projection itself before asserting.
+	metrics := waitMetrics(t, a, m.Session.ID, func(mm *harness.SessionMetrics) bool {
+		return mm.InputTokens != nil && *mm.InputTokens == 10
+	})
 	seen := collectEvents(t, sub)
 	if seen[api.EventMessageAgentDelta] == 0 {
 		t.Fatal("no transient message.agent.delta events")
@@ -206,10 +212,6 @@ func TestStreamingDeltasAndMetricsAreTransient(t *testing.T) {
 		if typ == api.EventMessageAgentDelta || typ == api.EventMetricsUpdated {
 			t.Fatalf("%s must not be persisted", typ)
 		}
-	}
-	metrics := a.Metrics(m.Session.ID)
-	if metrics == nil || metrics.InputTokens == nil || *metrics.InputTokens != 10 {
-		t.Fatalf("metrics = %+v", metrics)
 	}
 	if metrics.OutputTokens == nil || *metrics.OutputTokens != 5 {
 		t.Fatalf("output tokens = %+v", metrics.OutputTokens)
@@ -266,4 +268,18 @@ func TestInFlightTurnBlocksRuntimeSleep(t *testing.T) {
 	if err := e.Supervisor.StopIfIdle(RuntimeKey); err != nil {
 		t.Fatalf("StopIfIdle after the turn = %v, want success", err)
 	}
+}
+
+// waitMetrics waits for the adapter's metrics projection to satisfy pred.
+// Usage metrics are merged by the turn-completion worker AFTER the terminal
+// durable record is published, so waiting on message.agent.completed alone
+// does not order against the projection — wait for the value itself.
+func waitMetrics(t *testing.T, a *Adapter, sessionID string, pred func(*harness.SessionMetrics) bool) *harness.SessionMetrics {
+	t.Helper()
+	var got *harness.SessionMetrics
+	harnessenv.WaitFor(t, "metrics projection", func() bool {
+		got = a.Metrics(sessionID)
+		return got != nil && pred(got)
+	})
+	return got
 }

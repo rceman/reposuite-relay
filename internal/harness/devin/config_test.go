@@ -126,10 +126,9 @@ func TestMetricsProjection(t *testing.T) {
 	if contains(completed.Text, "hidden reasoning") {
 		t.Fatalf("assistant text leaked reasoning: %q", completed.Text)
 	}
-	metrics := a.Metrics(m.Session.ID)
-	if metrics == nil || metrics.InputTokens == nil || *metrics.InputTokens != 10 {
-		t.Fatalf("metrics = %+v", metrics)
-	}
+	metrics := waitMetrics(t, a, m.Session.ID, func(mm *harness.SessionMetrics) bool {
+		return mm.InputTokens != nil && *mm.InputTokens == 10
+	})
 	if metrics.ReasoningTokens == nil || *metrics.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %+v", metrics.ReasoningTokens)
 	}
