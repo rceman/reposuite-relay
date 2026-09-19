@@ -55,8 +55,20 @@ func startInProcess(t *testing.T, mutate func(*Options)) (*Daemon, paths.Paths, 
 		t.Fatal(err)
 	}
 	served := make(chan error, 1)
-	go func() { served <- d.Serve() }()
-	t.Cleanup(d.Shutdown)
+	serveDone := make(chan struct{})
+	go func() { served <- d.Serve(); close(serveDone) }()
+	// Shutdown only INITIATES teardown — Serve then runs the quiescence
+	// sequence (stop+reap every runtime, watchers, adapter readers) on its
+	// own goroutine. Cleanup must wait for it: durable writes still in
+	// flight would race this test's TempDir removal otherwise.
+	t.Cleanup(func() {
+		d.Shutdown()
+		select {
+		case <-serveDone:
+		case <-time.After(60 * time.Second):
+			t.Error("daemon did not finish shutdown within 60s")
+		}
+	})
 
 	// Wait until the daemon answers an authenticated ping.
 	deadline := time.Now().Add(4 * time.Second)

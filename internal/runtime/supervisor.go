@@ -108,6 +108,11 @@ type Supervisor struct {
 	bySession map[string]string   // RelaySession ID -> runtime key
 	closed    bool
 
+	// watchWg counts live runtime watch goroutines. It is incremented at
+	// claim time (inside Ensure, before any waiter can observe the claim),
+	// so WaitWatchers can never miss a watcher that still exists.
+	watchWg sync.WaitGroup
+
 	// OnGone is called (without the lock) exactly once per runtime, after
 	// its process tree is gone — whether it exited on its own or was
 	// stopped deliberately. The daemon wires it to adapter cleanup, which
@@ -167,6 +172,9 @@ func (s *Supervisor) Ensure(ctx context.Context, key, kind, newID string, shared
 			activity:  map[string]Activity{},
 			mutations: map[string]struct{}{},
 		}
+		// The claim owns one future watcher: counted before it exists so a
+		// WaitWatchers caller can never slip between spawn and watch start.
+		s.watchWg.Add(1)
 		s.runtimes[key] = rt
 		s.mu.Unlock()
 
@@ -178,12 +186,14 @@ func (s *Supervisor) Ensure(ctx context.Context, key, kind, newID string, shared
 			}
 			rt.resolveReadyLocked()
 			s.mu.Unlock()
+			s.watchWg.Done() // no watcher will run
 			return nil, err
 		}
 		if rt.abandoned || s.runtimes[key] != rt {
 			// Stopped or closed while spawning: never leak the process.
 			s.mu.Unlock()
 			_ = h.Stop()
+			s.watchWg.Done() // no watcher will run
 			return nil, ErrRuntimeGone
 		}
 		rt.h = h
@@ -199,6 +209,7 @@ func (s *Supervisor) Ensure(ctx context.Context, key, kind, newID string, shared
 
 // watch observes the runtime process and reacts to an unexpected exit.
 func (s *Supervisor) watch(rt *Runtime) {
+	defer s.watchWg.Done()
 	<-rt.h.Wait()
 	s.mu.Lock()
 	if cur, ok := s.runtimes[rt.Key]; !ok || cur != rt {
@@ -216,6 +227,14 @@ func (s *Supervisor) watch(rt *Runtime) {
 	if onGone != nil {
 		onGone(rt.Key, rt, ReasonExited)
 	}
+}
+
+// WaitWatchers blocks until every runtime watch goroutine has exited —
+// i.e. every OnGone callback (and whatever cleanup it performs) has fully
+// returned. Callers that tear down state a watcher might still touch (test
+// TempDirs, closing stores) use this to quiesce the supervisor first.
+func (s *Supervisor) WaitWatchers() {
+	s.watchWg.Wait()
 }
 
 // Reasons reported to OnGone.

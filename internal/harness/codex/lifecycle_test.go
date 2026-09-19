@@ -6,7 +6,6 @@ import (
 	"errors"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness"
-	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"os"
 	"testing"
@@ -119,9 +118,7 @@ func TestExactColdResume(t *testing.T) {
 		t.Fatal("session must be COLD after the runtime stops")
 	}
 
-	e.sup = runtime.New()
-	e.sup.OnGone = e.adapter.OnRuntimeGone
-	e.adapter.deps.Supervisor = e.sup
+	e.swapSupervisor()
 	res2, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "second"})
 	if err != nil {
 		t.Fatal(err)
@@ -171,12 +168,7 @@ func TestResumeFailureIsExplicit(t *testing.T) {
 	// The runtime restarts as a fake that cannot resume.
 	os.Setenv("FAKE_CODEX_MODE", "resume-error")
 	defer os.Setenv("FAKE_CODEX_MODE", "happy")
-	if err := e.sup.StopAll(); err != nil {
-		t.Fatal(err)
-	}
-	e.sup = runtime.New()
-	e.sup.OnGone = e.adapter.OnRuntimeGone
-	e.adapter.deps.Supervisor = e.sup
+	e.swapSupervisor()
 
 	_, err = e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "second"})
 	if !errors.Is(err, ErrNativeSessionLost) {

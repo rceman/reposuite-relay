@@ -172,7 +172,7 @@ func TestCodexNativeServerNotExposed(t *testing.T) {
 	t.Setenv("FAKE_CODEX_MODE", "happy")
 	_, p, c, _ := startInProcess(t, codexOptions)
 
-	before := listeningPorts(t)
+	before := descendantListeningPorts(t)
 	serveCodex(t, c, "private")
 	ctx, cancel := tctx(t)
 	defer cancel()
@@ -180,10 +180,10 @@ func TestCodexNativeServerNotExposed(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDurableTypes(t, c, "private", api.EventMessageAgentCompleted)
-	after := listeningPorts(t)
+	after := descendantListeningPorts(t)
 	for port := range after {
 		if !before[port] {
-			t.Fatalf("a new listening socket appeared on port %d", port)
+			t.Fatalf("a spawned child opened a listening socket on port %d", port)
 		}
 	}
 

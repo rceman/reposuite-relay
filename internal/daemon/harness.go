@@ -43,6 +43,19 @@ func (d *Daemon) entryFor(name string) (adapterEntry, bool) {
 	return e, ok
 }
 
+// quiesceAdapters drains adapter-owned goroutines (transport readers,
+// turn-completion workers) that may still be finishing durable writes once
+// every runtime process is reaped. Adapters that own such goroutines
+// expose a drain seam; harnesses without one (fixture) have nothing to
+// drain.
+func (d *Daemon) quiesceAdapters() {
+	for _, e := range d.adapters {
+		if q, ok := e.adapter.(interface{ WaitQuiescent() }); ok {
+			q.WaitQuiescent()
+		}
+	}
+}
+
 // onRuntimeGone fans the supervisor's runtime-removal notification out to
 // every adapter. Each adapter ignores runtime keys it does not own, and a
 // runtime key belongs to exactly one harness family.

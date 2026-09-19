@@ -43,7 +43,15 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd string) (*Server, error
 			if err != nil {
 				return nil, err
 			}
-			go srv.Serve()
+			// The reader is counted at spawn time — inside the claim-first
+			// closure, before Ensure returns — so WaitQuiescent can never
+			// miss a live reader, even after OnRuntimeGone forgets the
+			// server itself.
+			a.wg.Add(1)
+			go func() {
+				_ = srv.Serve()
+				a.wg.Done()
+			}()
 			initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 			defer cancel()
 			if _, err := srv.Initialize(initCtx, ClientInfo{
@@ -124,7 +132,8 @@ func (a *Adapter) installHandlers(srv *Server) {
 func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) {
 	type boundSession struct {
 		st      *sessState
-		current *activeTurn
+		turnID  string
+		hasTurn bool
 	}
 	a.mu.Lock()
 	srv := a.servers[key]
@@ -132,13 +141,16 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 	affected := make([]boundSession, 0, len(a.sessions))
 	for _, st := range a.sessions {
 		if st.liveKey == key {
-			// Capture the in-flight turn under the lock: it is the turn
-			// this generation owned, and it must not be re-read after a
-			// concurrent prompt has started the next generation.
-			affected = append(affected, boundSession{
-				st:      st,
-				current: st.current,
-			})
+			// Snapshot the in-flight turn's identity under the lock: the
+			// activeTurn itself keeps mutating under a.mu (prompt writes
+			// its turnID, deltas append text), so it must never be
+			// dereferenced after the lock is released.
+			entry := boundSession{st: st}
+			if st.current != nil {
+				entry.hasTurn = true
+				entry.turnID = st.current.turnID
+			}
+			affected = append(affected, entry)
 		}
 	}
 	for _, entry := range affected {
@@ -160,8 +172,7 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 		}
 	}
 	for _, entry := range affected {
-		st, current := entry.st, entry.current
-		m := st.m
+		st, m := entry.st, entry.st.m
 		// Every affected session records the generation's end — a deliberate
 		// sleep ends a generation just as surely as a crash does.
 		_ = a.publishDurable(m, api.EventRuntimeExited, api.RuntimeExitedPayload{
@@ -176,9 +187,9 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 			a.mu.Unlock()
 			continue
 		}
-		if current != nil {
+		if entry.hasTurn {
 			_ = a.publishDurable(m, api.EventTurnFailed, api.TurnEventPayload{
-				TurnID: current.turnID,
+				TurnID: entry.turnID,
 				Error:  "runtime exited: " + detail,
 			})
 		}

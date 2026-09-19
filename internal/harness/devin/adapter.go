@@ -107,6 +107,9 @@ type Adapter struct {
 	byNative map[string]string
 	// servers is the live runtime generation per runtime key.
 	servers map[string]*acp.Server
+	// wg counts adapter-owned goroutines: transport readers and spawned
+	// turn-completion workers.
+	wg sync.WaitGroup
 }
 
 // sessState is the adapter's per-session state; nothing here is durable.
@@ -334,6 +337,25 @@ func (a *Adapter) setMetrics(sessionID string, metrics *harness.SessionMetrics) 
 	if st := a.sessions[sessionID]; st != nil {
 		st.metrics = metrics
 	}
+}
+
+// spawnTurn runs completeTurn for turn on a worker goroutine tracked by
+// a.wg, so WaitQuiescent drains it.
+func (a *Adapter) spawnTurn(m *session.Managed, handle *acp.Session, turn *acp.Turn) {
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.completeTurn(m, handle, turn)
+	}()
+}
+
+// WaitQuiescent blocks until no adapter-owned goroutine can still mutate
+// session state: every spawned turn-completion worker has finished and
+// every transport reader has exited (including a handler in flight for an
+// already-dead runtime). Teardown paths call this after stopping runtimes
+// so no goroutine can still write durable state.
+func (a *Adapter) WaitQuiescent() {
+	a.wg.Wait()
 }
 
 // publishMetrics publishes a transient metrics update when there is anything to

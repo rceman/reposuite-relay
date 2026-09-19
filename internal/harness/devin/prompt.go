@@ -77,7 +77,7 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	a.mu.Unlock()
 	_ = a.setSessionState(m, session.StateActive)
 
-	go a.completeTurn(m, handle, turn)
+	a.spawnTurn(m, handle, turn)
 	return harness.PromptResult{
 		TurnID:          turn.ID,
 		NativeSessionID: handle.ID(),

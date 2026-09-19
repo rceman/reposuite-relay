@@ -92,6 +92,12 @@ type Env struct {
 	// ACPState is the fake agent's native store root (shared by every runtime
 	// generation the test spawns, which is what makes exact resume real).
 	ACPState string
+	// Drain, when set by the adapter under test, blocks until no
+	// adapter-owned goroutine can still write durable state (in-flight
+	// turn completion, transport readers). It runs in cleanup AFTER all
+	// runtimes are stopped and reaped, so no async write can race the
+	// TempDir removal that follows the test.
+	Drain func()
 }
 
 // New builds the scaffolding. StopAll runs on cleanup.
@@ -110,7 +116,13 @@ func New(t *testing.T) *Env {
 		Supervisor: sup,
 		ACPState:   filepath.Join(t.TempDir(), "acp-state"),
 	}
-	t.Cleanup(func() { _ = sup.StopAll() })
+	t.Cleanup(func() {
+		_ = sup.StopAll()
+		sup.WaitWatchers()
+		if e.Drain != nil {
+			e.Drain()
+		}
+	})
 	return e
 }
 

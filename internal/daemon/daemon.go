@@ -321,6 +321,13 @@ func (d *Daemon) Serve() error {
 	if err := d.supervisor.StopAll(); err != nil {
 		fmt.Fprintf(os.Stderr, "relayd: stop runtimes: %v\n", err)
 	}
+	// Runtime watchers report unexpected exits asynchronously; their
+	// OnRuntimeGone callbacks write durable state, so shutdown is not
+	// quiescent until every watcher has returned. Adapter-owned goroutines
+	// (transport readers, turn-completion workers) may likewise still be
+	// finishing their final writes now that every process is reaped.
+	d.supervisor.WaitWatchers()
+	d.quiesceAdapters()
 	return nil
 }
 

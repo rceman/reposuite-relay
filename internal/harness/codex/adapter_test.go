@@ -48,16 +48,35 @@ func newEnv(t *testing.T, mode string) *env {
 	t.Setenv("RELAY_FAKE_APP_SERVER", "1")
 	t.Setenv("FAKE_CODEX_MODE", mode)
 	// StopAll runs BEFORE the temp root is removed (t.Cleanup is LIFO, and
-	// t.TempDir was registered first). Waiting for in-flight turns to settle
-	// afterwards keeps the terminal-record writes inside the test's lifetime
-	// instead of racing TempDir cleanup.
+	// t.TempDir was registered first). The drain order is deterministic:
+	// reap every runtime, wait for crash watchers to finish OnRuntimeGone,
+	// then wait for every transport reader goroutine to exit — after that
+	// no adapter goroutine can still write into the temp root. (Tests may
+	// swap e.sup, so the current supervisor is drained, not the captured
+	// one.)
 	t.Cleanup(func() {
-		_ = sup.StopAll()
+		_ = e.sup.StopAll()
+		e.sup.WaitWatchers()
+		e.adapter.WaitQuiescent()
 		waitFor(t, "in-flight turns to settle", func() bool {
 			return e.adapter.turnsInFlight() == 0
 		})
 	})
 	return e
+}
+
+// swapSupervisor replaces the env's supervisor with a fresh one — a daemon
+// restart shape. It first drains the old generation completely: runtimes
+// stopped and reaped, crash watchers finished, transport readers exited —
+// so no goroutine can still read deps.Supervisor while it is swapped.
+func (e *env) swapSupervisor() {
+	e.t.Helper()
+	_ = e.sup.StopAll()
+	e.sup.WaitWatchers()
+	e.adapter.WaitQuiescent()
+	e.sup = runtime.New()
+	e.sup.OnGone = e.adapter.OnRuntimeGone
+	e.adapter.deps.Supervisor = e.sup
 }
 
 // materialize mirrors the daemon's durable metadata mutation.

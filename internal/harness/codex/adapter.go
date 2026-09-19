@@ -51,6 +51,8 @@ type Adapter struct {
 	sessions map[string]*sessState // by RelaySession ID
 	threads  map[string]string     // native thread ID -> RelaySession ID
 	servers  map[string]*Server    // by runtime key
+	// wg counts adapter-owned goroutines: each runtime's transport reader.
+	wg sync.WaitGroup
 }
 
 type sessState struct {
@@ -253,6 +255,15 @@ func (a *Adapter) publishTransient(m *session.Managed, typ string, payload any) 
 // diag prints a bounded diagnostic line to stderr (never a log file).
 func diag(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "relayd: codex: "+format+"\n", args...)
+}
+
+// WaitQuiescent blocks until no adapter-owned goroutine can still mutate
+// session state: every transport reader has exited (all
+// notification/request handlers run on it, including a handler in flight
+// for an already-dead runtime). Teardown paths call this after stopping
+// runtimes so no handler can still write durable state.
+func (a *Adapter) WaitQuiescent() {
+	a.wg.Wait()
 }
 
 // turnsInFlight reports how many sessions have an in-flight turn. It exists so

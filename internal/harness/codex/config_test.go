@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/harness"
-	"github.com/rceman/reposuite-relay/internal/runtime"
 )
 
 // TestConfigChangeDuringTurnIsBusyAppliesAfterwards: a config change while a
@@ -59,12 +58,7 @@ func TestConfigChangeDuringTurnIsBusyAppliesAfterwards(t *testing.T) {
 	}
 	os.Setenv("FAKE_CODEX_MODE", "happy")
 	defer os.Setenv("FAKE_CODEX_MODE", "input")
-	if err := e.sup.StopAll(); err != nil {
-		t.Fatal(err)
-	}
-	e.sup = runtime.New()
-	e.sup.OnGone = e.adapter.OnRuntimeGone
-	e.adapter.deps.Supervisor = e.sup
+	e.swapSupervisor()
 	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "again"}); err != nil {
 		t.Fatal(err)
 	}

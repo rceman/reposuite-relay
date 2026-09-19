@@ -180,9 +180,18 @@ func TestCodexDaemonRestartExactResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Shutdown()
 	served2 := make(chan error, 1)
 	go func() { served2 <- second.Serve() }()
+	// Shutdown only initiates teardown; wait for Serve to finish draining
+	// (runtime stops, watchers, adapter readers) inside the test lifetime.
+	defer func() {
+		second.Shutdown()
+		select {
+		case <-served2:
+		case <-time.After(20 * time.Second):
+			t.Error("second daemon did not shut down")
+		}
+	}()
 	c2 := dialClient(t, p)
 	ctx2, cancel2 := tctx(t)
 	defer cancel2()

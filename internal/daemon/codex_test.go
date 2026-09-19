@@ -90,12 +90,17 @@ func dialClient(t *testing.T, p paths.Paths) *client.Client {
 	return nil
 }
 
-// listeningPorts returns every listening TCP port visible in this network
-// namespace (Linux /proc). Used to prove the native app-server never opens
-// a listener: it is a stdio child of relayd only.
-func listeningPorts(t *testing.T) map[int]bool {
+// descendantListeningPorts returns listening TCP ports owned by
+// descendants of this test process — relayd's spawned children (native
+// harness servers, fixture children). The invariant being proven is "a
+// native child never opens a listener", so only sockets owned by the
+// child tree count: the daemon's own loopback control plane is owned by
+// the test process itself, and unrelated listeners elsewhere in the
+// network namespace cannot flake the check (Linux /proc).
+func descendantListeningPorts(t *testing.T) map[int]bool {
 	t.Helper()
-	out := map[int]bool{}
+	// LISTEN socket inode -> port.
+	listen := map[string]int{}
 	for _, f := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
 		raw, err := os.ReadFile(f)
 		if err != nil {
@@ -103,16 +108,80 @@ func listeningPorts(t *testing.T) map[int]bool {
 		}
 		for _, line := range strings.Split(string(raw), "\n") {
 			fields := strings.Fields(line)
-			if len(fields) < 4 || fields[3] != "0A" { // 0A = LISTEN
+			if len(fields) < 10 || fields[3] != "0A" { // 0A = LISTEN
 				continue
 			}
 			_, portHex, ok := strings.Cut(fields[1], ":")
 			if !ok {
 				continue
 			}
-			port, err := strconv.ParseInt(portHex, 16, 32)
-			if err == nil {
-				out[int(port)] = true
+			if port, err := strconv.ParseInt(portHex, 16, 32); err == nil {
+				listen[fields[9]] = int(port)
+			}
+		}
+	}
+	out := map[int]bool{}
+	for pid := range descendants(t) {
+		dir := "/proc/" + strconv.Itoa(pid) + "/fd"
+		fds, err := os.ReadDir(dir)
+		if err != nil {
+			continue // exited meanwhile
+		}
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(dir, fd.Name()))
+			if err != nil || !strings.HasPrefix(link, "socket:[") || !strings.HasSuffix(link, "]") {
+				continue
+			}
+			if port, ok := listen[link[len("socket:["):len(link)-1]]; ok {
+				out[port] = true
+			}
+		}
+	}
+	return out
+}
+
+// descendants returns the PIDs of the test process's descendant tree
+// (children relayd spawned, and their children).
+func descendants(t *testing.T) map[int]bool {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Skipf("cannot read /proc: %v", err)
+	}
+	parent := map[int]int{}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue // exited meanwhile
+		}
+		// comm is parenthesized and may itself contain ')' — ppid follows
+		// the LAST ')' (field 4 after it is index 1).
+		line := string(raw)
+		i := strings.LastIndexByte(line, ')')
+		if i < 0 {
+			continue
+		}
+		f := strings.Fields(line[i+1:])
+		if len(f) < 2 {
+			continue
+		}
+		ppid, err := strconv.Atoi(f[1])
+		if err == nil {
+			parent[pid] = ppid
+		}
+	}
+	self := os.Getpid()
+	out := map[int]bool{}
+	for changed := true; changed; {
+		changed = false
+		for pid, ppid := range parent {
+			if pid != self && !out[pid] && (ppid == self || out[ppid]) {
+				out[pid] = true
+				changed = true
 			}
 		}
 	}

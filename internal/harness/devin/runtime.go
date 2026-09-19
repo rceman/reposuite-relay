@@ -49,7 +49,15 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd, model string) (*acp.Se
 			if err != nil {
 				return nil, err
 			}
-			go srv.Serve()
+			// The reader is counted at spawn time — inside the claim-first
+			// closure, before Ensure returns — so WaitQuiescent can never
+			// miss a live reader, even after OnRuntimeGone forgets the
+			// server itself.
+			a.wg.Add(1)
+			go func() {
+				_ = srv.Serve()
+				a.wg.Done()
+			}()
 			srv.Configure(acp.ServerConfig{
 				Client: acp.ClientInfo{
 					Name:    "reposuite-relay",

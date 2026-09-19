@@ -72,7 +72,16 @@ func TestDaemonRestartRestoresACPSessionsColdAndResumesExactly(t *testing.T) {
 	}
 	served2 := make(chan error, 1)
 	go func() { served2 <- d2.Serve() }()
-	t.Cleanup(d2.Shutdown)
+	// Shutdown only initiates teardown; wait for Serve to finish draining
+	// (runtime stops, watchers, adapter readers) inside the test lifetime.
+	t.Cleanup(func() {
+		d2.Shutdown()
+		select {
+		case <-served2:
+		case <-time.After(20 * time.Second):
+			t.Error("second daemon did not shut down")
+		}
+	})
 	c2 := dialClient(t, p)
 
 	// Restored COLD: no process, identity intact.

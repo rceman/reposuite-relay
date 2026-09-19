@@ -38,6 +38,7 @@ func newEnv(t *testing.T, mode string) (*harnessenv.Env, *Adapter) {
 		Version: "test",
 	})
 	e.Supervisor.OnGone = a.OnRuntimeGone
+	e.Drain = a.WaitQuiescent
 	return e, a
 }
 
