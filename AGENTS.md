@@ -238,6 +238,12 @@ report each as PASS/FAIL/N/A with evidence.
   broker + supervisor + fake-agent command) shared by the adapter suites.
   It is not imported by production code.
 
+## Task reports
+
+- For prompt-driven tasks (a message with `PROMPT_ID:`), always end the
+  final report with the `PROMPT_ID:` line — and `PROMPT_STATUS:
+  COMPLETE` / `BLOCKED` when the prompt defines it.
+
 ## Git remotes
 
 - `origin` is HTTPS (`https://github.com/rceman/reposuite-relay`) and this
