@@ -56,10 +56,11 @@ func (c Config) Validate() error {
 }
 
 // Load reads and strictly validates the config. Missing file →
-// os.ErrNotExist (unconfigured is a state, not an error). Malformed or
-// unsupported content is a hard error — the caller must fail closed.
+// os.ErrNotExist (unconfigured is a state, not an error). Malformed,
+// oversized, trailing-content, or owner-exposed content is a hard error —
+// the caller must fail closed.
 func Load(path string) (Config, error) {
-	raw, err := readRegular(path, maxFile)
+	raw, err := readRegular(path)
 	if err != nil {
 		return Config{}, err
 	}
@@ -68,6 +69,12 @@ func Load(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("relay config %s: %w", path, err)
+	}
+	// Exactly one JSON value: a second Decode must hit EOF — trailing
+	// garbage or a second object fails closed.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return Config{}, fmt.Errorf("relay config %s: trailing content after the JSON object", path)
 	}
 	if err := c.Validate(); err != nil {
 		return Config{}, fmt.Errorf("relay config %s: %w", path, err)
@@ -120,9 +127,10 @@ func Commit(path string, c Config) error {
 	return nil
 }
 
-// readRegular reads a bounded regular file (config must not be a symlink
-// or special file).
-func readRegular(path string, max int64) ([]byte, error) {
+// readRegular reads a bounded, owner-private regular file: a symlink or
+// special file, any group/other permission bits, or content exceeding the
+// bound all fail closed — a truncated prefix is never parsed as valid.
+func readRegular(path string) ([]byte, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -130,12 +138,41 @@ func readRegular(path string, max int64) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("relay config %s: mode %o exposes group/other; owner-private required",
+			path, fi.Mode().Perm())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, max))
+	raw, err := io.ReadAll(io.LimitReader(f, maxFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxFile {
+		return nil, fmt.Errorf("relay config %s: exceeds %d-byte bound", path, maxFile)
+	}
+	return raw, nil
+}
+
+// RequirePrivateDir fails closed when dir exposes group/other permission
+// bits — durable config/credentials live under it. It never chmods:
+// silently tightening an already-exposed directory does not un-expose it.
+func RequirePrivateDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("config dir %s: %w", dir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("config dir %s is not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("config dir %s: mode %o exposes group/other; owner-private required",
+			dir, fi.Mode().Perm())
+	}
+	return nil
 }
 
 // syncDir fsyncs a directory so entry changes are durable.

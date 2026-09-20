@@ -128,3 +128,118 @@ func TestCommitAtomicNoPartialFile(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadStrictlySingleJSON: exactly one JSON value — trailing
+// whitespace is fine, a second value or garbage fails closed.
+func TestLoadStrictlySingleJSON(t *testing.T) {
+	valid := `{"schemaVersion":1,"listenHost":"127.0.0.1","listenPort":17432}`
+	dir := t.TempDir()
+
+	// Trailing whitespace/newline stays valid.
+	path := filepath.Join(dir, "ok.json")
+	if err := os.WriteFile(path, []byte(valid+"\n \t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("trailing whitespace must stay valid: %v", err)
+	}
+
+	for name, raw := range map[string]string{
+		"second-object":    valid + "\n{}",
+		"trailing-garbage": valid + "\ngarbage",
+		"trailing-token":   valid + " null",
+		"concatenated":     valid + valid,
+	} {
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("%s: trailing content must fail closed", name)
+		}
+	}
+}
+
+// TestLoadOversizeFails: a file larger than the bound fails closed — the
+// bounded prefix is never parsed into something accidentally valid.
+func TestLoadOversizeFails(t *testing.T) {
+	dir := t.TempDir()
+	valid := `{"schemaVersion":1,"listenHost":"127.0.0.1","listenPort":1}`
+	// A valid object padded past the bound with whitespace: prefix-parse
+	// would have accepted it.
+	big := valid + strings.Repeat(" ", maxFile)
+	path := filepath.Join(dir, "relay.json")
+	if err := os.WriteFile(path, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("oversized config must fail closed")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != big {
+		t.Fatal("oversized config was rewritten")
+	}
+}
+
+// TestLoadFileMode: owner-private only — group/other exposure fails
+// closed and is never chmod-repaired.
+func TestLoadFileMode(t *testing.T) {
+	dir := t.TempDir()
+	valid := `{"schemaVersion":1,"listenHost":"127.0.0.1","listenPort":1}`
+	for name, mode := range map[string]os.FileMode{
+		"0600": 0o600,
+		"0400": 0o400,
+	} {
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, []byte(valid), mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err != nil {
+			t.Fatalf("mode %o must load: %v", mode, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o666} {
+		path := filepath.Join(dir, "bad.json")
+		if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("mode %o must fail closed", mode)
+		}
+		fi, _ := os.Stat(path)
+		if fi.Mode().Perm() != mode {
+			t.Fatalf("mode %o was silently repaired", mode)
+		}
+	}
+}
+
+// TestRequirePrivateDir: fresh 0700 passes; group/other bits fail closed
+// without repair.
+func TestRequirePrivateDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	priv := filepath.Join(dir, "config")
+	if err := os.Mkdir(priv, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequirePrivateDir(priv); err != nil {
+		t.Fatalf("0700 dir must pass: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o755, 0o750, 0o705} {
+		if err := os.Chmod(priv, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := RequirePrivateDir(priv); err == nil {
+			t.Fatalf("mode %o dir must fail closed", mode)
+		}
+	}
+	fi, _ := os.Stat(priv)
+	if fi.Mode().Perm() != 0o705 {
+		t.Fatal("RequirePrivateDir silently chmodded")
+	}
+}

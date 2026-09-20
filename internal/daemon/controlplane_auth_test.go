@@ -9,6 +9,7 @@ import (
 
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/auth"
+	"github.com/rceman/reposuite-relay/internal/paths"
 )
 
 // TestMachineTokenLifecycle: first start mints the persistent token,
@@ -145,5 +146,47 @@ func TestRootPathPlaceholder(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("anonymous /v1 status %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestInsecureConfigStateFailsClosed: pre-existing owner-exposed
+// control-plane state fails startup — insecure relay.json, insecure
+// api.token, or an insecure config directory. Nothing is repaired and no
+// readiness descriptor is published.
+func TestInsecureConfigStateFailsClosed(t *testing.T) {
+	validCfg := `{"schemaVersion":1,"listenHost":"127.0.0.1","listenPort":1}`
+	tok, err := auth.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(t *testing.T, p paths.Paths){
+		"insecure-config-file": func(t *testing.T, p paths.Paths) {
+			if err := os.WriteFile(p.RelayConfig(), []byte(validCfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"insecure-token-file": func(t *testing.T, p paths.Paths) {
+			if err := os.WriteFile(p.MachineToken(), []byte(tok+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"insecure-config-dir": func(t *testing.T, p paths.Paths) {
+			if err := os.Chmod(p.ConfigDir(), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range cases {
+		p := testPaths(t)
+		if err := p.Ensure(); err != nil {
+			t.Fatal(err)
+		}
+		plant(t, p)
+		if _, err := Start(p, Options{SelfExe: testBinary()}); err == nil {
+			t.Fatalf("%s: insecure control-plane state must fail startup", name)
+		}
+		if _, err := os.Stat(p.DaemonDescriptor()); !os.IsNotExist(err) {
+			t.Fatalf("%s: readiness descriptor published for failed startup", name)
+		}
 	}
 }

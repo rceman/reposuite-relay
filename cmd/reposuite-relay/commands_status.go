@@ -32,6 +32,10 @@ type statusReport struct {
 	Active            int     `json:"active"`
 	Cold              int     `json:"cold"`
 	APIAuthConfigured bool    `json:"apiAuthConfigured"`
+	// APIAuthStatus distinguishes a missing credential ("missing") from a
+	// present-but-malformed/insecure one ("invalid") — corruption is
+	// surfaced, never masked as "not configured".
+	APIAuthStatus string `json:"apiAuthStatus"`
 }
 
 // cmdStatus implements `reposuite-relay status [--json]` — the product
@@ -69,9 +73,14 @@ func cmdStatus(args []string) int {
 	}
 
 	// Machine API auth presence: the credential file is validated, never
-	// read into output.
-	if tok, err := auth.Load(p.MachineToken()); err == nil && auth.Valid(tok) {
+	// read into output. Missing is "not configured"; present but
+	// malformed/oversized/insecure is surfaced as "invalid" — never masked.
+	rep.APIAuthStatus = "missing"
+	if _, err := auth.Load(p.MachineToken()); err == nil {
 		rep.APIAuthConfigured = true
+		rep.APIAuthStatus = "configured"
+	} else if !errors.Is(err, os.ErrNotExist) {
+		rep.APIAuthStatus = "invalid"
 	}
 
 	// A live daemon generation? Dial validates the descriptor and
@@ -135,6 +144,8 @@ func printStatus(r statusReport) {
 	auth := "not configured"
 	if r.APIAuthConfigured {
 		auth = "configured"
+	} else if r.APIAuthStatus == "invalid" {
+		auth = "INVALID (malformed or insecure credential)"
 	}
 	fmt.Printf("API auth:     %s\n", auth)
 }

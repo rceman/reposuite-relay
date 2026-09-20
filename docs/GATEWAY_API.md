@@ -40,6 +40,12 @@ Authorization: Bearer <contents of api.token>
 
 - The token is 256 bits, hex-encoded, owner-private (`0600`). It is never
   returned by any API, never in `daemon.json`, never printed by `status`.
+- Credential strictness is fail-closed: `api.token` must be a regular file
+  with mode exactly `0600` and a single bounded line — a malformed,
+  oversized, symlinked, or owner-exposed credential fails startup and is
+  never silently repaired or rewritten. The same owner-private rule
+  applies to `config/relay.json` and the `config/` directory (no
+  group/other permission bits).
 - Comparison is constant-time. A missing or wrong bearer gets one uniform
   response: `401 {"error":{"code":"UNAUTHORIZED",...}}` — no
   secret-specific difference.
@@ -53,7 +59,7 @@ relay.token_file = ~/.reposuite/relay/config/api.token
 
 ## API version
 
-`apiVersion: 1`, reported by `GET /v1/daemon` as `daemon.apiVersion`.
+`apiVersion: 2`, reported by `GET /v1/daemon` as `daemon.apiVersion`.
 Clients must check it — an incompatible peer must not be sent commands.
 
 ## Endpoints
@@ -67,7 +73,7 @@ Request bodies are bounded at 64 KiB.
 Daemon identity and counters.
 
 ```json
-{"daemon":{"instanceId":"<hex32>","pid":1234,"apiVersion":1,
+{"daemon":{"instanceId":"<hex32>","pid":1234,"apiVersion":2,
            "uptimeSeconds":123.4,"sessionCount":18,
            "activeSessions":3,"coldSessions":15}}
 ```
@@ -190,6 +196,24 @@ the next start.
 | `501 UNSUPPORTED_OPERATION` | capability mismatch (ACP input, overrides) |
 | `502 RUNTIME_UNAVAILABLE` | native runtime failed to start |
 | `503 DAEMON_SHUTTING_DOWN` | mutating call during shutdown |
+
+## Local diagnostics
+
+`reposuite-relay status --json` emits a stable machine-readable report
+(no secrets):
+
+```json
+{"running":true,"configured":true,"status":"running","pid":1234,
+ "address":"127.0.0.1:17432","webUrl":"http://127.0.0.1:17432/",
+ "apiUrl":"http://127.0.0.1:17432/v1","uptimeSeconds":12345,
+ "apiVersion":2,"sessions":18,"active":3,"cold":15,
+ "apiAuthConfigured":true,"apiAuthStatus":"configured"}
+```
+
+`status` is `running`|`stopped`|`unreachable`. `apiAuthStatus` is
+`missing` (no credential), `configured` (valid 0600 credential), or
+`invalid` (present but malformed/oversized/insecure — surfaced, never
+masked). Runtime-only fields are omitted when stopped.
 
 ## Invariants a client can rely on
 

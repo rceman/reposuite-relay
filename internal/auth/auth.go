@@ -25,6 +25,11 @@ import (
 // characters on disk.
 const tokenBytes = 32
 
+// maxFile bounds a credential read — the canonical file is 65 bytes
+// (64 hex + newline); anything beyond this bound is malformed, and an
+// oversized file is rejected rather than truncated to a valid prefix.
+const maxFile = 128
+
 // Generate returns a fresh 256-bit bearer token (64 lowercase hex).
 func Generate() (string, error) {
 	var b [tokenBytes]byte
@@ -121,8 +126,11 @@ func commit(path, tok string) error {
 	return nil
 }
 
-// readRegular reads a bounded regular file (a credential must not be a
-// symlink or special file).
+// readRegular reads a bounded, owner-private regular file: a symlink or
+// special file, any mode other than exactly 0600, or content exceeding
+// the bound all fail closed — a truncated prefix is never parsed as a
+// valid credential, and an already-exposed secret is never silently
+// repaired.
 func readRegular(path string) ([]byte, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -131,12 +139,23 @@ func readRegular(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
+	if fi.Mode().Perm() != 0o600 {
+		return nil, fmt.Errorf("machine token %s: mode %o, want 0600 owner-private",
+			path, fi.Mode().Perm())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, 1<<10))
+	raw, err := io.ReadAll(io.LimitReader(f, maxFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxFile {
+		return nil, fmt.Errorf("machine token %s: exceeds %d-byte bound", path, maxFile)
+	}
+	return raw, nil
 }
 
 // syncDir fsyncs a directory so entry changes are durable.

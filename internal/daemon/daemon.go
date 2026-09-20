@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/auth"
+	"github.com/rceman/reposuite-relay/internal/config"
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/runtime"
@@ -83,6 +84,13 @@ func Run(p paths.Paths, selfExe string) error {
 // seams via Options before serving begins.
 func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	if err := p.Ensure(); err != nil {
+		return nil, err
+	}
+	// The durable config domain must be owner-private before any of it is
+	// trusted. A pre-existing broader mode fails closed — Relay never
+	// silently tightens a directory that may already have exposed a
+	// credential.
+	if err := config.RequirePrivateDir(p.ConfigDir()); err != nil {
 		return nil, err
 	}
 	d := &Daemon{

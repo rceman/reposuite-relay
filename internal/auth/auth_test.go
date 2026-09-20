@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,66 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	}
 	if _, err := Load(link); err == nil {
 		t.Fatal("symlink token must fail closed")
+	}
+}
+
+// TestLoadOversizeFails: an oversized credential fails closed — a
+// truncated prefix is never normalized into a valid token.
+func TestLoadOversizeFails(t *testing.T) {
+	tok, _ := Generate()
+	dir := t.TempDir()
+	for name, raw := range map[string]string{
+		// Pathological: valid token + excessive CR/LF — oversized file.
+		"huge-newlines": tok + strings.Repeat("\r\n", maxFile),
+		"padding":       tok + "\n" + strings.Repeat(" ", maxFile),
+		"two-tokens":    tok + "\n" + tok,
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("%s: oversized credential must fail closed", name)
+		}
+		if _, err := Ensure(path); err == nil {
+			t.Fatalf("%s: Ensure must fail, not replace", name)
+		}
+		after, _ := os.ReadFile(path)
+		if string(after) != raw {
+			t.Fatalf("%s: oversized credential was rewritten", name)
+		}
+	}
+}
+
+// TestLoadFileMode: exactly 0600 — any other mode fails closed, and the
+// file is never chmod-repaired or rewritten.
+func TestLoadFileMode(t *testing.T) {
+	tok, _ := Generate()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.token")
+	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(path); err != nil || got != tok {
+		t.Fatalf("0600 token must load: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o666, 0o604, 0o400} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("mode %o credential must fail closed", mode)
+		}
+		if _, err := Ensure(path); err == nil {
+			t.Fatalf("mode %o: Ensure must fail, not replace", mode)
+		}
+		fi, _ := os.Stat(path)
+		if fi.Mode().Perm() != mode {
+			t.Fatalf("mode %o was silently repaired", mode)
+		}
+		after, _ := os.ReadFile(path)
+		if string(after) != tok+"\n" {
+			t.Fatalf("mode %o: token bytes changed", mode)
+		}
 	}
 }
