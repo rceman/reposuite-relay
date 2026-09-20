@@ -4,7 +4,10 @@
 //
 //	RepoSuite root   = $REPOSUITE_HOME (cleaned) or <user home>/.reposuite
 //	Relay root       = <RepoSuite root>/relay
-//	Run directory    = <Relay root>/run
+//	Config directory = <Relay root>/config     (durable configuration)
+//	Relay config     = <Config dir>/relay.json (0600, stable endpoint)
+//	Machine API token= <Config dir>/api.token  (0600, persistent bearer)
+//	Run directory    = <Relay root>/run        (current-process state)
 //	Daemon descriptor= <Run dir>/daemon.json  (0600, local authority)
 //	Daemon lock      = <Run dir>/relayd.lock
 //	Log directory    = <Relay root>/logs
@@ -84,6 +87,19 @@ func (p Paths) RepoSuiteRoot() string { return p.repoSuiteRoot }
 // RelayRoot is the Relay state root.
 func (p Paths) RelayRoot() string { return filepath.Join(p.repoSuiteRoot, "relay") }
 
+// ConfigDir holds durable Relay configuration (never process state).
+func (p Paths) ConfigDir() string { return filepath.Join(p.RelayRoot(), "config") }
+
+// RelayConfig is the persistent control-plane configuration: the stable
+// loopback endpoint selected once at first successful start and reused
+// on every later start.
+func (p Paths) RelayConfig() string { return filepath.Join(p.ConfigDir(), "relay.json") }
+
+// MachineToken is the persistent machine API credential: one opaque
+// bearer for trusted machine clients (GPT Tunnel, automation). It is
+// never published in the runtime descriptor.
+func (p Paths) MachineToken() string { return filepath.Join(p.ConfigDir(), "api.token") }
+
 // RunDir holds runtime artifacts such as the daemon socket.
 func (p Paths) RunDir() string { return filepath.Join(p.RelayRoot(), "run") }
 
@@ -103,11 +119,11 @@ func (p Paths) LogDir() string { return filepath.Join(p.RelayRoot(), "logs") }
 // per RelaySession ID. Per-session file layout is owned by internal/store.
 func (p Paths) SessionsDir() string { return filepath.Join(p.RelayRoot(), "sessions") }
 
-// Ensure creates the Relay state directories (relay, run, logs) with
-// user-private permissions. It never modifies pre-existing entries' modes
-// and never touches anything outside the resolved Relay root.
+// Ensure creates the Relay state directories (relay, config, run, logs)
+// with user-private permissions. It never modifies pre-existing entries'
+// modes and never touches anything outside the resolved Relay root.
 func (p Paths) Ensure() error {
-	for _, dir := range []string{p.RelayRoot(), p.RunDir(), p.LogDir()} {
+	for _, dir := range []string{p.RelayRoot(), p.ConfigDir(), p.RunDir(), p.LogDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}

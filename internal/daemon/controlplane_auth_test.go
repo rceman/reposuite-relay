@@ -1,0 +1,149 @@
+package daemon
+
+import (
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/auth"
+)
+
+// TestMachineTokenLifecycle: first start mints the persistent token,
+// restarts keep it, the descriptor bearer rotates, and both authenticate.
+func TestMachineTokenLifecycle(t *testing.T) {
+	p := testPaths(t)
+	d1, err := Start(p, Options{SelfExe: testBinary()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done1 := serveDaemon(t, d1)
+	endpoint := d1.endpoint()
+
+	tok1, err := auth.Load(p.MachineToken())
+	if err != nil {
+		t.Fatalf("first start must create the machine token: %v", err)
+	}
+	fi, err := os.Stat(p.MachineToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("api.token mode %o, want 0600", fi.Mode().Perm())
+	}
+	// The machine token is NEVER in the descriptor.
+	rawDesc, _ := os.ReadFile(p.DaemonDescriptor())
+	if strings.Contains(string(rawDesc), tok1) {
+		t.Fatal("machine token leaked into daemon.json")
+	}
+	descTok1 := d1.Token()
+
+	// Dual auth: machine bearer and descriptor bearer both authenticate.
+	for name, bearer := range map[string]string{
+		"machine":    tok1,
+		"descriptor": descTok1,
+	} {
+		resp := rawGet(t, endpoint, "/v1/daemon", bearer)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s bearer: status %d, want 200", name, resp.StatusCode)
+		}
+	}
+	resp := rawGet(t, endpoint, "/v1/daemon", "deadbeef")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad bearer: status %d, want 401", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), api.ErrUnauthorized) {
+		t.Fatalf("bad bearer body %q missing UNAUTHORIZED", body)
+	}
+	resp = rawGet(t, endpoint, "/v1/daemon", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing bearer: status %d, want 401", resp.StatusCode)
+	}
+	// The machine token is never in an API response.
+	resp = rawGet(t, endpoint, "/v1/daemon", descTok1)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), tok1) || strings.Contains(string(body), descTok1) {
+		t.Fatal("a credential leaked into an API response")
+	}
+
+	stopDaemonNow(t, d1, done1)
+
+	// Restart: machine token persists exactly; descriptor bearer rotates.
+	d2, err := Start(p, Options{SelfExe: testBinary()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d2)
+	tok2, err := auth.Load(p.MachineToken())
+	if err != nil || tok2 != tok1 {
+		t.Fatalf("machine token not persistent across restart: %v", err)
+	}
+	if d2.Token() == descTok1 {
+		t.Fatal("descriptor bearer did not rotate across generations")
+	}
+	// The persisted machine token still authenticates on the new
+	// generation.
+	resp = rawGet(t, d2.endpoint(), "/v1/daemon", tok1)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("machine bearer on restart: status %d", resp.StatusCode)
+	}
+	// The OLD descriptor bearer does not.
+	resp = rawGet(t, d2.endpoint(), "/v1/daemon", descTok1)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("stale descriptor bearer: status %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestMalformedMachineTokenFailsClosed: a corrupt api.token fails
+// startup and is never silently replaced.
+func TestMalformedMachineTokenFailsClosed(t *testing.T) {
+	p := testPaths(t)
+	if err := p.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.MachineToken(), []byte("corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(p, Options{SelfExe: testBinary()}); err == nil {
+		t.Fatal("malformed api.token must fail startup")
+	}
+	after, _ := os.ReadFile(p.MachineToken())
+	if string(after) != "corrupt\n" {
+		t.Fatal("malformed token was silently replaced")
+	}
+}
+
+// TestRootPathPlaceholder: GET / answers a fixed name anonymously — the
+// reserved Web Admin entry point, no operational data.
+func TestRootPathPlaceholder(t *testing.T) {
+	p := testPaths(t)
+	d, err := Start(p, Options{SelfExe: testBinary()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d)
+	resp := rawGet(t, d.endpoint(), "/", "")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "RepoSuite Relay") {
+		t.Fatalf("GET / body %q", body)
+	}
+	// Anonymous /v1 stays rejected even though / is open.
+	resp = rawGet(t, d.endpoint(), "/v1/daemon", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous /v1 status %d, want 401", resp.StatusCode)
+	}
+}

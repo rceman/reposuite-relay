@@ -16,12 +16,23 @@ import (
 
 // --- handlers ---------------------------------------------------------
 func (d *Daemon) info() api.DaemonInfo {
+	// Cheap in-memory projection only: a session counts as ACTIVE when a
+	// live runtime generation is bound to it, otherwise COLD. Nothing is
+	// woken and no transcript is opened to produce this.
+	active := 0
+	for _, m := range d.registry.List() {
+		if _, ok := d.supervisor.View(m.Session.ID); ok {
+			active++
+		}
+	}
 	return api.DaemonInfo{
-		InstanceID:    d.instanceID,
-		PID:           os.Getpid(),
-		APIVersion:    api.Version,
-		UptimeSeconds: time.Since(d.started).Seconds(),
-		SessionCount:  d.registry.Len(),
+		InstanceID:     d.instanceID,
+		PID:            os.Getpid(),
+		APIVersion:     api.Version,
+		UptimeSeconds:  time.Since(d.started).Seconds(),
+		SessionCount:   d.registry.Len(),
+		ActiveSessions: active,
+		ColdSessions:   d.registry.Len() - active,
 	}
 }
 

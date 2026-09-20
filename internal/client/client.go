@@ -37,6 +37,11 @@ var (
 	// ErrStartTimeout means an auto-start attempt did not produce a ready
 	// daemon within the deadline.
 	ErrStartTimeout = errors.New("relayd did not become ready in time")
+	// ErrStaleDescriptor means the endpoint is a compatible relayd but not
+	// the generation our descriptor describes: the descriptor predates a
+	// newer generation's publication — transient while the stable port
+	// changes hands. Never sent commands against.
+	ErrStaleDescriptor = errors.New("daemon descriptor predates the live generation")
 )
 
 // APIError is a decoded stable API error.
@@ -150,22 +155,43 @@ func newHTTPClient() *http.Client {
 // Dial connects to a running daemon without ever starting one: the
 // descriptor must exist, validate, and answer an authenticated ping.
 // `daemon status` / `daemon stop` use this and must not auto-start.
+//
+// The stable endpoint makes one race real: the descriptor we read can
+// predate the generation now answering on the configured port (the read
+// raced the restart's atomic rename). A serving generation always
+// publishes its own descriptor before it accepts, so a token rejection
+// resolves by re-reading: a CHANGED descriptor describes the live
+// generation — retry it; an UNCHANGED one means the peer genuinely
+// rejects the descriptor — fail closed.
 func Dial(p paths.Paths) (*Client, error) {
-	d, err := ReadDescriptor(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrNotRunning
+	var lastInstance string
+	for i := 0; i < 4; i++ {
+		d, err := ReadDescriptor(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, ErrNotRunning
+			}
+			return nil, err
 		}
-		return nil, err
+		c := &Client{desc: *d, hc: newHTTPClient()}
+		err = c.ping()
+		switch {
+		case err == nil:
+			return c, nil
+		case errors.Is(err, ErrStaleDescriptor) && d.InstanceID != lastInstance:
+			// The descriptor rotated under us — the live generation's
+			// own descriptor is now on disk; one more read converges.
+			lastInstance = d.InstanceID
+			continue
+		case errors.Is(err, ErrStaleDescriptor):
+			// Same descriptor, still rejected: the peer is not this
+			// descriptor's generation and none is coming — fail closed.
+			return nil, fmt.Errorf("%w: endpoint rejected the descriptor token", ErrBadPeer)
+		default:
+			return nil, err
+		}
 	}
-	c := &Client{
-		desc: *d,
-		hc:   newHTTPClient(),
-	}
-	if err := c.ping(); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return nil, fmt.Errorf("%w: endpoint rejected the descriptor token", ErrBadPeer)
 }
 
 // ping performs the authenticated readiness check.
@@ -191,7 +217,9 @@ func (c *Client) ping() error {
 		var ae *APIError
 		if errors.As(err, &ae) {
 			if ae.Status == http.StatusUnauthorized {
-				return fmt.Errorf("%w: endpoint rejected the descriptor token", ErrBadPeer)
+				// A relayd-shaped 401: the endpoint is a compatible relayd
+				// but our descriptor predates the serving generation.
+				return fmt.Errorf("%w: endpoint rejected the descriptor token", ErrStaleDescriptor)
 			}
 			if ae.Status == http.StatusServiceUnavailable {
 				return ErrNotRunning // shutting down — a new generation is coming
@@ -244,10 +272,11 @@ func Ensure(p paths.Paths, selfExe string) (*Client, error) {
 		case errors.Is(err, ErrBadPeer):
 			return nil, err // fail closed, never retry into a bad peer
 		}
-		// Not running yet. The spawned contender may have lost the lock
-		// race or the previous generation may still be shutting down —
-		// spawn another (bounded by the overall deadline; contenders exit
-		// immediately when they lose the lock).
+		// Not running yet — or a stale-descriptor read raced the new
+		// generation's publication on the stable port. The spawned
+		// contender may have lost the lock race or the previous generation
+		// may still be shutting down — spawn another (bounded by the
+		// overall deadline; contenders exit when they lose the lock).
 		if time.Since(lastSpawn) > 300*time.Millisecond {
 			if err := spawn(); err != nil {
 				return nil, err

@@ -102,13 +102,18 @@ type ErrorDetail struct {
 	Message string `json:"message"`
 }
 
-// DaemonInfo identifies a live daemon generation.
+// DaemonInfo identifies a live daemon generation. Session counts are a
+// cheap in-memory projection: ActiveSessions are bound to a live runtime
+// generation, ColdSessions are durable but unbound (they wake on next
+// use). Neither count wakes a session or touches a native runtime.
 type DaemonInfo struct {
-	InstanceID    string  `json:"instanceId"`
-	PID           int     `json:"pid"`
-	APIVersion    int     `json:"apiVersion"`
-	UptimeSeconds float64 `json:"uptimeSeconds"`
-	SessionCount  int     `json:"sessionCount"`
+	InstanceID     string  `json:"instanceId"`
+	PID            int     `json:"pid"`
+	APIVersion     int     `json:"apiVersion"`
+	UptimeSeconds  float64 `json:"uptimeSeconds"`
+	SessionCount   int     `json:"sessionCount"`
+	ActiveSessions int     `json:"activeSessions"`
+	ColdSessions   int     `json:"coldSessions"`
 }
 
 // SessionInfo is the wire view of a durable RelaySession plus its optional

@@ -8,9 +8,20 @@ import (
 	"strings"
 )
 
-// route dispatches one request. Every route requires the bearer token,
-// including daemon status, transcript, the event stream, and shutdown.
+// route dispatches one request. The root path is reserved for the future
+// Web Admin and answers a fixed name string anonymously — no operational
+// data, no secrets. Every /v1 route requires a bearer token, including
+// daemon status, transcript, the event stream, and shutdown.
 func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" {
+		if r.Method != http.MethodGet {
+			methodOrNotFound(w, r, http.MethodGet)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("RepoSuite Relay\n"))
+		return
+	}
 	if !d.authorized(r) {
 		writeErr(w, http.StatusUnauthorized, api.ErrUnauthorized, "missing or invalid bearer token")
 		return
@@ -110,18 +121,20 @@ func methodOrNotFound(w http.ResponseWriter, r *http.Request, allowed ...string)
 	writeErr(w, http.StatusMethodNotAllowed, api.ErrInvalidRequest, "method not allowed")
 }
 
-// authorized performs constant-time bearer token comparison.
+// authorized performs constant-time bearer comparison against BOTH
+// credential domains: the ephemeral descriptor bearer (this generation's
+// internal clients) and the persistent machine bearer (trusted machine
+// clients). Either authenticates; a bad token gets one uniform 401.
 func (d *Daemon) authorized(r *http.Request) bool {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(h, prefix) {
 		return false
 	}
-	got := h[len(prefix):]
-	if len(got) != len(d.token) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(d.token)) == 1
+	got := []byte(h[len(prefix):])
+	ok := subtle.ConstantTimeCompare(got, []byte(d.token))
+	ok |= subtle.ConstantTimeCompare(got, []byte(d.machineToken))
+	return ok == 1
 }
 
 // lifecycle admits a mutating handler through the shutdown barrier: once
