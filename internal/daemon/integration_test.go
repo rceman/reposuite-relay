@@ -102,10 +102,35 @@ func serveKey(t *testing.T, home, root, key string) (daemonPID int, fields map[s
 
 func daemonStatus(t *testing.T, home, root string) (pid int, sessionCount int) {
 	t.Helper()
-	out := mustCLI(t, home, root, "daemon", "status")
-	p, _ := strconv.Atoi(field(t, out, "pid"))
-	n, _ := strconv.Atoi(field(t, out, "sessionCount"))
-	return p, n
+	out := mustCLI(t, home, root, "status", "--json")
+	var rep struct {
+		Running  bool `json:"running"`
+		PID      int  `json:"pid"`
+		Sessions int  `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if !rep.Running {
+		t.Fatalf("status reports not running:\n%s", out)
+	}
+	return rep.PID, rep.Sessions
+}
+
+// daemonStopped asserts through `status --json` that no compatible daemon
+// generation is live — the probe itself never starts one.
+func daemonStopped(t *testing.T, home, root string) {
+	t.Helper()
+	out := mustCLI(t, home, root, "status", "--json")
+	var rep struct {
+		Running bool `json:"running"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if rep.Running {
+		t.Fatalf("status reports a live daemon:\n%s", out)
+	}
 }
 
 // alive reports whether pid exists and is not a zombie.

@@ -9,9 +9,7 @@ import (
 func TestSmokeSequence(t *testing.T) {
 	home, root := testRoot(t)
 
-	if out, err := cli(t, home, root, "daemon", "status"); err == nil {
-		t.Fatalf("status before any daemon: %s", out)
-	}
+	daemonStopped(t, home, root)
 	_, a := serveKey(t, home, root, "alpha")
 	_, b := serveKey(t, home, root, "beta")
 	dp, count := daemonStatus(t, home, root)
@@ -24,21 +22,19 @@ func TestSmokeSequence(t *testing.T) {
 	if ai < 0 || bi < 0 || ai > bi {
 		t.Fatalf("list order/content: %s", out)
 	}
-	sa := mustCLI(t, home, root, "status", "alpha")
+	sa := mustCLI(t, home, root, "session", "status", "alpha")
 	if field(t, sa, "state") != "idle" || field(t, sa, "generation") != "1" ||
 		field(t, sa, "runtimeState") != "warm" {
 		t.Fatalf("status alpha: %s", sa)
 	}
 	mustCLI(t, home, root, "stop", "alpha")
-	sb := mustCLI(t, home, root, "status", "beta")
+	sb := mustCLI(t, home, root, "session", "status", "beta")
 	if field(t, sb, "pid") != b["pid"] || field(t, sb, "runtimeId") != b["runtimeId"] {
 		t.Fatalf("beta mutated: %s", sb)
 	}
 	mustCLI(t, home, root, "stop", "beta")
 	mustCLI(t, home, root, "daemon", "stop")
-	if out, err := cli(t, home, root, "daemon", "status"); err == nil {
-		t.Fatalf("daemon status after stop: %s", out)
-	}
+	daemonStopped(t, home, root)
 	_ = a
 	_ = dp
 }

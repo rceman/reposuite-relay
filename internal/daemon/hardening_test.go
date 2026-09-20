@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -165,13 +164,19 @@ func TestRelativeHomeRejected(t *testing.T) {
 func TestDaemonPidAndVersion(t *testing.T) {
 	home, root := testRoot(t)
 	serveKey(t, home, root, "x")
-	out := mustCLI(t, home, root, "daemon", "status")
-	pid, _ := strconv.Atoi(field(t, out, "pid"))
-	if pid <= 1 || !alive(pid) {
-		t.Fatalf("daemon pid %d not alive", pid)
+	out := mustCLI(t, home, root, "status", "--json")
+	var rep struct {
+		PID        int `json:"pid"`
+		APIVersion int `json:"apiVersion"`
 	}
-	if v := field(t, out, "apiVersion"); v != strconv.Itoa(api.Version) {
-		t.Fatalf("apiVersion=%s, want %d", v, api.Version)
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if rep.PID <= 1 || !alive(rep.PID) {
+		t.Fatalf("daemon pid %d not alive", rep.PID)
+	}
+	if rep.APIVersion != api.Version {
+		t.Fatalf("apiVersion=%d, want %d", rep.APIVersion, api.Version)
 	}
 	stopDaemon(t, home, root)
 }

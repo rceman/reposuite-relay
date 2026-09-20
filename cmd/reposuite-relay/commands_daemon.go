@@ -10,13 +10,9 @@ import (
 	"github.com/rceman/reposuite-relay/internal/client"
 )
 
-// cmdDaemon implements `daemon status|stop` — neither auto-starts a
-// daemon.
-func cmdDaemon(args []string) int {
-	if len(args) != 1 || (args[0] != "status" && args[0] != "stop") {
-		fmt.Fprintln(os.Stderr, "usage: reposuite-relay daemon {status|stop}")
-		return 2
-	}
+// cmdDaemonStop implements `daemon stop` — requests daemon shutdown and
+// never auto-starts one. Product status lives at `status [--json]`.
+func cmdDaemonStop() int {
 	p, code, ok := pathsForClient()
 	if !ok {
 		return code
@@ -33,15 +29,6 @@ func cmdDaemon(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if args[0] == "status" {
-		info, err := c.DaemonInfo(ctx)
-		if err != nil {
-			return failAPI(err)
-		}
-		fmt.Printf("pid=%d apiVersion=%d uptimeSeconds=%.3f sessionCount=%d\n",
-			info.PID, info.APIVersion, info.UptimeSeconds, info.SessionCount)
-		return 0
-	}
 	// stop: request shutdown, then wait bounded for the descriptor to go
 	// away (the lock owner removes its own descriptor as it exits).
 	if _, err := c.Shutdown(ctx); err != nil {

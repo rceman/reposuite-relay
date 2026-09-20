@@ -44,10 +44,11 @@ Commands:
   input <KEY> --input <ID>       answer requested input
   config <KEY> [--model M] [--mode S]
                                  change accepted model/mode
+  status [--json]                product status: endpoint, PID, sessions,
+                                 API auth — never starts the daemon
   list                           list managed sessions
-  status <KEY>                   show one session
+  session status <KEY>           show one session
   stop <KEY>                     stop a session
-  daemon status                  show daemon status
   daemon stop                    stop the daemon
 `
 
@@ -78,6 +79,9 @@ func run(args []string, selfExe string) int {
 		}
 		fmt.Printf("reposuite_root:  %s\n", p.RepoSuiteRoot())
 		fmt.Printf("relay_root:      %s\n", p.RelayRoot())
+		fmt.Printf("config_dir:      %s\n", p.ConfigDir())
+		fmt.Printf("relay_config:    %s\n", p.RelayConfig())
+		fmt.Printf("api_token:       %s\n", p.MachineToken())
 		fmt.Printf("run_dir:         %s\n", p.RunDir())
 		fmt.Printf("daemon_descriptor: %s\n", p.DaemonDescriptor())
 		fmt.Printf("sessions_dir:    %s\n", p.SessionsDir())
@@ -95,11 +99,13 @@ func run(args []string, selfExe string) int {
 	case "list":
 		return cmdList(selfExe)
 	case "status":
-		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "reposuite-relay: status requires exactly one session key")
+		return cmdStatus(args[1:])
+	case "session":
+		if len(args) != 3 || args[1] != "status" {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: session status <KEY>")
 			return 2
 		}
-		return cmdStatus(selfExe, args[1])
+		return cmdSessionStatus(selfExe, args[2])
 	case "stop":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "reposuite-relay: stop requires exactly one session key")
@@ -107,7 +113,11 @@ func run(args []string, selfExe string) int {
 		}
 		return cmdStop(selfExe, args[1])
 	case "daemon":
-		return cmdDaemon(args[1:])
+		if len(args) != 2 || args[1] != "stop" {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: daemon stop")
+			return 2
+		}
+		return cmdDaemonStop()
 	case "__daemon":
 		return runDaemon(selfExe)
 	case "__fixture":

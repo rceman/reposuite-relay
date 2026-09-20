@@ -190,8 +190,9 @@ func cmdList(selfExe string) int {
 	return 0
 }
 
-// cmdStatus implements `status <KEY>`.
-func cmdStatus(selfExe, key string) int {
+// cmdSessionStatus implements `session status <KEY>` — one session's
+// human diagnostics, explicit namespace after the status hard cut.
+func cmdSessionStatus(selfExe, key string) int {
 	c, code, ok := ensureClient(selfExe)
 	if !ok {
 		return code

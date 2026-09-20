@@ -25,8 +25,8 @@ func TestRestartRestoresSessionCold(t *testing.T) {
 	if f["runtimeState"] != "warm" || f["sessionId"] == "" || f["runtimeId"] == "" {
 		t.Fatalf("fresh session fields: %v", f)
 	}
-	created := field(t, mustCLI(t, home, root, "status", "alpha"), "createdAt")
-	cwd := field(t, mustCLI(t, home, root, "status", "alpha"), "cwd")
+	created := field(t, mustCLI(t, home, root, "session", "status", "alpha"), "createdAt")
+	cwd := field(t, mustCLI(t, home, root, "session", "status", "alpha"), "cwd")
 
 	// Daemon shutdown stops the runtime but retains the durable session.
 	stopDaemon(t, home, root)
@@ -37,7 +37,7 @@ func TestRestartRestoresSessionCold(t *testing.T) {
 	if !strings.Contains(out, "key=alpha ") {
 		t.Fatalf("alpha not restored: %s", out)
 	}
-	s := mustCLI(t, home, root, "status", "alpha")
+	s := mustCLI(t, home, root, "session", "status", "alpha")
 	if field(t, s, "sessionId") != f["sessionId"] {
 		t.Fatalf("sessionId changed across restart: %s", s)
 	}
@@ -141,9 +141,7 @@ func TestCorruptStoreBlocksStartup(t *testing.T) {
 		t.Fatalf("daemon must not start on corrupt store: %s", out)
 	}
 	// Daemon must not be left running / holding the lock.
-	if out2, err2 := cli(t, home, root, "daemon", "status"); err2 == nil {
-		t.Fatalf("daemon must not run after failed start: %s", out2)
-	}
+	daemonStopped(t, home, root)
 }
 
 // TestStopColdSessionDeletes: a restored COLD session can be stopped —
@@ -161,7 +159,7 @@ func TestStopColdSessionDeletes(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(root, "relay", "sessions", f["sessionId"])); !os.IsNotExist(err) {
 		t.Fatal("durable session dir must be deleted")
 	}
-	out, err := cli(t, home, root, "status", "cold")
+	out, err := cli(t, home, root, "session", "status", "cold")
 	if err == nil || !strings.Contains(out, "SESSION_NOT_FOUND") {
 		t.Fatalf("stopped cold session must be gone: %v %s", err, out)
 	}

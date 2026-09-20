@@ -14,9 +14,7 @@ import (
 // TestDaemonAbsentByDefault: no autostart for status/stop.
 func TestDaemonAbsentByDefault(t *testing.T) {
 	home, root := testRoot(t)
-	if out, err := cli(t, home, root, "daemon", "status"); err == nil {
-		t.Fatalf("daemon status on empty root must fail: %s", out)
-	}
+	daemonStopped(t, home, root)
 	if out, err := cli(t, home, root, "daemon", "stop"); err == nil {
 		t.Fatalf("daemon stop on empty root must fail: %s", out)
 	}
@@ -45,7 +43,7 @@ func TestTwoSessionIsolation(t *testing.T) {
 
 	mustCLI(t, home, root, "stop", "alpha")
 	waitDead(t, pidA, 3*time.Second)
-	if out, err := cli(t, home, root, "status", "alpha"); err == nil {
+	if out, err := cli(t, home, root, "session", "status", "alpha"); err == nil {
 		t.Fatalf("status alpha after stop must fail: %s", out)
 	}
 	out := mustCLI(t, home, root, "list")
@@ -57,7 +55,7 @@ func TestTwoSessionIsolation(t *testing.T) {
 	if !alive(pidB) {
 		t.Fatal("beta died with alpha")
 	}
-	sb := mustCLI(t, home, root, "status", "beta")
+	sb := mustCLI(t, home, root, "session", "status", "beta")
 	for k, want := range b {
 		if got := field(t, sb, k); got != want {
 			t.Fatalf("beta %s changed: %s -> %s", k, want, got)
@@ -141,7 +139,7 @@ func TestDuplicateKey(t *testing.T) {
 	if !strings.Contains(out, "SESSION_EXISTS") {
 		t.Fatalf("want SESSION_EXISTS, got: %s", out)
 	}
-	sb := mustCLI(t, home, root, "status", "same")
+	sb := mustCLI(t, home, root, "session", "status", "same")
 	if field(t, sb, "runtimeId") != first["runtimeId"] || field(t, sb, "pid") != first["pid"] {
 		t.Fatalf("original session mutated: %s", sb)
 	}
@@ -185,9 +183,7 @@ func TestDaemonShutdown(t *testing.T) {
 	if _, err := os.Stat(desc); !os.IsNotExist(err) {
 		t.Fatal("descriptor not removed")
 	}
-	if out, err := cli(t, home, root, "daemon", "status"); err == nil {
-		t.Fatalf("daemon status after stop must fail: %s", out)
-	}
+	daemonStopped(t, home, root)
 
 	// Fresh daemon restores the durable sessions as COLD: all three keys
 	// present, no runtime/PID, count=3.
