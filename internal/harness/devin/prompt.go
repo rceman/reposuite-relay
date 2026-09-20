@@ -109,7 +109,27 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 	proven, liveKey := st.materialized, st.liveRuntimeKey
 	a.mu.Unlock()
 	if handle != nil && srv != nil && liveKey == RuntimeKeyFor(model) {
-		return handle, nil
+		if _, ok := a.deps.Supervisor.View(m.Session.ID); ok {
+			return handle, nil
+		}
+		// The generation hosting this handle died while the death path
+		// could not see the binding (the session was mid-bind): the
+		// routing is stale, so drop it and re-bind exactly.
+		a.mu.Lock()
+		if st.handle == handle {
+			st.srv = nil
+			st.handle = nil
+			st.liveRuntimeKey = ""
+		}
+		if cur, ok := a.byNative[handle.ID()]; ok && cur == m.Session.ID {
+			delete(a.byNative, handle.ID())
+		}
+		if !st.materialized {
+			st.nativeID = "" // an unproven slug died with its generation
+			nativeID = ""
+		}
+		a.mu.Unlock()
+		handle.Close()
 	}
 	// A malformed durable identity is rejected BEFORE any runtime is spawned: a
 	// non-empty slug Relay cannot parse is durable corruption, and it is never
@@ -164,6 +184,13 @@ func (a *Adapter) finishAttach(m *session.Managed, runtimeKey string, srv *acp.S
 	if err := a.deps.Materialize(m, harness.SessionUpdate{BumpGeneration: true}); err != nil {
 		a.detach(m.Session.ID)
 		return nil, err
+	}
+	// The durable commit stands, but the generation may have died
+	// mid-transaction: no routing may claim a dead generation and no
+	// start may be advertised for it.
+	if _, ok := a.deps.Supervisor.View(m.Session.ID); !ok {
+		a.detach(m.Session.ID)
+		return nil, fmt.Errorf("%w: runtime generation exited during bind", harness.ErrRuntimeUnavailable)
 	}
 	if err := a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
 		RuntimeID:       a.runtimeID(m.Session.ID),

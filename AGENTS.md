@@ -206,6 +206,13 @@ report each as PASS/FAIL/N/A with evidence.
   Materialization is orthogonal: a failed first turn may leave
   `Generation=1` with `nativeSessionId=""` (a binding existed, no
   resumable identity was proven).
+- **Bind is a transaction:** `Supervisor.Bind` runs before the durable
+  commit that carries the generation bump; a `Bind` failure leaves
+  Generation untouched, and a failed durable commit rolls the
+  supervisor binding back synchronously (`Unbind` + detach the native
+  handle + remove routing) — no phantom binding, no phantom
+  generation. `session.native` and `harness.started` are post-commit
+  events only.
 - **Terminal exactly-once:** `acp.Turn` carries an atomic terminal
   claim — the prompt-response path or the runtime-death `Fail` wins,
   the loser is discarded. `completeTurn` is the sole publisher of

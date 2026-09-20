@@ -112,28 +112,6 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd string) (*acp.Server, e
 	return srv, nil
 }
 
-// bind attaches a session to a live runtime generation.
-func (a *Adapter) bind(sessionID string, srv *acp.Server, handle *acp.Session) error {
-	if err := a.deps.Supervisor.Bind(RuntimeKey, sessionID); err != nil {
-		handle.Close()
-		return fmt.Errorf("%w: %v", harness.ErrRuntimeUnavailable, err)
-	}
-	a.mu.Lock()
-	st := a.sessions[sessionID]
-	if st == nil {
-		a.mu.Unlock()
-		handle.Close()
-		a.deps.Supervisor.Unbind(sessionID)
-		return fmt.Errorf("session %s is not tracked by the opencode adapter", sessionID)
-	}
-	st.srv = srv
-	st.handle = handle
-	st.nativeID = handle.ID()
-	a.byNative[handle.ID()] = sessionID
-	a.mu.Unlock()
-	return nil
-}
-
 // OnRuntimeGone implements harness.Adapter: the runtime generation is gone, so
 // every bound session becomes COLD, in-flight work fails durably, and the
 // durable native identity is retained exactly (it is resumable).

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/harnessenv"
 	"github.com/rceman/reposuite-relay/internal/runtime"
@@ -176,7 +177,8 @@ func TestZeroTurnColdResumeIsExact(t *testing.T) {
 	e, a := newEnv(t, acp.FakeHappy)
 	m := newSession(t, e, a, "zeroturn", t.TempDir())
 
-	// Materialize a native session without completing a turn.
+	// Materialize a native session through the real bind transaction, then
+	// take the runtime down without completing a turn.
 	srv, err := a.ensureRuntime(bg(), m.Snapshot().Cwd)
 	if err != nil {
 		t.Fatal(err)
@@ -185,10 +187,10 @@ func TestZeroTurnColdResumeIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.recordNative(m, a.state(m.Session.ID), handle.ID(), false); err != nil {
+	if _, err := a.finishAttach(bg(), m, srv, handle,
+		harness.ConfigCommand{}, false); err != nil {
 		t.Fatal(err)
 	}
-	handle.Close()
 	if err := e.Supervisor.Stop(RuntimeKey); err != nil {
 		t.Fatal(err)
 	}

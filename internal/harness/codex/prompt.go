@@ -64,6 +64,26 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 	threadID := st.nativeID
 	live := st.liveKey == RuntimeKey
 	a.mu.Unlock()
+	if live {
+		if _, ok := a.deps.Supervisor.View(m.Session.ID); !ok {
+			// The generation hosting this binding died while the death
+			// path could not see it (the session was mid-bind): the
+			// in-memory thread died with the process, so drop the stale
+			// routing and re-bind exactly.
+			a.mu.Lock()
+			if st.liveKey == RuntimeKey {
+				delete(a.threads, st.nativeID)
+				st.liveKey = ""
+				st.nativeID = ""
+				if st.materialized {
+					st.nativeID = m.Snapshot().NativeSessionID
+				}
+				threadID = st.nativeID
+			}
+			a.mu.Unlock()
+			live = false
+		}
+	}
 	resume := !live && threadID != ""
 	if resume && !harness.ValidNativeID(threadID) {
 		return fail(fmt.Errorf("%w: malformed native session id %q",
@@ -121,8 +141,20 @@ func (a *Adapter) Prompt(ctx context.Context, m *session.Managed, cmd harness.Pr
 		if err := a.deps.Supervisor.Bind(RuntimeKey, m.Session.ID); err != nil {
 			return fail(err)
 		}
+		// The generation bump is durable only when the commit succeeds; a
+		// failed commit must not leave the supervisor binding behind, so it
+		// is rolled back synchronously before the prompt fails.
 		if err := a.deps.Materialize(m, harness.SessionUpdate{BumpGeneration: true}); err != nil {
+			a.deps.Supervisor.Unbind(m.Session.ID)
 			return fail(err)
+		}
+		// The durable commit stands, but the generation may have died
+		// mid-transaction (the death path could not see the binding
+		// because routing did not exist yet): no routing may claim a
+		// dead generation and no start may be advertised for it.
+		if _, ok := a.deps.Supervisor.View(m.Session.ID); !ok {
+			return fail(fmt.Errorf("%w: runtime generation exited during bind",
+				ErrRuntimeUnavailable))
 		}
 		a.mu.Lock()
 		st.nativeID = threadID

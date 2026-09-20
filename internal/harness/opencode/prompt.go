@@ -117,7 +117,22 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 	handle, srv, nativeID := st.handle, st.srv, st.nativeID
 	a.mu.Unlock()
 	if handle != nil && srv != nil {
-		return handle, nil
+		if _, ok := a.deps.Supervisor.View(m.Session.ID); ok {
+			return handle, nil
+		}
+		// The generation hosting this handle died while the death path
+		// could not see the binding (the session was mid-bind): the
+		// routing is stale, so drop it and re-bind exactly.
+		a.mu.Lock()
+		if st.handle == handle {
+			st.srv = nil
+			st.handle = nil
+		}
+		if cur, ok := a.byNative[handle.ID()]; ok && cur == m.Session.ID {
+			delete(a.byNative, handle.ID())
+		}
+		a.mu.Unlock()
+		handle.Close()
 	}
 
 	// A malformed durable identity is rejected BEFORE any runtime is
@@ -139,7 +154,7 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		if err != nil {
 			return nil, fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
 		}
-		return a.finishAttach(callCtx, m, st, srv, newHandle, desired, false)
+		return a.finishAttach(callCtx, m, srv, newHandle, desired, false)
 	}
 
 	loaded, err := acp.AttachSession(callCtx, srv, cwd, nativeID)
@@ -147,81 +162,7 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		// Fail closed: never substitute a fresh session for the exact one.
 		return nil, fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
 	}
-	return a.finishAttach(callCtx, m, st, srv, loaded, desired, true)
-}
-
-// finishAttach completes the bind transaction for a freshly opened or loaded
-// native session, in the exact order the semantics require: apply desired
-// config natively → persist identity + generation → bind → harness.started.
-func (a *Adapter) finishAttach(ctx context.Context, m *session.Managed, st *sessState,
-	srv *acp.Server, handle *acp.Session, desired harness.ConfigCommand, resumed bool) (*acp.Session, error) {
-	// Desired configuration is applied natively FIRST: a validation failure
-	// must abort the submission before any user turn is sent.
-	if err := a.applyDesired(ctx, handle, desired); err != nil {
-		handle.Close()
-		return nil, err
-	}
-	// OpenCode returns a durable native identity immediately, so it is
-	// persisted now — before any turn — which is what makes a zero-turn
-	// cold resume exact later.
-	if err := a.recordNative(m, st, handle.ID(), resumed); err != nil {
-		handle.Close()
-		return nil, err
-	}
-	if err := a.bind(m.Session.ID, srv, handle); err != nil {
-		return nil, err
-	}
-	// harness.started is published only once the session is bound, so a
-	// reader that sees it always observes a ready binding.
-	if err := a.publishStarted(m, handle.ID(), resumed); err != nil {
-		return nil, err
-	}
-	// The values the runtime now reports are EFFECTIVE — only after a
-	// successful native application do they enter the metrics.
-	a.publishMetrics(m, "config", acp.MergeMetrics(a.Metrics(m.Session.ID), observedConfig(handle)))
-	return handle, nil
-}
-
-// recordNative durably records the exact native identity. It runs only when a
-// runtime generation takes ownership of the session, so it always bumps the
-// generation:
-//
-//	creation 0 → first native bind 1 → exact resume into a new generation 2
-//
-// For OpenCode a returned `ses_*` identity is durable from session/new, so the
-// identity is persisted before any turn — which is what makes a zero-turn cold
-// resume exact later.
-func (a *Adapter) recordNative(m *session.Managed, st *sessState, nativeID string, resumed bool) error {
-	if err := a.deps.Materialize(m, harness.SessionUpdate{
-		NativeSessionID: &nativeID,
-		BumpGeneration:  true,
-	}); err != nil {
-		return err
-	}
-	a.mu.Lock()
-	first := !st.materialized
-	st.nativeID = nativeID
-	st.materialized = true
-	st.resumed = resumed
-	a.mu.Unlock()
-	if first {
-		_ = a.publishDurable(m, api.EventNativeSession, api.NativeSessionPayload{
-			NativeSessionID: nativeID,
-			Generation:      m.Snapshot().Generation,
-		})
-	}
-	return nil
-}
-
-// publishStarted records that a runtime generation took ownership of the
-// session's native session. It is published AFTER the binding exists.
-func (a *Adapter) publishStarted(m *session.Managed, nativeID string, resumed bool) error {
-	return a.publishDurable(m, api.EventHarnessStarted, api.HarnessStartedPayload{
-		RuntimeID:       a.runtimeID(m.Session.ID),
-		NativeSessionID: nativeID,
-		Model:           m.Snapshot().Model,
-		Resumed:         resumed,
-	})
+	return a.finishAttach(callCtx, m, srv, loaded, desired, true)
 }
 
 // completeTurn awaits the terminal turn result and publishes the canonical

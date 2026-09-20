@@ -72,7 +72,11 @@ prompts on the same live binding leave it unchanged, and an exact cold
 resume into a fresh generation bumps it by one. It is orthogonal to
 materialization: a failed first turn may leave `Generation=1` with
 `nativeSessionId=""` — a binding existed but no resumable identity was
-proven.
+proven. The bind is a transaction: `Supervisor.Bind` first, then the
+durable commit that carries the generation bump; a `Bind` failure
+leaves Generation untouched, and a failed durable commit rolls the
+supervisor binding back synchronously, so a failed transaction can
+never leave a phantom binding or a phantom generation.
 
 **Native materialization** *(current)* — the moment a native identity is
 proven durable and therefore persisted. It is per-vendor: Codex and Devin
