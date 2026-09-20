@@ -19,9 +19,10 @@ no terminal emulator, no xterm dependency in the production core.
   authoritative for model context.
 - Native harness servers are **private to relayd** — never exposed to
   clients.
-- Canonical local protocol (ADR-006): loopback TCP `127.0.0.1:0`,
-  HTTP/JSON commands, streaming NDJSON events, `run/daemon.json`
-  descriptor, per-daemon bearer token.
+- Canonical local protocol (ADR-006): loopback TCP on a **stable
+  one-time-selected port**, HTTP/JSON commands, streaming NDJSON events,
+  `run/daemon.json` descriptor, dual bearer auth (per-generation
+  descriptor token + persistent machine API token).
 - Canonical session events carry a per-session monotonic uint64 seq;
   transient events consume seq without being persisted, so sequence
   space is durably reserved in blocks (`SeqHighWatermark`).
@@ -48,11 +49,23 @@ IMPLEMENTED:
   never persisted; restart reloads sessions COLD.
 - Loopback HTTP/JSON control plane (ADR-006): `internal/client` +
   `internal/daemon` — `/v1/daemon`, `/v1/sessions[...]`, transcript, and
-  NDJSON event endpoints on `127.0.0.1:0`.
+  NDJSON event endpoints on the stable configured port.
+- **Stable endpoint** (`internal/config`): first start binds
+  `127.0.0.1:0`, atomically commits the OS-selected port to
+  `config/relay.json`; every later start binds exactly it — occupied
+  port fails startup, never a fallback.
 - `run/daemon.json` descriptor discovery: atomic 0600 publication,
   instance ID + 256-bit bearer token rotated per daemon generation,
   fail-closed client validation, owner-only removal.
-- Per-daemon Bearer auth on every endpoint (constant-time compare).
+- **Persistent machine API token** (`internal/auth`):
+  `config/api.token`, minted once under singleton ownership (256-bit,
+  0600), strictly validated, never in the descriptor/API/logs/status.
+- **Dual Bearer auth** on every `/v1` endpoint: descriptor bearer OR
+  machine bearer, constant-time compare, one uniform 401.
+- `GET /` — reserved Web Admin entry point (anonymous fixed name
+  string, no operational data).
+- `reposuite-relay status [--json]` — product status (endpoint, PID,
+  uptime, session counts, API auth) that never auto-starts.
 - NDJSON canonical event-stream foundation (`internal/events`):
   per-session seq allocator with durable block reservation, exact
   history-cursor snapshots, explicit replay floor, lazily allocated
@@ -73,8 +86,8 @@ IMPLEMENTED:
   per runtime key, claim-first creation, activity/sleep-blocker policy,
   bounded process-group teardown, runtime-gone notification.
 - Runtime wake from COLD and the native session control surface
-  (`serve codex`, `prompt`, `status`, `config`, `input`, `cancel`,
-  `stop`) over the loopback HTTP API and CLI.
+  (`serve codex`, `prompt`, `session status`, `config`, `input`,
+  `cancel`, `stop`) over the loopback HTTP API and CLI.
 
 NOT YET IMPLEMENTED:
 
@@ -86,7 +99,10 @@ NOT YET IMPLEMENTED:
 - ACP session listing/deletion beyond Relay's own registry, ACP
   `authenticate` beyond the initialize handshake, and native ACP tool-call
   or plan surfacing (ignored deliberately, not guessed at).
-- TUI, Gateway/WSS bridge.
+- Embedded Web Admin (same-origin on `/`, admin auth, embedded assets —
+  later milestone after Gateway dogfooding), GPT Tunnel integration.
+  A TUI is NOT planned: the management surfaces are the machine API and
+  the future Web Admin; the CLI is bootstrap/diagnostics only.
 - Cross-platform singleton locking (currently Linux `flock`; the
   invariant is one relayd per state root, fail-closed).
 
@@ -317,8 +333,20 @@ no giant accumulation files.
   in the descriptor) with bounded JSON bodies; it never carries
   client-supplied commands. Clients cannot supply executables or
   arguments: relayd executes only its own built-in harness
-  implementations — the `fixture` test harness and the Codex native
-  adapter (`internal/harness/codex`).
+  implementations — the `fixture` test harness and the native adapters
+  (`internal/harness/codex`, `internal/harness/devin`,
+  `internal/harness/opencode`).
+- The endpoint identity is durable config, not process state:
+  `config/relay.json` (schemaVersion/listenHost/listenPort) is committed
+  once — atomically, under singleton ownership, only after the port is
+  bound — and binds exactly thereafter. Malformed or unsupported config
+  fails closed and is never silently rewritten. `run/` holds
+  current-process state only; nothing persistent lives there.
+- Two credential domains, separate lifecycles: the ephemeral
+  descriptor bearer (per generation, `run/daemon.json`, internal
+  discovery) and the persistent machine API bearer (`config/api.token`,
+  GPT Tunnel/trusted machine clients). Either authenticates `/v1`;
+  neither is ever logged, printed, or returned by the API.
 - The descriptor is local authority: clients validate it strictly
   (loopback 127.0.0.1, http, supported version, well-formed token) and
   fail closed on any incompatible peer — they never auto-start against

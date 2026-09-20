@@ -18,12 +18,18 @@ core.
 - Daemon: one `relayd` per RepoSuite state root — currently realized as
   the hidden `reposuite-relay __daemon` mode of the same binary (the
   `reposuite-relayd` name remains the future packaged form).
-  - *Current:* loopback TCP `127.0.0.1:0` with HTTP/JSON commands,
-    streaming NDJSON events, and a `0600`
+  - *Current:* loopback TCP on a **stable one-time-selected port** with
+    HTTP/JSON commands, streaming NDJSON events, and a `0600`
     `${REPOSUITE_HOME}/relay/run/daemon.json` descriptor carrying
-    endpoint + instance ID + per-generation bearer token. Singleton via
-    `flock` on `run/relayd.lock` (Linux; platform-appropriate locking on
-    macOS/Windows is *target*).
+    endpoint + instance ID + per-generation bearer token. The port is
+    chosen once at first successful start, atomically committed to
+    `${REPOSUITE_HOME}/relay/config/relay.json`, and bound exactly on
+    every later start — an occupied configured port fails startup rather
+    than re-selecting. Every `/v1` endpoint authenticates with either the
+    rotating descriptor bearer or the persistent machine API bearer
+    (`config/api.token`, minted once under singleton ownership, never
+    exposed). Singleton via `flock` on `run/relayd.lock` (Linux;
+    platform-appropriate locking on macOS/Windows is *target*).
 
 ## Sessions
 

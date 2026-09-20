@@ -31,27 +31,37 @@ $ reposuite-relay serve codex --key work     # create a Codex session (COLD: no 
 $ reposuite-relay serve opencode --key oc    # create an OpenCode ACP session (COLD)
 $ reposuite-relay serve devin --key dv       # create a Devin ACP session (COLD)
 $ reposuite-relay prompt work --text "..."   # submit a prompt as a native turn
-$ reposuite-relay status work                # state, runtime, activity, generation
+$ reposuite-relay session status work        # state, runtime, activity, generation
 $ reposuite-relay input work --input in_... --answer q1=alpha   # answer requested input
 $ reposuite-relay cancel work                # interrupt the in-flight turn
 $ reposuite-relay config work --model M      # change the accepted model/mode
 $ reposuite-relay stop work                  # delete the session
 $ reposuite-relay serve fixture --key demo   # fixture session (dev/test harness)
 $ reposuite-relay list                       # managed sessions
-$ reposuite-relay daemon status              # daemon liveness (no autostart)
+$ reposuite-relay status [--json]            # product status: endpoint, PID,
+                                             # sessions, API auth (never autostarts)
 $ reposuite-relay daemon stop                # graceful shutdown
 ```
 
 A single persistent daemon owns durable `RelaySession`s under
 `~/.reposuite/relay/sessions/<id>/` — sessions survive daemon restarts
 and reload COLD (no process, no runtime). Clients talk to it over the
-ADR-006 **local HTTP control plane**: the daemon binds an ephemeral
-loopback port (`127.0.0.1:0`), publishes a user-private `0600`
+ADR-006 **local HTTP control plane** on a **stable loopback endpoint**:
+the first successful start lets the OS pick a free port, commits it
+atomically to `~/.reposuite/relay/config/relay.json`, and every later
+start binds exactly that port — never a fallback, never a re-selection
+(a configured port that is occupied fails startup). Each generation
+publishes a user-private `0600`
 `~/.reposuite/relay/run/daemon.json` descriptor (endpoint, instance ID,
-rotating 256-bit bearer token), and authenticates every endpoint. The
-CLI auto-starts the daemon when genuinely absent; `daemon status` and
-`daemon stop` never do. The `fixture` harness is a deterministic
-development/test child — **not** a real agent harness.
+rotating 256-bit bearer token) for internal discovery. Every `/v1`
+endpoint authenticates with **either** that rotating descriptor bearer
+**or** the persistent machine API bearer in
+`~/.reposuite/relay/config/api.token` (minted once, `0600`, never
+exposed) — see `docs/GATEWAY_API.md` for the machine-client contract.
+The CLI auto-starts the daemon when genuinely absent; `status` and
+`daemon stop` never do. `GET /` is the reserved Web Admin entry point on
+the same origin (a placeholder today). The `fixture` harness is a
+deterministic development/test child — **not** a real agent harness.
 
 **Native Codex sessions.** `serve codex` creates a durable session with
 **zero** harness resources; the first prompt wakes one shared
@@ -93,8 +103,10 @@ answered by policy (never converted into requested input, which is
 `UNSUPPORTED_OPERATION` for ACP harnesses).
 
 **Not yet implemented:** Codex approval requests and `turn/steer`,
-rate-limit surfaces, ACP requested-input, TUI, Gateway/WSS,
-cross-platform singleton locking.
+rate-limit surfaces, ACP requested-input, the embedded Web Admin
+(same-origin on `/`), the GPT Tunnel integration, cross-platform
+singleton locking. A TUI is not planned — the management surfaces are
+the machine API (automation) and the future Web Admin (humans).
 
 ## Layout
 
@@ -114,6 +126,8 @@ cross-platform singleton locking.
 - `internal/harness/devin`, `internal/harness/opencode` — ACP adapters
 - `internal/fixture` — deterministic fixture harness child
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
+- `internal/config` — persistent `config/relay.json` stable endpoint
+- `internal/auth` — persistent `config/api.token` machine credential
 - `tools/` — nested developer-tool module: exact `o200k_base` token
   counter and `gofmt-struct` (never imported by production)
 - `scripts/` — Go hygiene gates (`check-go-files.sh`, `check-go-format.sh`)
