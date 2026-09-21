@@ -100,6 +100,11 @@ func (p Paths) RelayConfig() string { return filepath.Join(p.ConfigDir(), "relay
 // never published in the runtime descriptor.
 func (p Paths) MachineToken() string { return filepath.Join(p.ConfigDir(), "api.token") }
 
+// AdminCredentials is the persistent Web Admin credential: the admin
+// username plus an Argon2id password hash. It contains no plaintext
+// password and no browser session material.
+func (p Paths) AdminCredentials() string { return filepath.Join(p.ConfigDir(), "admin.json") }
+
 // RunDir holds runtime artifacts such as the daemon socket.
 func (p Paths) RunDir() string { return filepath.Join(p.RelayRoot(), "run") }
 
