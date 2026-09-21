@@ -21,8 +21,9 @@ no terminal emulator, no xterm dependency in the production core.
   clients.
 - Canonical local protocol (ADR-006): loopback TCP on a **stable
   one-time-selected port**, HTTP/JSON commands, streaming NDJSON events,
-  `run/daemon.json` descriptor, dual bearer auth (per-generation
-  descriptor token + persistent machine API token).
+  `run/daemon.json` descriptor, three independent credential domains
+  (per-generation descriptor bearer, persistent machine API bearer,
+  admin browser cookie).
 - Canonical session events carry a per-session monotonic uint64 seq;
   transient events consume seq without being persisted, so sequence
   space is durably reserved in blocks (`SeqHighWatermark`).
@@ -60,8 +61,10 @@ IMPLEMENTED:
 - **Persistent machine API token** (`internal/auth`):
   `config/api.token`, minted once under singleton ownership (256-bit,
   0600), strictly validated, never in the descriptor/API/logs/status.
-- **Dual Bearer auth** on every `/v1` endpoint: descriptor bearer OR
-  machine bearer, constant-time compare, one uniform 401.
+- **Triple-credential auth** on every `/v1` endpoint: descriptor bearer
+  OR machine bearer OR admin browser cookie — constant-time compare,
+  one uniform 401; unsafe cookie-authenticated requests also require
+  the exact Origin plus the session CSRF token.
 - **Web Admin auth foundation** (`internal/adminauth`): first-run
   admin setup and login on `/` + `/auth/*`, Argon2id PHC credential in
   `config/admin.json` (0600, create-once, fail-closed), memory-only
@@ -351,7 +354,8 @@ report each as PASS/FAIL/N/A with evidence.
   (`scripts/check-go-format.sh --all` for structure only). CI never
   rewrites; run `scripts/check-go-format.sh --write --all` locally.
 - Exact counting lives in the nested developer module `tools/`
-  (tiktoken-go): production stays stdlib-only and never imports `tools/`.
+  (tiktoken-go): production Go deps stay exactly `x/crypto` (direct,
+  Argon2id) + `x/sys` (indirect) and never import `tools/`.
   The encoding payload is cached once at `$REPOSUITE_TOKEN_CACHE_DIR`
   (default `$XDG_CACHE_HOME/reposuite-relay/tiktoken`), so repeated gates
   do no network work.
@@ -377,11 +381,17 @@ no giant accumulation files.
   bound — and binds exactly thereafter. Malformed or unsupported config
   fails closed and is never silently rewritten. `run/` holds
   current-process state only; nothing persistent lives there.
-- Two credential domains, separate lifecycles: the ephemeral
+- Three credential domains, separate lifecycles: the ephemeral
   descriptor bearer (per generation, `run/daemon.json`, internal
-  discovery) and the persistent machine API bearer (`config/api.token`,
-  GPT Tunnel/trusted machine clients). Either authenticates `/v1`;
-  neither is ever logged, printed, or returned by the API.
+  discovery), the persistent machine API bearer (`config/api.token`,
+  GPT Tunnel/trusted machine clients), and the admin credential —
+  `config/admin.json` (Argon2id PHC) plus a memory-only browser session
+  cookie. Either bearer authenticates machine/local clients on `/v1`;
+  the admin cookie authenticates browser `/v1` use; unsafe
+  cookie-authenticated requests additionally carry exact-Origin and
+  `X-Relay-CSRF` obligations that bearer requests do not. The browser
+  cookie is not a bearer token. No credential is ever logged, printed,
+  or returned by the API.
 - The descriptor is local authority: clients validate it strictly
   (loopback 127.0.0.1, http, supported version, well-formed token) and
   fail closed on any incompatible peer — they never auto-start against

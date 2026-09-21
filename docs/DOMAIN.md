@@ -45,7 +45,7 @@ route. See `docs/WEB_ADMIN_SECURITY.md`.
 
 **RelaySession** *(current)* — the durable logical Relay session
 identity: ID, key, harness, `NativeSessionID`, state, model/mode,
-generation, timestamps. It survives TUI/web disconnect, harness runtime
+generation, timestamps. It survives client (CLI/Web Admin) disconnect, harness runtime
 sleep/death, and relayd restart — persisted under
 `sessions/<id>/session.json` by `internal/store`.
 

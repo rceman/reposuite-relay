@@ -159,6 +159,14 @@ paths under `/_app/` or with `..`/`//`/`\`/NUL fail closed. All
 application assets are embedded — no CDN, webfont, analytics, or remote
 resource is loaded.
 
+**One canonical document.** The build emits exactly `index.html`
+(routes are client-side only — no route HTML is generated), and it is
+reachable only at `/` and extensionless SPA routes. `GET /index.html`
+redirects to `/`; any other `*.html` is a 404 — a build artifact can
+never be served through the generic (document-CSP-less) asset path. A
+regression test fails if the embedded build ever contains an HTML file
+other than `index.html`.
+
 No HSTS: the transport is plain loopback HTTP.
 
 ## Development boundary

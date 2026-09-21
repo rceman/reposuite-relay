@@ -1,6 +1,7 @@
 // Package api defines the local Relay HTTP/JSON wire contract (ADR-006):
-// the DTOs shared by relayd and every local client (CLI, future TUI,
-// future Gateway bridge). Transport mechanics live in internal/client.
+// the DTOs shared by relayd and every client: the CLI, the embedded
+// Web Admin, and external machine integrations (Gateway/GPT Tunnel).
+// Transport mechanics live in internal/client.
 //
 // Stable machine error codes are part of the contract; the API version is
 // negotiated through the daemon descriptor.

@@ -58,10 +58,13 @@ start binds exactly that port — never a fallback, never a re-selection
 publishes a user-private `0600`
 `~/.reposuite/relay/run/daemon.json` descriptor (endpoint, instance ID,
 rotating 256-bit bearer token) for internal discovery. Every `/v1`
-endpoint authenticates with **either** that rotating descriptor bearer
-**or** the persistent machine API bearer in
+endpoint accepts exactly one of three credentials: the rotating
+descriptor bearer, the persistent machine API bearer in
 `~/.reposuite/relay/config/api.token` (minted once, `0600`, never
-exposed) — see `docs/GATEWAY_API.md` for the machine-client contract.
+exposed), or the authenticated `relay_admin` browser cookie. Unsafe
+cookie-authenticated methods additionally require the exact canonical
+`Origin` and `X-Relay-CSRF`; bearer clients carry no CSRF obligation —
+see `docs/GATEWAY_API.md` for the machine-client contract.
 The CLI auto-starts the daemon when genuinely absent; `status` and
 `daemon stop` never do. `GET /` serves the **embedded SvelteKit Web
 Admin**: the anonymous SPA shell boots from `GET /auth/session` —
