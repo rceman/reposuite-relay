@@ -1,1 +1,5 @@
 *.raw binary
+# web/build is a generated release artifact (adapter-static output).
+# Bundled JS/HTML carries formatter-owned whitespace — exempt it from
+# the whitespace gate while keeping normal text diffs for drift checks.
+web/build/** linguist-generated=true whitespace=-blank-at-eol

@@ -1,9 +1,13 @@
-# Web Admin Authentication & Security Foundation
+# Web Admin Authentication & Security
 
 This document defines the browser-facing security model of RepoSuite
-Relay. The Web Admin is a server-rendered shell on the same loopback
-origin as the machine API; this milestone provides the authentication
-and security foundation only — the dashboard itself is a later milestone.
+Relay. The Web Admin is an **embedded SvelteKit single-page
+application** on the same loopback origin as the machine API: the
+production frontend is built once with Node/Vite, committed under
+`web/build/`, embedded into the binary with `go:embed`, and served by
+relayd itself — production requires no Node, no Vite, and no second
+HTTP server. The UI rendered in the browser is client-side only; Go
+still owns every `/auth/*` and `/v1/*` endpoint.
 
 ## Three credential domains
 
@@ -51,13 +55,23 @@ exposed to the browser surface.
 
 ## First-run setup and login
 
-When `admin.json` is absent, `GET /` renders the one-time setup form
-(username, password, confirmation). `POST /auth/setup` requires the exact
-canonical Origin and a per-daemon HMAC form token embedded in the
-rendered page; on success it commits `admin.json` atomically, creates an
-authenticated browser session, and redirects to `/`.
+`GET /` always serves the same anonymous SPA document — auth state is
+never rendered into HTML. The app bootstraps from
+`GET /auth/session`, which returns:
 
-When configured, `GET /` renders the login form. `POST /auth/login`
+```
+unconfigured:   {configured:false, authenticated:false, formToken:<setup>}
+logged out:     {configured:true,  authenticated:false, formToken:<login>}
+authenticated:  {configured:true,  authenticated:true, username, csrfToken}
+```
+
+When `admin.json` is absent the SPA renders the one-time setup form
+(username, password, confirmation). `POST /auth/setup` requires the exact
+canonical Origin and the per-daemon HMAC form token obtained from
+`/auth/session`; on success it commits `admin.json` atomically, creates
+an authenticated browser session, and redirects to `/`.
+
+When configured, the SPA renders the login form. `POST /auth/login`
 runs the same Origin + form-token checks and issues a session cookie on
 success. Verification is uniform: the submitted username is compared
 against the stored username in constant time, and every admitted
@@ -67,14 +81,22 @@ short-circuits password verification. Wrong username, wrong password,
 and both wrong share one public `401` response shape.
 
 Login throttling is in-memory and clock-seamed: 5 failures within 5
-minutes returns `429` with a bounded `Retry-After` (~30 s). A successful
-login clears failure state.
+minutes returns `429` with a bounded `Retry-After` (~30 s), which the
+login view surfaces. A successful login clears failure state.
 
 `POST /auth/logout` requires the live session plus its CSRF token and
-revokes the session server-side. `GET /auth/session` reports
-`{configured, authenticated, username?, csrfToken?}` — the CSRF token is
-the only token ever returned; never the session token, password, hash,
+revokes the session server-side. The CSRF token is the only token ever
+returned by `/auth/session`; never the session token, password, hash,
 or either bearer.
+
+## Browser memory policy
+
+The SPA holds `username`, `csrfToken`, and `formToken` in application
+memory only — page lifetime. Nothing auth-related is written to
+`localStorage`, `sessionStorage`, or IndexedDB, and the `HttpOnly`
+session cookie is unreachable from JavaScript. A reload re-bootstraps
+from `/auth/session`; an expired session yields `authenticated:false`
+and the login view.
 
 ## Browser sessions
 
@@ -111,18 +133,42 @@ or either bearer.
 
 ## Security headers
 
-Web Admin responses (`/` and `/auth/*`) carry:
+Every static/Web Admin response carries:
 
 ```
-Content-Security-Policy: default-src 'none'; form-action 'self';
-                         base-uri 'none'; frame-ancestors 'none'
+Content-Security-Policy: default-src 'none';
+                         script-src 'self' 'sha256-…' [per inline block];
+                         style-src 'self' ['sha256-…' per inline block];
+                         connect-src 'self'; img-src 'self';
+                         font-src 'self'; form-action 'self';
+                         base-uri 'none'; frame-ancestors 'none';
+                         object-src 'none'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 X-Frame-Options: DENY
-Cache-Control: no-store
 ```
 
+The SvelteKit entry document contains one inline bootstrap `<script>`
+(module loader). Instead of `'unsafe-inline'`, relayd computes the
+SHA-256 of every inline script/style block in the served document at
+startup and emits exactly those hashes — `'unsafe-inline'` and
+`'unsafe-eval'` never appear. HTML responses are `Cache-Control:
+no-store`; hashed `_app/immutable` assets get long-lived immutable
+caching. Missing assets return a real 404 (never the SPA fallback), and
+paths under `/_app/` or with `..`/`//`/`\`/NUL fail closed. All
+application assets are embedded — no CDN, webfont, analytics, or remote
+resource is loaded.
+
 No HSTS: the transport is plain loopback HTTP.
+
+## Development boundary
+
+`npm run dev` in `web/` serves the SPA through Vite with a proxy for
+`/auth/*` and `/v1/*` to `RELAY_DEV_TARGET`. Because relayd enforces the
+exact canonical Host/Origin, the proxy deliberately rewrites both to
+the configured target — that relaxation exists only inside the local
+Vite proxy; relayd itself has no dev-origin bypass and its enforcement
+is unchanged.
 
 ## Secret non-disclosure
 

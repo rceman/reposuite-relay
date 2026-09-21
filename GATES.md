@@ -14,7 +14,7 @@ toolchain: exactly **go1.27.1**.
 | 5 | Test | `go test ./...` all pass |
 | 6 | Race | `go test -race -count=1 ./...` all pass |
 | 7 | Build | `go build ./...` ok |
-| 8 | Dependency shape | go.mod has **no third-party `require`**; no `replace`; no `github.com/creack/pty`, `github.com/rceman/xterm-go`, or `github.com/gitpod-io/xterm-go` anywhere in Go code or the module; no `AIRELAY_`/`~/.airelay` usage |
+| 8 | Dependency shape | go.mod `require` is exactly `golang.org/x/crypto` (Argon2id, Web Admin credential) with `golang.org/x/sys` as its only indirect; no `replace`; no `github.com/creack/pty`, `github.com/rceman/xterm-go`, or `github.com/gitpod-io/xterm-go` anywhere in Go code or the module; no `AIRELAY_`/`~/.airelay` usage |
 | 9 | CLI | `reposuite-relay version` and `reposuite-relay help` succeed; unknown command fails non-zero; the native session surface (`serve codex`, `prompt`, `status`, `config`, `input`, `cancel`, `stop`) works end to end against the fake app-server |
 | 10 | Daemon regression | covered by gate 5 — singleton race (one daemon, one descriptor generation, all clients converge), two-session isolation, duplicate key, malformed/bounded HTTP requests, shutdown quiescence, create/stop-vs-shutdown, forced-kill stop, orphan cleanup, permissions, churn |
 | 11 | Persistence regression | covered by gate 5 — durable session reload across daemon restart (COLD, same RelaySession ID), atomic store create/delete + temp/tombstone recovery, store commit-point semantics under injected failures, transcript index/rebuild/tail, explicit stop deletion, corrupt-store startup refusal, persisted-session count |
@@ -44,7 +44,10 @@ toolchain: exactly **go1.27.1**.
 | 26 | Go file token budget | `scripts/check-go-files.sh --all` — every hand-written tracked/untracked Go file is <=3000 o200k_base tokens (complete file: code, comments, strings, tests). Generated files with the standard `// Code generated ... DO NOT EDIT.` header are excluded; no hand-written allowlist, no baseline file |
 | 27 | Structural Go formatting | `scripts/check-go-format.sh --all` — package-aware gofmt-struct is clean over the whole tree (multi-field keyed struct literals vertical); `gofmt -l .` is empty (gate 2) |
 | 28 | Harness namespace topology | vendor-specific adapters live under `internal/harness/<name>`; the old `internal/codex` path is absent from code and current authority docs (`grep -rn "internal/codex"` returns nothing outside historical research notes) |
-| 29 | Tools module | `cd tools && go mod tidy` (no diff) + `go vet ./...` + `go test -count=1 ./...` + `go test -race -count=1 ./...` + `go build ./...`; root `go.mod` still has zero `require` and zero `replace` (gate 8) |
+| 29 | Tools module | `cd tools && go mod tidy` (no diff) + `go vet ./...` + `go test -count=1 ./...` + `go test -race -count=1 ./...` + `go build ./...`; root `go.mod` still has only the approved `x/crypto` require and zero `replace` (gate 8) |
+| 38 | Web Admin frontend | `cd web && npm ci --no-audit --no-fund && npm run check && npm run test && npm run build` — svelte-check clean under strict TS (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), Vitest unit tests pass, adapter-static production build succeeds |
+| 39 | Web Admin build drift | `scripts/check-web.sh` — regenerates `web/build` from the committed source + lockfile and fails on any `git diff` under `web/build` (the committed build is the release artifact `go:embed` packages; a clean checkout must `go build ./...` without Node) |
+| 40 | Web Admin serving | covered by gate 5 (`internal/daemon`) — `GET /` and client routes serve the embedded SPA entry; hashed `_app/immutable` assets serve with immutable caching and correct content types; missing assets and everything under `/_app/` 404; `/auth/*` and `/v1/*` routing priority is preserved; traversal paths fail closed; the document CSP is hash-based (`script-src 'self' 'sha256-…'`) with no `unsafe-inline`/`unsafe-eval`; `/auth/session` exposes the configured/authenticated/formToken/username/csrfToken bootstrap and no secrets; browser-cookie `GET /v1/sessions` is an observer read that wakes nothing |
 
 ## Notes
 

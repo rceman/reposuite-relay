@@ -68,8 +68,11 @@ IMPLEMENTED:
   browser sessions (30 min idle / 12 h absolute, bounded at 16),
   exact Host (`127.0.0.1:<port>`) and Origin enforcement, per-session
   CSRF for cookie-auth unsafe methods — see `docs/WEB_ADMIN_SECURITY.md`.
-- `GET /` — Web Admin entry point: setup form → login form → minimal
-  authenticated shell (no operational data yet).
+- `GET /` — embedded SvelteKit Web Admin (`web/` + `web/embed.go`):
+  anonymous SPA shell, `/auth/session` bootstrap → setup → login →
+  authenticated shell with Overview and read-only Sessions views. The
+  committed `web/build/` release artifact is served by `go:embed` — no
+  Node at production runtime.
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
   uptime, session counts, API auth, admin auth) that never auto-starts.
 - NDJSON canonical event-stream foundation (`internal/events`):
@@ -105,10 +108,11 @@ NOT YET IMPLEMENTED:
 - ACP session listing/deletion beyond Relay's own registry, ACP
   `authenticate` beyond the initialize handshake, and native ACP tool-call
   or plan surfacing (ignored deliberately, not guessed at).
-- Web Admin dashboard (operational UI on the auth foundation — embedded
-  assets later milestone), GPT Tunnel integration.
+- Web Admin session controls (prompt/cancel/config/input/create/delete —
+  the embedded foundation covers auth, shell, overview, and read-only
+  sessions only), GPT Tunnel integration.
   A TUI is NOT planned: the management surfaces are the machine API and
-  the future Web Admin; the CLI is bootstrap/diagnostics only.
+  the Web Admin; the CLI is bootstrap/diagnostics only.
 - Cross-platform singleton locking (currently Linux `flock`; the
   invariant is one relayd per state root, fail-closed).
 
@@ -150,6 +154,27 @@ report each as PASS/FAIL/N/A with evidence.
   or `github.com/creack/pty` — all superseded (ADR-005). The standalone
   `rceman/xterm-go` library is maintained independently; do not touch it
   here.
+
+## Web Admin frontend rules
+
+- Stack is fixed: SvelteKit (`@sveltejs/adapter-static` SPA,
+  `fallback: 'index.html'`), TypeScript, shadcn-svelte, Tailwind,
+  `@tabler/icons-svelte`, Vite, npm. No second UI framework, component
+  library, or icon library without Planner approval.
+- All application source is TypeScript — strict mode with
+  `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`; no `any`
+  except at an explicit decode boundary, no routine `@ts-ignore`.
+- `web/build/` is a **committed release artifact**: a clean checkout
+  must `go build ./...` with no Node. `scripts/check-web.sh` regenerates
+  it and fails on drift. `web/node_modules/` and `web/.svelte-kit/` are
+  never committed.
+- No Node/npm/Vite at production runtime; no remote assets (CDN, web
+  fonts, analytics) — system font stack only.
+- No auth secrets in browser storage (`localStorage`/`sessionStorage`/
+  IndexedDB): the cookie is HttpOnly and the frontend holds only
+  `username`/`csrfToken`/`formToken` in memory.
+- No CSP weakening: hash-based `script-src`, never `unsafe-eval` or
+  `unsafe-inline`.
 
 ## Harness adapter invariants (ADR-005, implemented)
 

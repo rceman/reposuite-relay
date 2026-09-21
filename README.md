@@ -17,7 +17,11 @@ session's lifetime.
 - Standalone CLI: `reposuite-relay`
 - Future RepoSuite umbrella invocation: `reposuite relay ...`
 - Canonical toolchain: exactly `go1.27.1`
-- Production core: **stdlib only** (no third-party dependencies)
+- Production core: stdlib + `golang.org/x/crypto` (Argon2id, Web Admin
+  credential) as the single approved dependency family
+- Embedded Web Admin: SvelteKit + TypeScript + shadcn-svelte + Tabler
+  Icons, statically built into `web/build` and embedded in the binary —
+  production needs no Node
 - Product target: Linux, macOS, Windows (ADR-006)
 
 ## Currently implemented
@@ -59,13 +63,16 @@ endpoint authenticates with **either** that rotating descriptor bearer
 `~/.reposuite/relay/config/api.token` (minted once, `0600`, never
 exposed) — see `docs/GATEWAY_API.md` for the machine-client contract.
 The CLI auto-starts the daemon when genuinely absent; `status` and
-`daemon stop` never do. `GET /` is the Web Admin entry point: on first
-run it serves a one-time admin setup (Argon2id-hashed credential in
-`config/admin.json`, create-once), afterwards login — issuing an
+`daemon stop` never do. `GET /` serves the **embedded SvelteKit Web
+Admin**: the anonymous SPA shell boots from `GET /auth/session` —
+first run → one-time admin setup (Argon2id-hashed credential in
+`config/admin.json`, create-once); afterwards → login — issuing an
 `HttpOnly`, `SameSite=Strict` browser session that also authenticates
-`/v1` (with Origin + CSRF obligations on unsafe methods). The full model
-is `docs/WEB_ADMIN_SECURITY.md`. The `fixture` harness is a
-deterministic development/test child — **not** a real agent harness.
+`/v1` (with Origin + CSRF obligations on unsafe methods). The
+authenticated shell currently offers an Overview page and a read-only
+Sessions page. The full model is `docs/WEB_ADMIN_SECURITY.md`. The
+`fixture` harness is a deterministic development/test child — **not**
+a real agent harness.
 
 **Native Codex sessions.** `serve codex` creates a durable session with
 **zero** harness resources; the first prompt wakes one shared
@@ -107,18 +114,20 @@ answered by policy (never converted into requested input, which is
 `UNSUPPORTED_OPERATION` for ACP harnesses).
 
 **Not yet implemented:** Codex approval requests and `turn/steer`,
-rate-limit surfaces, ACP requested-input, the Web Admin dashboard (the
-auth/security foundation — setup, login, sessions, CSRF, Host and
-Origin enforcement — is in place), the GPT Tunnel integration,
-cross-platform singleton locking. A TUI is not planned — the management
-surfaces are the machine API (automation) and the Web Admin (humans).
+rate-limit surfaces, ACP requested-input, Web Admin session controls
+(the foundation — setup, login, shell, overview, read-only sessions —
+is in place; prompt/cancel/config controls are a later milestone), the
+GPT Tunnel integration, cross-platform singleton locking. A TUI is not
+planned — the management surfaces are the machine API (automation) and
+the Web Admin (humans).
 
 ## Layout
 
 - `cmd/reposuite-relay` — CLI (a local HTTP client of relayd)
 - `internal/daemon` — daemon lifecycle, HTTP control plane, descriptor
 - `internal/client` — the single local client (descriptor + auth + API)
-- `internal/api` — local API v1 wire contract (DTOs, error codes)
+- `internal/api` — local API wire contract (DTOs, error codes; current
+  version 2, advertised as `apiVersion`)
 - `internal/events` — canonical event broker (seq reservation, ring, subs)
 - `internal/session` — `RelaySession`/`HarnessRuntime` domain + registry
 - `internal/store` — durable session/transcript filesystem store
@@ -136,9 +145,13 @@ surfaces are the machine API (automation) and the Web Admin (humans).
 - `internal/adminauth` — Web Admin credential domain: `config/admin.json`
   (Argon2id PHC), memory-only browser sessions, CSRF/form tokens, login
   throttling
+- `web/` — embedded SvelteKit Web Admin source (TypeScript, shadcn-svelte,
+  Tabler Icons) plus `embed.go` (`go:embed build`); `web/build/` is the
+  committed release artifact served by relayd
 - `tools/` — nested developer-tool module: exact `o200k_base` token
   counter and `gofmt-struct` (never imported by production)
-- `scripts/` — Go hygiene gates (`check-go-files.sh`, `check-go-format.sh`)
+- `scripts/` — hygiene gates (`check-go-files.sh`, `check-go-format.sh`,
+  `check-web.sh` for frontend drift)
 - `docs/` — domain vocabulary, ADRs, feasibility research
 - `testdata/` — historical captured research data (terminal spike)
 
@@ -151,7 +164,15 @@ scripts/check-go-files.sh HEAD   # fast gate: changed + untracked Go files
 scripts/check-go-files.sh --all  # full gate: gofmt + gofmt-struct + <=3000 tokens
 go vet ./... && go test ./... && go test -race -count=1 ./... && go build ./...
 (cd tools && go test ./... && go test -race ./... && go build ./...)
+scripts/check-web.sh             # npm ci + check + test + build + web/build drift
 ```
+
+The Web Admin is built once with Node/Vite and committed under
+`web/build/`; the production binary embeds it via `web/embed.go`, so a
+clean checkout builds and serves the UI with **no Node runtime**. For
+frontend development against a live daemon, run `npm run dev` in `web/`
+with `RELAY_DEV_TARGET=http://127.0.0.1:<port>` — the Vite proxy
+rewrites Host/Origin to the canonical loopback authority.
 
 Relay state defaults to `~/.reposuite/relay`
 (`$REPOSUITE_HOME` overrides the RepoSuite root). Nothing is read or written

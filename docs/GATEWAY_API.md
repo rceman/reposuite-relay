@@ -19,8 +19,10 @@ http://127.0.0.1:<stable-port>
   cannot be bound fails startup rather than re-selecting.
 - Loopback only — `0.0.0.0`, LAN binding, hostnames, Unix sockets, and
   HTTPS are not supported.
-- `GET /` is the Web Admin entry point on the same origin (first-run
-  admin setup, then login). The API lives under `/v1` on the same origin.
+- `GET /` serves the embedded SvelteKit Web Admin on the same origin —
+  an anonymous SPA that bootstraps from `GET /auth/session` (setup or
+  login, then the authenticated shell). The API lives under `/v1` on
+  the same origin.
 
 ## Authentication
 
@@ -238,7 +240,7 @@ masked). Runtime-only fields are omitted when stopped.
 - **COLD is real:** a cold session owns no process; a client count of
   cold sessions is a faithful signal that nothing is running.
 - **Loopback only, no CORS:** the API never serves off-loopback; the
-  future Web Admin is same-origin on `/`.
+  Web Admin is same-origin on `/`.
 - **No auto-start via status:** `reposuite-relay status` reads config +
   descriptor only; managed commands may spawn the daemon lazily.
 
@@ -247,5 +249,6 @@ masked). Runtime-only fields are omitted when stopped.
 - No project/worker entities — Gateway maps `project + worker → session
   key` and stays the authority for project identity.
 - No token management, scopes, rotation, OAuth/JWT.
-- No Web Admin dashboard yet — the auth foundation (setup, login,
-  sessions, CSRF) is in place; operational UI is a later milestone.
+- No Web Admin session controls yet — the embedded foundation (setup,
+  login, shell, overview, read-only sessions) is in place; mutating UI
+  is a later milestone.
