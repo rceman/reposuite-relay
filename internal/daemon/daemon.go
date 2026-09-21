@@ -53,8 +53,9 @@ type Daemon struct {
 	ln       net.Listener
 	srv      *http.Server
 
-	web   *webAuth   // browser-auth state; creds nil until admin setup
-	webMu sync.Mutex // serializes the create-once admin credential commit
+	web    *webAuth   // browser-auth state; creds nil until admin setup
+	webMu  sync.Mutex // serializes the create-once admin credential commit
+	static *webStatic // embedded SvelteKit Web Admin build
 
 	mu       sync.Mutex
 	shutting bool
@@ -187,6 +188,14 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 		return nil, err
 	}
 	d.web = web
+	// The embedded Web Admin build is part of the binary — its absence or
+	// corruption is a build defect, so startup fails closed.
+	d.static, err = newWebStatic()
+	if err != nil {
+		d.ln.Close()
+		d.releaseLock()
+		return nil, err
+	}
 	d.srv = &http.Server{
 		Handler:           http.HandlerFunc(d.route),
 		ReadHeaderTimeout: d.opts.ReadTimeout,

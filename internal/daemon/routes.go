@@ -19,8 +19,18 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMisdirectedRequest, api.ErrInvalidRequest, "unexpected host")
 		return
 	}
-	if adminPath(r.URL.Path) {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/auth/"):
+		// Web Admin auth endpoints — Go-owned, never the SPA.
 		d.routeWeb(w, r)
+		return
+	case p == "/v1" || strings.HasPrefix(p, "/v1/"):
+		// Machine API — credential domains enforced below.
+	default:
+		// Everything else is the embedded Web Admin surface: static
+		// assets or the SPA fallback document.
+		d.serveStatic(w, r)
 		return
 	}
 	kind, sess := d.authenticate(r)
@@ -37,7 +47,6 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	p := r.URL.Path
 	switch {
 	case p == "/v1/daemon" && r.Method == http.MethodGet:
 		d.handleDaemonInfo(w, r)

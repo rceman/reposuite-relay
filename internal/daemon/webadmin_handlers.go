@@ -7,9 +7,7 @@ package daemon
 import (
 	"crypto/subtle"
 	"errors"
-	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -22,12 +20,6 @@ import (
 func (d *Daemon) routeWeb(w http.ResponseWriter, r *http.Request) {
 	d.web.securityHeaders(w.Header())
 	switch r.URL.Path {
-	case "/":
-		if r.Method != http.MethodGet {
-			methodOrNotFound(w, r, http.MethodGet)
-			return
-		}
-		d.handleWebRoot(w, r)
 	case "/auth/setup":
 		if r.Method != http.MethodPost {
 			methodOrNotFound(w, r, http.MethodPost)
@@ -72,39 +64,6 @@ func (d *Daemon) lifecycleN(h func(http.ResponseWriter, *http.Request)) func(htt
 		defer d.wg.Done()
 		h(w, r)
 	}
-}
-
-// webPage is the template view model.
-type webPage struct {
-	Mode      string // setup | login | shell
-	Username  string
-	FormToken string
-	CSRFToken string
-	Error     string
-}
-
-// handleWebRoot renders the state-dependent shell: setup when no admin
-// exists, login when unauthenticated, the minimal shell when signed in.
-func (d *Daemon) handleWebRoot(w http.ResponseWriter, r *http.Request) {
-	if !d.web.configured() {
-		d.renderWeb(w, webPage{
-			Mode:      "setup",
-			FormToken: d.web.mgr.FormToken("setup"),
-		})
-		return
-	}
-	if s, _, ok := d.web.cookieSession(r); ok {
-		d.renderWeb(w, webPage{
-			Mode:      "shell",
-			Username:  s.Username,
-			CSRFToken: s.CSRFToken,
-		})
-		return
-	}
-	d.renderWeb(w, webPage{
-		Mode:      "login",
-		FormToken: d.web.mgr.FormToken("login"),
-	})
 }
 
 // formDecode bounds and decodes one urlencoded form body.
@@ -280,9 +239,12 @@ func (d *Daemon) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// handleAuthSession reports the browser-auth projection. It never
-// returns the password hash, the machine token, the descriptor bearer,
-// or the browser session token itself — only the session CSRF token.
+// handleAuthSession reports the browser-auth projection the SPA uses to
+// choose between setup, login, and the authenticated shell. The
+// formToken is the pre-auth CSRF value for the applicable form ("setup"
+// when unconfigured, "login" when configured and unauthenticated). It
+// never returns the password hash, the machine token, the descriptor
+// bearer, or the browser session token itself.
 func (d *Daemon) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"configured":    d.web.configured(),
@@ -292,14 +254,10 @@ func (d *Daemon) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 		out["authenticated"] = true
 		out["username"] = s.Username
 		out["csrfToken"] = s.CSRFToken
+	} else if d.web.configured() {
+		out["formToken"] = d.web.mgr.FormToken("login")
+	} else {
+		out["formToken"] = d.web.mgr.FormToken("setup")
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// renderWeb renders the shell template.
-func (d *Daemon) renderWeb(w http.ResponseWriter, page webPage) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := webTemplate.Execute(w, page); err != nil {
-		fmt.Fprintf(os.Stderr, "relayd: web template: %v\n", err)
-	}
 }

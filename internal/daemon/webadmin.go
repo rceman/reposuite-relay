@@ -1,9 +1,8 @@
-// Web Admin authentication foundation (ADR-006 §Web Admin): server-
-// rendered minimal shell plus the browser credential domain. Three
-// credential domains exist: the ephemeral descriptor bearer, the
-// persistent machine bearer, and the admin cookie session. Cookie
-// authentication is browser-only and carries CSRF obligations that the
-// bearer domains do not.
+// Web Admin authentication (ADR-006 §Web Admin): the browser credential
+// domain behind the embedded SvelteKit SPA. Three credential domains
+// exist: the ephemeral descriptor bearer, the persistent machine bearer,
+// and the admin cookie session. Cookie authentication is browser-only
+// and carries CSRF obligations that the bearer domains do not.
 package daemon
 
 import (
@@ -105,12 +104,6 @@ func (w *webAuth) configured() bool { return w.creds.Load() != nil }
 
 // credentials returns the loaded credential (nil in setup mode).
 func (w *webAuth) credentials() *adminauth.Credentials { return w.creds.Load() }
-
-// adminPath reports whether the path is a Web Admin surface that
-// requires the canonical Host header.
-func adminPath(p string) bool {
-	return p == "/" || strings.HasPrefix(p, "/auth/")
-}
 
 // hostOK enforces exact Host: only 127.0.0.1:<configured-port> is the
 // Web Admin authority — DNS-rebinding attempts through any other name
