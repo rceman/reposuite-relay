@@ -4,11 +4,19 @@
 // never a blind `as` cast.
 import type {
 	AuthSession,
+	CancelResponse,
 	DaemonInfo,
+	DaemonResponse,
 	ErrorBody,
+	InputResponse,
+	PromptResponse,
+	RelayEvent,
 	SessionInfo,
 	SessionList,
-	SessionMetrics
+	SessionMetrics,
+	SessionResponse,
+	TranscriptPage,
+	TranscriptRecord
 } from './types';
 
 export class DecodeError extends Error {
@@ -116,7 +124,7 @@ function decodeMetrics(v: unknown): SessionMetrics {
 	return out;
 }
 
-function decodeSessionInfo(v: unknown): SessionInfo {
+export function decodeSessionInfo(v: unknown): SessionInfo {
 	if (!isRecord(v)) throw new DecodeError('session');
 	const out: SessionInfo = {
 		key: reqString(v, 'key'),
@@ -148,4 +156,95 @@ export function decodeSessionList(v: unknown): SessionList {
 	const raw = v.sessions;
 	if (raw !== null && !Array.isArray(raw)) throw new DecodeError('sessions');
 	return { daemon, sessions: (raw ?? []).map(decodeSessionInfo) };
+}
+
+/**
+ * Canonical sequence/cursor guard: uint64 on the wire must survive JSON
+ * exactly. A value beyond Number.MAX_SAFE_INTEGER (or fractional/negative)
+ * is protocol corruption — the response is rejected, never rounded.
+ */
+function reqSeq(v: Record<string, unknown>, key: string): number {
+	const n = v[key];
+	if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
+		throw new DecodeError(key);
+	}
+	return n;
+}
+
+export function decodeSessionResponse(v: unknown): SessionResponse {
+	if (!isRecord(v)) throw new DecodeError('sessionResponse');
+	return { daemon: decodeDaemonInfo(v.daemon), session: decodeSessionInfo(v.session) };
+}
+
+export function decodeDaemonResponse(v: unknown): DaemonResponse {
+	if (!isRecord(v)) throw new DecodeError('daemonResponse');
+	return { daemon: decodeDaemonInfo(v.daemon) };
+}
+
+export function decodePromptResponse(v: unknown): PromptResponse {
+	if (!isRecord(v)) throw new DecodeError('promptResponse');
+	return {
+		daemon: decodeDaemonInfo(v.daemon),
+		key: reqString(v, 'key'),
+		turnId: reqString(v, 'turnId'),
+		nativeSessionId: reqString(v, 'nativeSessionId'),
+		runtimeId: reqString(v, 'runtimeId')
+	};
+}
+
+export function decodeCancelResponse(v: unknown): CancelResponse {
+	if (!isRecord(v)) throw new DecodeError('cancelResponse');
+	const out: CancelResponse = {
+		daemon: decodeDaemonInfo(v.daemon),
+		key: reqString(v, 'key')
+	};
+	const turnId = optString(v, 'turnId');
+	if (turnId !== undefined) out.turnId = turnId;
+	return out;
+}
+
+export function decodeInputResponse(v: unknown): InputResponse {
+	if (!isRecord(v)) throw new DecodeError('inputResponse');
+	return {
+		daemon: decodeDaemonInfo(v.daemon),
+		key: reqString(v, 'key'),
+		inputId: reqString(v, 'inputId')
+	};
+}
+
+function decodeRecord(v: unknown): TranscriptRecord {
+	if (!isRecord(v)) throw new DecodeError('record');
+	const out: TranscriptRecord = {
+		version: reqNumber(v, 'version'),
+		seq: reqSeq(v, 'seq'),
+		type: reqString(v, 'type'),
+		at: reqString(v, 'at')
+	};
+	// payload is unknown until an event-specific decoder narrows it.
+	if (v.payload !== undefined) out.payload = v.payload;
+	return out;
+}
+
+export function decodeTranscriptPage(v: unknown): TranscriptPage {
+	if (!isRecord(v)) throw new DecodeError('transcriptPage');
+	const raw = v.records;
+	if (raw !== null && !Array.isArray(raw)) throw new DecodeError('records');
+	return {
+		throughSeq: reqSeq(v, 'throughSeq'),
+		records: (raw ?? []).map(decodeRecord),
+		hasMoreBefore: reqBool(v, 'hasMoreBefore')
+	};
+}
+
+export function decodeRelayEvent(v: unknown): RelayEvent {
+	if (!isRecord(v)) throw new DecodeError('event');
+	const out: RelayEvent = {
+		seq: reqSeq(v, 'seq'),
+		sessionId: reqString(v, 'sessionId'),
+		type: reqString(v, 'type'),
+		at: reqString(v, 'at'),
+		durable: reqBool(v, 'durable')
+	};
+	if (v.payload !== undefined) out.payload = v.payload;
+	return out;
 }

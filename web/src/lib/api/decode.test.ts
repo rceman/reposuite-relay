@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { DecodeError, decodeAuthSession, decodeSessionList } from './decode';
+import {
+	DecodeError,
+	decodeAuthSession,
+	decodeCancelResponse,
+	decodeInputResponse,
+	decodePromptResponse,
+	decodeRelayEvent,
+	decodeSessionList,
+	decodeSessionResponse,
+	decodeTranscriptPage
+} from './decode';
 
 describe('decodeAuthSession', () => {
 	it('decodes the unconfigured setup projection', () => {
@@ -123,6 +133,165 @@ describe('decodeSessionList', () => {
 					coldSessions: 1
 				},
 				sessions: [rest]
+			})
+		).toThrow(DecodeError);
+	});
+});
+
+describe('decodeSessionResponse', () => {
+	const daemon = {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 1,
+		activeSessions: 0,
+		coldSessions: 1
+	};
+	const session = {
+		key: 'k',
+		sessionId: 's1',
+		runtimeId: '',
+		runtimeState: 'cold',
+		harness: 'codex',
+		cwd: '/x',
+		state: 'idle',
+		activity: 'idle',
+		generation: 0,
+		pid: 0,
+		createdAt: '2026-01-01T00:00:00Z',
+		generationStartedAt: ''
+	};
+
+	it('decodes a session response', () => {
+		const r = decodeSessionResponse({ daemon, session });
+		expect(r.session.key).toBe('k');
+		expect(r.session.runtimeState).toBe('cold');
+		expect(r.daemon.apiVersion).toBe(2);
+	});
+
+	it('rejects a missing session', () => {
+		expect(() => decodeSessionResponse({ daemon })).toThrow(DecodeError);
+	});
+});
+
+describe('decodePromptResponse / decodeCancelResponse / decodeInputResponse', () => {
+	const daemon = {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 0,
+		activeSessions: 0,
+		coldSessions: 0
+	};
+
+	it('decodes prompt acceptance', () => {
+		const r = decodePromptResponse({
+			daemon,
+			key: 'k',
+			turnId: 't1',
+			nativeSessionId: 'thr_1',
+			runtimeId: 'rt1'
+		});
+		expect(r.turnId).toBe('t1');
+		expect(r.nativeSessionId).toBe('thr_1');
+	});
+
+	it('decodes cancel acceptance (turnId optional)', () => {
+		const r = decodeCancelResponse({ daemon, key: 'k' });
+		expect(r.key).toBe('k');
+		expect(r.turnId).toBeUndefined();
+	});
+
+	it('decodes input acceptance', () => {
+		const r = decodeInputResponse({ daemon, key: 'k', inputId: 'in_1' });
+		expect(r.inputId).toBe('in_1');
+	});
+
+	it('rejects malformed required fields', () => {
+		expect(() => decodePromptResponse({ daemon, key: 'k', turnId: 5 })).toThrow(DecodeError);
+		expect(() => decodeInputResponse({ daemon, key: 'k' })).toThrow(DecodeError);
+	});
+});
+
+describe('decodeTranscriptPage / decodeRelayEvent — safe-integer cursors', () => {
+	const rec = {
+		version: 1,
+		seq: 3,
+		type: 'message.user',
+		at: '2026-01-01T00:00:00Z',
+		payload: { text: 'hi' }
+	};
+
+	it('decodes a transcript page', () => {
+		const p = decodeTranscriptPage({ throughSeq: 7, records: [rec], hasMoreBefore: false });
+		expect(p.throughSeq).toBe(7);
+		expect(p.records[0]?.seq).toBe(3);
+		expect(p.hasMoreBefore).toBe(false);
+	});
+
+	it('normalizes a null records array (Go empty slice)', () => {
+		const p = decodeTranscriptPage({ throughSeq: 0, records: null, hasMoreBefore: false });
+		expect(p.records).toEqual([]);
+	});
+
+	it('accepts seq == MAX_SAFE_INTEGER', () => {
+		const p = decodeTranscriptPage({
+			throughSeq: Number.MAX_SAFE_INTEGER,
+			records: [],
+			hasMoreBefore: false
+		});
+		expect(p.throughSeq).toBe(Number.MAX_SAFE_INTEGER);
+	});
+
+	it('rejects seq beyond MAX_SAFE_INTEGER', () => {
+		expect(() =>
+			decodeTranscriptPage({
+				throughSeq: Number.MAX_SAFE_INTEGER + 1,
+				records: [],
+				hasMoreBefore: false
+			})
+		).toThrow(DecodeError);
+		expect(() =>
+			decodeTranscriptPage({
+				throughSeq: 1,
+				records: [{ ...rec, seq: Number.MAX_SAFE_INTEGER + 1 }],
+				hasMoreBefore: false
+			})
+		).toThrow(DecodeError);
+	});
+
+	it('rejects fractional and negative seq', () => {
+		expect(() =>
+			decodeTranscriptPage({ throughSeq: 1.5, records: [], hasMoreBefore: false })
+		).toThrow(DecodeError);
+		expect(() =>
+			decodeTranscriptPage({ throughSeq: -1, records: [], hasMoreBefore: false })
+		).toThrow(DecodeError);
+	});
+
+	it('decodes a relay event with payload', () => {
+		const ev = decodeRelayEvent({
+			seq: 9,
+			sessionId: 's1',
+			type: 'message.agent.delta',
+			at: '2026-01-01T00:00:00Z',
+			payload: { turnId: 't', text: 'x' },
+			durable: false
+		});
+		expect(ev.seq).toBe(9);
+		expect(ev.durable).toBe(false);
+	});
+
+	it('rejects an event with unsafe seq', () => {
+		expect(() =>
+			decodeRelayEvent({
+				seq: 2 ** 53,
+				sessionId: 's1',
+				type: 'x',
+				at: '2026-01-01T00:00:00Z',
+				durable: false
 			})
 		).toThrow(DecodeError);
 	});

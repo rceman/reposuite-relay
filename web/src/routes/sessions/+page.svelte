@@ -19,7 +19,8 @@
 	} from '$lib/components/ui/table';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
-	import { IconAlertTriangle } from '@tabler/icons-svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { IconAlertTriangle, IconPlus } from '@tabler/icons-svelte';
 
 	let data = $state<SessionList | null>(null);
 	let error = $state<string | null>(null);
@@ -47,6 +48,14 @@
 		</Alert>
 	{/if}
 
+	<div class="mb-4 flex items-center justify-between">
+		<h1 class="text-lg font-semibold">Sessions</h1>
+		<Button href="/sessions/new" size="sm">
+			<IconPlus size={14} stroke={1.75} aria-hidden="true" />
+			New session
+		</Button>
+	</div>
+
 	<Card>
 		<CardContent class="p-0">
 			<Table>
@@ -65,9 +74,11 @@
 				<TableBody>
 					{#each data?.sessions ?? [] as s (s.sessionId)}
 						<TableRow>
-							<TableCell class="max-w-40 truncate font-mono text-xs" title={s.key}
-								>{s.key}</TableCell
-							>
+							<TableCell class="max-w-40 truncate font-mono text-xs" title={s.key}>
+								<a href="/sessions/{s.key}" class="underline-offset-2 hover:underline"
+									>{s.key}</a
+								>
+							</TableCell>
 							<TableCell>{providerName(s.harness)}</TableCell>
 							<TableCell><StatusBadge status={activityStatus(s)} /></TableCell>
 							<TableCell><StatusBadge status={runtimeStatus(s)} /></TableCell>

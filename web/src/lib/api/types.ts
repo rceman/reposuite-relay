@@ -70,3 +70,181 @@ export interface SessionList {
 	daemon: DaemonInfo;
 	sessions: SessionInfo[];
 }
+
+/** GET /v1/sessions/{key} and mutating single-session responses. */
+export interface SessionResponse {
+	daemon: DaemonInfo;
+	session: SessionInfo;
+}
+
+/** GET /v1/daemon, DELETE /v1/sessions/{key}, POST /v1/daemon/shutdown. */
+export interface DaemonResponse {
+	daemon: DaemonInfo;
+}
+
+/** POST /v1/sessions/{key}/prompt — the accepted native turn. */
+export interface PromptResponse {
+	daemon: DaemonInfo;
+	key: string;
+	turnId: string;
+	nativeSessionId: string;
+	runtimeId: string;
+}
+
+/** POST /v1/sessions/{key}/cancel — cancellation request accepted. */
+export interface CancelResponse {
+	daemon: DaemonInfo;
+	key: string;
+	turnId?: string;
+}
+
+/** POST /v1/sessions/{key}/input — the accepted requested-input answer. */
+export interface InputResponse {
+	daemon: DaemonInfo;
+	key: string;
+	inputId: string;
+}
+
+/** One durable transcript record (internal/store.Record). */
+export interface TranscriptRecord {
+	version: number;
+	seq: number;
+	type: string;
+	at: string;
+	payload?: unknown;
+}
+
+/**
+ * GET /v1/sessions/{key}/transcript — a bounded durable tail. throughSeq
+ * is the canonical event cursor at snapshot time (NOT the last record
+ * seq): subscribe to events after exactly this value.
+ */
+export interface TranscriptPage {
+	throughSeq: number;
+	records: TranscriptRecord[];
+	hasMoreBefore: boolean;
+}
+
+/** One canonical event on the NDJSON stream (internal/events.Event). */
+export interface RelayEvent {
+	seq: number;
+	sessionId: string;
+	type: string;
+	at: string;
+	payload?: unknown;
+	durable: boolean;
+}
+
+/** POST /v1/sessions/{provider} body. */
+export interface CreateSessionBody {
+	key: string;
+	cwd: string;
+	model?: string;
+	mode?: string;
+}
+
+/** PATCH /v1/sessions/{key}/config body — only changed fields are sent. */
+export interface ConfigBody {
+	model?: string;
+	mode?: string;
+}
+
+/** One answer to one requested-input question. */
+export interface InputAnswer {
+	questionId: string;
+	answers: string[];
+}
+
+/** POST /v1/sessions/{key}/input body. */
+export interface InputBody {
+	inputId: string;
+	answers: InputAnswer[];
+}
+
+// --- canonical event payloads -------------------------------------------
+// These mirror internal/api/events.go and the Codex adapter's input
+// payloads. Payloads on the wire are `unknown` and narrowed through
+// decode.ts — never cast.
+
+export interface MessageUserPayload {
+	text: string;
+	model?: string;
+	effort?: string;
+}
+
+/** message.agent.completed AND message.agent.delta share this shape. */
+export interface MessageAgentPayload {
+	turnId: string;
+	itemId?: string;
+	text?: string;
+}
+
+export interface TurnEventPayload {
+	turnId?: string;
+	error?: string;
+}
+
+export interface HarnessStartedPayload {
+	runtimeId: string;
+	nativeSessionId: string;
+	model?: string;
+	resumed: boolean;
+}
+
+export interface RuntimeExitedPayload {
+	runtimeId: string;
+	reason?: string;
+}
+
+export interface ConfigChangedPayload {
+	model: string;
+	mode: string;
+}
+
+export interface NativeSessionPayload {
+	nativeSessionId: string;
+	generation: number;
+}
+
+export interface HarnessErrorPayload {
+	message: string;
+	fatal?: boolean;
+}
+
+/** metrics.updated embeds SessionMetrics flat on the wire (Go embed). */
+export interface MetricsUpdatedPayload extends SessionMetrics {
+	kind: string;
+}
+
+export interface InputOption {
+	label: string;
+	description?: string;
+}
+
+export interface InputQuestion {
+	id: string;
+	header: string;
+	question: string;
+	options?: InputOption[];
+	isOther?: boolean;
+	isSecret?: boolean;
+}
+
+export interface InputRequestedPayload {
+	inputId: string;
+	turnId: string;
+	itemId: string;
+	isBlocking: boolean;
+	questions: InputQuestion[];
+}
+
+export interface InputResolvedPayload {
+	inputId: string;
+	answers: Record<string, string[]>;
+	redacted?: string[];
+}
+
+export interface InputAbortedPayload {
+	inputId: string;
+	reason: string;
+}
