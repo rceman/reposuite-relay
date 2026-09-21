@@ -53,6 +53,9 @@ type Daemon struct {
 	ln       net.Listener
 	srv      *http.Server
 
+	web   *webAuth   // browser-auth state; creds nil until admin setup
+	webMu sync.Mutex // serializes the create-once admin credential commit
+
 	mu       sync.Mutex
 	shutting bool
 	shutdown chan struct{}
@@ -174,6 +177,16 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	}
 	d.instanceID = instanceID
 	d.token = token
+	// Web Admin credential domain: admin.json absent means first-run setup
+	// mode; malformed or insecure content fails startup closed. Browser
+	// sessions live only in memory and die with this generation.
+	web, err := newWebAuth(p, d.endpoint(), d.opts.AdminKDF, d.opts.AdminClock)
+	if err != nil {
+		d.ln.Close()
+		d.releaseLock()
+		return nil, err
+	}
+	d.web = web
 	d.srv = &http.Server{
 		Handler:           http.HandlerFunc(d.route),
 		ReadHeaderTimeout: d.opts.ReadTimeout,

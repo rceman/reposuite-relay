@@ -5,6 +5,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/adminauth"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
@@ -59,6 +60,11 @@ type Options struct {
 	// StoreHooks overrides store filesystem primitives — test seam only
 	// for deterministic post-commit failure injection.
 	StoreHooks *store.Hooks
+	// AdminKDF overrides the Argon2id work factors — test seam only;
+	// production uses adminauth.ProductionParams.
+	AdminKDF adminauth.Params
+	// AdminClock overrides the browser-auth clock — test seam only.
+	AdminClock adminauth.Clock
 }
 
 func (o Options) withDefaults() Options {

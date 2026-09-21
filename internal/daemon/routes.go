@@ -1,30 +1,41 @@
 package daemon
 
 import (
-	"crypto/subtle"
-	"github.com/rceman/reposuite-relay/internal/api"
-	"github.com/rceman/reposuite-relay/internal/session"
 	"net/http"
 	"strings"
+
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/session"
 )
 
-// route dispatches one request. The root path is reserved for the future
-// Web Admin and answers a fixed name string anonymously — no operational
-// data, no secrets. Every /v1 route requires a bearer token, including
-// daemon status, transcript, the event stream, and shutdown.
+// route dispatches one request. The canonical Host is enforced before
+// any routing: only 127.0.0.1:<configured-port> is this Relay — a
+// foreign Host (DNS rebinding, forwarded names) fails closed. The Web
+// Admin surface lives at / and /auth/*; every /v1 route requires one of
+// the three credential domains: descriptor bearer, machine bearer, or
+// an authenticated admin browser session.
 func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		if r.Method != http.MethodGet {
-			methodOrNotFound(w, r, http.MethodGet)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("RepoSuite Relay\n"))
+	if !d.web.hostOK(r) {
+		writeErr(w, http.StatusMisdirectedRequest, api.ErrInvalidRequest, "unexpected host")
 		return
 	}
-	if !d.authorized(r) {
-		writeErr(w, http.StatusUnauthorized, api.ErrUnauthorized, "missing or invalid bearer token")
+	if adminPath(r.URL.Path) {
+		d.routeWeb(w, r)
 		return
+	}
+	kind, sess := d.authenticate(r)
+	if kind == authNone {
+		writeErr(w, http.StatusUnauthorized, api.ErrUnauthorized, "missing or invalid credentials")
+		return
+	}
+	// Cookie-authenticated unsafe requests carry browser CSRF
+	// obligations: exact canonical Origin plus the session's CSRF token
+	// in X-Relay-CSRF. Bearer clients are unaffected.
+	if kind == authAdminCookie && unsafeMethod(r.Method) {
+		if !d.web.originOK(r) || !d.web.mgr.CheckCSRF(sess, r.Header.Get("X-Relay-CSRF")) {
+			writeErr(w, http.StatusForbidden, api.ErrUnauthorized, "browser CSRF check failed")
+			return
+		}
 	}
 	p := r.URL.Path
 	switch {
@@ -121,20 +132,14 @@ func methodOrNotFound(w http.ResponseWriter, r *http.Request, allowed ...string)
 	writeErr(w, http.StatusMethodNotAllowed, api.ErrInvalidRequest, "method not allowed")
 }
 
-// authorized performs constant-time bearer comparison against BOTH
-// credential domains: the ephemeral descriptor bearer (this generation's
-// internal clients) and the persistent machine bearer (trusted machine
-// clients). Either authenticates; a bad token gets one uniform 401.
-func (d *Daemon) authorized(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(h, prefix) {
-		return false
+// unsafeMethod reports whether the method mutates state — cookie-auth
+// requests with these methods carry the browser CSRF obligation.
+func unsafeMethod(m string) bool {
+	switch m {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
 	}
-	got := []byte(h[len(prefix):])
-	ok := subtle.ConstantTimeCompare(got, []byte(d.token))
-	ok |= subtle.ConstantTimeCompare(got, []byte(d.machineToken))
-	return ok == 1
+	return false
 }
 
 // lifecycle admits a mutating handler through the shutdown barrier: once
