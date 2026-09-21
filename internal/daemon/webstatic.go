@@ -224,10 +224,11 @@ func (d *Daemon) serveAsset(w http.ResponseWriter, r *http.Request, rel string, 
 	http.ServeContent(w, r, path.Base(rel), fi.ModTime(), rs)
 }
 
-// staticHeaders applies the baseline security policy to document/asset
-// responses. The CSP for documents is added by serveIndex; JSON error
-// bodies on this surface also inherit the restrictive default-src 'none'
-// flavor via the CSP-less baseline (nosniff makes it safe regardless).
+// staticHeaders applies the non-CSP baseline security headers shared by
+// documents, assets, and error responses on this surface. serveIndex
+// additionally sets the document CSP — the only HTML document. Generic
+// assets and JSON error bodies are not executable application
+// documents; the correct content type plus nosniff is their protection.
 func (d *Daemon) staticHeaders(h http.Header) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")

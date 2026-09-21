@@ -133,7 +133,10 @@ and the login view.
 
 ## Security headers
 
-Every static/Web Admin response carries:
+Headers depend on the response class:
+
+**SPA document** — `/`, `/sessions`, and every extensionless SPA route
+are served through `serveIndex()` and carry the document policy:
 
 ```
 Content-Security-Policy: default-src 'none';
@@ -146,7 +149,24 @@ Content-Security-Policy: default-src 'none';
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 X-Frame-Options: DENY
+Cache-Control: no-store
 ```
+
+**Auth endpoints** — `/auth/*` responses carry the auth security
+policy (`webAuth.securityHeaders`): `Content-Security-Policy:
+default-src 'none'; form-action 'self'; base-uri 'none';
+frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and
+`Cache-Control: no-store`.
+
+**Generic static assets** — `_app/immutable/*.js`, `_app/immutable/*.css`,
+`version.json`, favicon, etc. are not HTML documents and intentionally
+carry no CSP. They get the baseline headers `X-Content-Type-Options:
+nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, plus
+their cache policy: `public, max-age=31536000, immutable` for hashed
+`_app/immutable` files and `no-store` for everything else. A missing
+CSP on a JS/CSS asset is not a defect — nosniff plus the correct
+content type keeps them non-executable as documents.
 
 The SvelteKit entry document contains one inline bootstrap `<script>`
 (module loader). Instead of `'unsafe-inline'`, relayd computes the
