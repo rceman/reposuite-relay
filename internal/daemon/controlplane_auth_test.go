@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -123,8 +124,8 @@ func TestMalformedMachineTokenFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRootPathPlaceholder: GET / answers a fixed name anonymously — the
-// reserved Web Admin entry point, no operational data.
+// TestRootPathPlaceholder: GET / answers the embedded Web Admin SPA
+// shell anonymously — no operational data, no credential material.
 func TestRootPathPlaceholder(t *testing.T) {
 	p := testPaths(t)
 	d, err := Start(p, Options{SelfExe: testBinary()})
@@ -138,8 +139,11 @@ func TestRootPathPlaceholder(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / status %d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "RepoSuite Relay") {
-		t.Fatalf("GET / body %q", body)
+	if !bytes.Equal(body, d.static.index) {
+		t.Fatalf("GET / is not the embedded SPA entry: %q", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("GET / content-type %q", ct)
 	}
 	// Anonymous /v1 stays rejected even though / is open.
 	resp = rawGet(t, d.endpoint(), "/v1/daemon", "")

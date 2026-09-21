@@ -2,12 +2,10 @@ package daemon
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -210,7 +208,8 @@ func TestSetupPostCommitFailsClosed(t *testing.T) {
 		t.Fatal("daemon did not shut down after post-commit uncertainty")
 	}
 	// After the restart, the durable credential loads into login mode —
-	// setup never runs again.
+	// setup never runs again. The SPA document is anonymous in every
+	// state; the mode is reported by /auth/session.
 	d2, err := Start(p, Options{
 		SelfExe:  testBinary(),
 		AdminKDF: adminauth.TestParams,
@@ -219,17 +218,17 @@ func TestSetupPostCommitFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	serveDaemon(t, d2)
-	resp, err = c.Get(d2.endpoint() + "/")
-	if err != nil {
-		t.Fatal(err)
+	var sess struct {
+		Configured    bool   `json:"configured"`
+		Authenticated bool   `json:"authenticated"`
+		FormToken     string `json:"formToken"`
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if strings.Contains(string(body), "Web Admin setup") {
-		t.Fatal("restart still serving setup mode with a committed credential")
+	getSessionState(t, c, d2.endpoint(), &sess)
+	if !sess.Configured || sess.Authenticated || sess.FormToken == "" {
+		t.Fatalf("restart is not in login mode: %+v", sess)
 	}
-	if !strings.Contains(string(body), "Web Admin sign in") {
-		t.Fatalf("expected login page after restart: %q", body)
+	if sess.FormToken != d2.web.mgr.FormToken("login") {
+		t.Fatal("restart formToken is not the login token")
 	}
 }
 

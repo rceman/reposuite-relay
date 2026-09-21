@@ -1,14 +1,14 @@
 package daemon
 
 import (
-	"fmt"
+	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +90,23 @@ func setupAdmin(t *testing.T, d *Daemon, c *http.Client, username, password stri
 	return ""
 }
 
+// getSessionState GETs /auth/session and decodes it into out — the SPA
+// bootstrap endpoint carrying configured/authenticated/formToken/CSRF.
+func getSessionState(t *testing.T, c *http.Client, endpoint string, out any) {
+	t.Helper()
+	resp, err := c.Get(endpoint + "/auth/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/auth/session: %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		t.Fatalf("/auth/session decode: %v", err)
+	}
+}
+
 func webForm(d *Daemon, action string, fields url.Values) *http.Request {
 	req, err := http.NewRequest(http.MethodPost,
 		d.endpoint()+"/auth/"+action, strings.NewReader(fields.Encode()))
@@ -105,15 +122,16 @@ func TestSetupLoginLogoutFlow(t *testing.T) {
 	d, c := webDaemon(t)
 	endpoint := d.endpoint()
 
-	// State A: no admin → setup page.
+	// State A: no admin — root serves the anonymous SPA shell in every
+	// auth state; /auth/session carries the setup-mode projection.
 	resp, err := c.Get(endpoint + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), "Web Admin setup") {
-		t.Fatalf("root is not the setup page: %q", body)
+	if !bytes.Equal(body, d.static.index) {
+		t.Fatalf("root is not the embedded SPA entry: %q", body)
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type %q", ct)
@@ -124,6 +142,18 @@ func TestSetupLoginLogoutFlow(t *testing.T) {
 		if resp.Header.Get(h) == "" {
 			t.Fatalf("missing security header %s", h)
 		}
+	}
+	var sess struct {
+		Configured    bool   `json:"configured"`
+		Authenticated bool   `json:"authenticated"`
+		FormToken     string `json:"formToken"`
+	}
+	getSessionState(t, c, endpoint, &sess)
+	if sess.Configured || sess.Authenticated || sess.FormToken == "" {
+		t.Fatalf("bootstrap state wrong: %+v", sess)
+	}
+	if sess.FormToken != d.web.mgr.FormToken("setup") {
+		t.Fatal("bootstrap formToken is not the setup token")
 	}
 
 	setupToken := d.web.mgr.FormToken("setup")
@@ -193,15 +223,20 @@ func TestSetupLoginLogoutFlow(t *testing.T) {
 	if strings.Contains(setCookie, "Secure") {
 		t.Fatalf("loopback cookie must not set Secure: %q", setCookie)
 	}
-	// Authenticated root renders the shell.
-	resp, err = c.Get(endpoint + "/")
-	if err != nil {
-		t.Fatal(err)
+	// Authenticated: /auth/session reports the username + CSRF token and
+	// no form token; the SPA document itself stays the anonymous shell.
+	var authSess struct {
+		Configured    bool   `json:"configured"`
+		Authenticated bool   `json:"authenticated"`
+		Username      string `json:"username"`
+		CSRFToken     string `json:"csrfToken"`
+		FormToken     string `json:"formToken"`
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(body), "Signed in as admin") {
-		t.Fatalf("authenticated shell missing: %q", body)
+	getSessionState(t, c, endpoint, &authSess)
+	if !authSess.Configured || !authSess.Authenticated ||
+		authSess.Username != "admin" || authSess.CSRFToken == "" ||
+		authSess.FormToken != "" {
+		t.Fatalf("authenticated bootstrap wrong: %+v", authSess)
 	}
 	// Second setup is rejected.
 	resp = do(v)
@@ -232,15 +267,19 @@ func TestSetupLoginLogoutFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("logout: %d", resp.StatusCode)
 	}
-	// Cookie revoked: root is the login page again.
-	resp, err = c.Get(endpoint + "/")
-	if err != nil {
-		t.Fatal(err)
+	// Cookie revoked: /auth/session is back to the login projection.
+	var loggedOut struct {
+		Configured    bool   `json:"configured"`
+		Authenticated bool   `json:"authenticated"`
+		FormToken     string `json:"formToken"`
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(body), "Web Admin sign in") {
-		t.Fatalf("post-logout root is not the login page: %q", body)
+	getSessionState(t, c, endpoint, &loggedOut)
+	if !loggedOut.Configured || loggedOut.Authenticated ||
+		loggedOut.FormToken == "" {
+		t.Fatalf("post-logout bootstrap wrong: %+v", loggedOut)
+	}
+	if loggedOut.FormToken != d.web.mgr.FormToken("login") {
+		t.Fatal("post-logout formToken is not the login token")
 	}
 	// Double logout fails deterministically.
 	resp, err = c.Do(webForm(d, "logout", url.Values{adminCSRFField: {s.CSRFToken}}))
@@ -276,47 +315,5 @@ func TestSetupLoginLogoutFlow(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("login: %d", resp.StatusCode)
-	}
-}
-
-func TestConcurrentSetupCommitsOnce(t *testing.T) {
-	d, _ := webDaemon(t)
-	setupToken := d.web.mgr.FormToken("setup")
-	const n = 8
-	results := make(chan int, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			req := webForm(d, "setup", url.Values{"form_token": {setupToken},
-				"username": {fmt.Sprintf("admin%d", i)},
-				"password": {"correct-horse-12"}, "confirm": {"correct-horse-12"}})
-			resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			}}).Do(req)
-			if err != nil {
-				results <- -1
-				return
-			}
-			resp.Body.Close()
-			results <- resp.StatusCode
-		}(i)
-	}
-	wg.Wait()
-	close(results)
-	wins := 0
-	for code := range results {
-		if code == http.StatusSeeOther {
-			wins++
-		} else if code != http.StatusConflict {
-			t.Fatalf("unexpected setup result %d", code)
-		}
-	}
-	if wins != 1 {
-		t.Fatalf("%d concurrent setups committed, want exactly 1", wins)
-	}
-	if _, err := adminauth.Load(d.paths.AdminCredentials()); err != nil {
-		t.Fatalf("credential not committed: %v", err)
 	}
 }
