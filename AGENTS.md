@@ -62,10 +62,16 @@ IMPLEMENTED:
   0600), strictly validated, never in the descriptor/API/logs/status.
 - **Dual Bearer auth** on every `/v1` endpoint: descriptor bearer OR
   machine bearer, constant-time compare, one uniform 401.
-- `GET /` — reserved Web Admin entry point (anonymous fixed name
-  string, no operational data).
+- **Web Admin auth foundation** (`internal/adminauth`): first-run
+  admin setup and login on `/` + `/auth/*`, Argon2id PHC credential in
+  `config/admin.json` (0600, create-once, fail-closed), memory-only
+  browser sessions (30 min idle / 12 h absolute, bounded at 16),
+  exact Host (`127.0.0.1:<port>`) and Origin enforcement, per-session
+  CSRF for cookie-auth unsafe methods — see `docs/WEB_ADMIN_SECURITY.md`.
+- `GET /` — Web Admin entry point: setup form → login form → minimal
+  authenticated shell (no operational data yet).
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
-  uptime, session counts, API auth) that never auto-starts.
+  uptime, session counts, API auth, admin auth) that never auto-starts.
 - NDJSON canonical event-stream foundation (`internal/events`):
   per-session seq allocator with durable block reservation, exact
   history-cursor snapshots, explicit replay floor, lazily allocated
@@ -99,8 +105,8 @@ NOT YET IMPLEMENTED:
 - ACP session listing/deletion beyond Relay's own registry, ACP
   `authenticate` beyond the initialize handshake, and native ACP tool-call
   or plan surfacing (ignored deliberately, not guessed at).
-- Embedded Web Admin (same-origin on `/`, admin auth, embedded assets —
-  later milestone after Gateway dogfooding), GPT Tunnel integration.
+- Web Admin dashboard (operational UI on the auth foundation — embedded
+  assets later milestone), GPT Tunnel integration.
   A TUI is NOT planned: the management surfaces are the machine API and
   the future Web Admin; the CLI is bootstrap/diagnostics only.
 - Cross-platform singleton locking (currently Linux `flock`; the
@@ -126,16 +132,20 @@ report each as PASS/FAIL/N/A with evidence.
   (default `~/.reposuite/relay`). See `internal/paths`.
 - **Never** touch `~/.airelay`, `AIRELAY_*`, Airelay sockets/PIDs/state, or
   live Airelay/Codex sessions. Airelay is reference material, not a runtime
-  dependency.
+  dependency — and Relay must not read, write, or depend on Airelay runtime
+  state in either direction; integration clients (Gateway, GPT Tunnel) are
+  external repositories that consume Relay's API.
 - Tests must use isolated temporary roots — never the developer's real
   `~/.reposuite` or `~/.airelay`.
 - Private state is user-private (mode `0700`/`0600` on Unix).
 
 ## Dependencies
 
-- **stdlib only** in the production core today — `go.mod` must have no
-  third-party `require` entries. Additions need a concrete requirement
-  and Planner approval.
+- **stdlib + one approved crypto dep** in the production core:
+  `golang.org/x/crypto` (for `argon2`, Web Admin password hashing) is
+  the single approved dependency family; its required transitives
+  (`x/sys`) are acceptable. `go.mod`/`go.sum` must stay tidy and gain
+  nothing else without a concrete requirement and Planner approval.
 - Never import `github.com/gitpod-io/xterm-go`, `github.com/rceman/xterm-go`,
   or `github.com/creack/pty` — all superseded (ADR-005). The standalone
   `rceman/xterm-go` library is maintained independently; do not touch it

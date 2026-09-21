@@ -31,6 +31,16 @@ core.
     exposed). Singleton via `flock` on `run/relayd.lock` (Linux;
     platform-appropriate locking on macOS/Windows is *target*).
 
+**Web Admin auth** *(current)* — the browser credential domain:
+`config/admin.json` holds the admin username + Argon2id PHC hash
+(0600, create-once, fail-closed), and browser sessions are 256-bit
+random, `HttpOnly`/`SameSite=Strict` cookies indexed server-side by
+`SHA-256(token)`, memory-only (daemon restart logs everyone out),
+30-min idle / 12-h absolute expiry, bounded at 16. Cookie-auth unsafe
+requests additionally require the exact canonical Origin and the
+session's `X-Relay-CSRF` token; the canonical Host is enforced on every
+route. See `docs/WEB_ADMIN_SECURITY.md`.
+
 ## Sessions
 
 **RelaySession** *(current)* — the durable logical Relay session

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/adminauth"
 	"github.com/rceman/reposuite-relay/internal/auth"
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/daemon"
@@ -223,5 +224,80 @@ func TestStatusInvalidTokenSurfaced(t *testing.T) {
 		if string(after) != raw {
 			t.Fatalf("%s: status mutated the credential file", name)
 		}
+	}
+}
+
+// TestStatusAdminAuthStates: adminAuthStatus tracks the admin.json state
+// exactly — missing (setup mode), configured, or invalid — and never
+// prints the username, hash, or any token.
+func TestStatusAdminAuthStates(t *testing.T) {
+	bin := buildBinary(t)
+	hash, err := adminauth.Hash("a-valid-test-password", adminauth.TestParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"schemaVersion":1,"username":"admin","passwordHash":"` + hash + `"}`
+	for name, plant := range map[string]struct {
+		body     string
+		mode     os.FileMode
+		wantJSON string
+		wantText string
+	}{
+		"missing":    {"", 0, "missing", "not configured"},
+		"configured": {valid, 0o600, "configured", "configured"},
+		"invalid":    {`{"schemaVersion":1,"username":"a","passwordHash":"x"}`, 0o600, "invalid", "INVALID"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			home := filepath.Join(base, "home")
+			root := filepath.Join(base, "rs")
+			for _, dir := range []string{home, root} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p, err := paths.Resolve(home, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			if plant.body != "" {
+				if err := os.WriteFile(p.AdminCredentials(), []byte(plant.body), plant.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(p.AdminCredentials(), plant.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := runStatus(t, bin, root, "status")
+			if err != nil {
+				t.Fatalf("status: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "Admin auth:   "+plant.wantText) {
+				t.Fatalf("human status missing %q:\n%s", plant.wantText, out)
+			}
+			out, err = runStatus(t, bin, root, "status", "--json")
+			if err != nil {
+				t.Fatalf("status --json: %v\n%s", err, out)
+			}
+			var rep struct {
+				AdminAuthStatus     string `json:"adminAuthStatus"`
+				AdminAuthConfigured bool   `json:"adminAuthConfigured"`
+			}
+			if err := json.Unmarshal([]byte(out), &rep); err != nil {
+				t.Fatalf("parse: %v\n%s", err, out)
+			}
+			if rep.AdminAuthStatus != plant.wantJSON ||
+				rep.AdminAuthConfigured != (plant.wantJSON == "configured") {
+				t.Fatalf("want %s, got %s", plant.wantJSON, out)
+			}
+			for _, leak := range []string{"a-valid-test-password", hash} {
+				if strings.Contains(out, leak) {
+					t.Fatalf("status leaked admin credential material")
+				}
+			}
+		})
 	}
 }

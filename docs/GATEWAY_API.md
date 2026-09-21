@@ -19,24 +19,36 @@ http://127.0.0.1:<stable-port>
   cannot be bound fails startup rather than re-selecting.
 - Loopback only — `0.0.0.0`, LAN binding, hostnames, Unix sockets, and
   HTTPS are not supported.
-- `GET /` is the reserved Web Admin entry point on the same origin
-  (currently a fixed `RepoSuite Relay` placeholder). The API lives under
-  `/v1` on the same origin.
+- `GET /` is the Web Admin entry point on the same origin (first-run
+  admin setup, then login). The API lives under `/v1` on the same origin.
 
 ## Authentication
 
-Two credential domains exist. A request may present **either**:
+Three credential domains exist. A request may present **one**:
 
-| Token | File | Lifetime |
-|-------|------|----------|
+| Credential | File | Lifetime |
+|------------|------|----------|
 | Machine API bearer | `${REPOSUITE_HOME}/relay/config/api.token` | persistent (minted once, 0600) |
 | Descriptor bearer | `${REPOSUITE_HOME}/relay/run/daemon.json` | per daemon generation (internal discovery) |
+| Admin browser session | `relay_admin` cookie | memory-only, dies with the daemon generation |
 
 Machine clients (GPT Tunnel, automation) use the **machine API bearer**:
 
 ```
 Authorization: Bearer <contents of api.token>
 ```
+
+Browser clients authenticate with the `relay_admin` session cookie
+(`HttpOnly`, `SameSite=Strict`, `Path=/`), issued by `POST /auth/setup`
+or `POST /auth/login`. Cookie-authenticated **unsafe** methods
+(`POST`, `PUT`, `PATCH`, `DELETE`) additionally require the exact
+canonical `Origin` (`http://127.0.0.1:<port>`) and the session's CSRF
+token in `X-Relay-CSRF`; `GET`/`HEAD` do not. Bearer-authenticated
+requests carry no browser CSRF obligation.
+
+The canonical Host `127.0.0.1:<port>` is enforced on every request —
+any other Host fails before routing (DNS-rebinding defense). See
+`docs/WEB_ADMIN_SECURITY.md` for the full browser security model.
 
 - The token is 256 bits, hex-encoded, owner-private (`0600`). It is never
   returned by any API, never in `daemon.json`, never printed by `status`.
@@ -207,11 +219,13 @@ the next start.
  "address":"127.0.0.1:17432","webUrl":"http://127.0.0.1:17432/",
  "apiUrl":"http://127.0.0.1:17432/v1","uptimeSeconds":12345,
  "apiVersion":2,"sessions":18,"active":3,"cold":15,
- "apiAuthConfigured":true,"apiAuthStatus":"configured"}
+ "apiAuthConfigured":true,"apiAuthStatus":"configured",
+ "adminAuthConfigured":true,"adminAuthStatus":"configured"}
 ```
 
-`status` is `running`|`stopped`|`unreachable`. `apiAuthStatus` is
-`missing` (no credential), `configured` (valid 0600 credential), or
+`status` is `running`|`stopped`|`unreachable`. `apiAuthStatus` and
+`adminAuthStatus` are `missing` (no credential — for admin auth that is
+first-run setup mode), `configured` (valid 0600 credential), or
 `invalid` (present but malformed/oversized/insecure — surfaced, never
 masked). Runtime-only fields are omitted when stopped.
 
@@ -233,4 +247,5 @@ masked). Runtime-only fields are omitted when stopped.
 - No project/worker entities — Gateway maps `project + worker → session
   key` and stays the authority for project identity.
 - No token management, scopes, rotation, OAuth/JWT.
-- No Web Admin, no admin login.
+- No Web Admin dashboard yet — the auth foundation (setup, login,
+  sessions, CSRF) is in place; operational UI is a later milestone.

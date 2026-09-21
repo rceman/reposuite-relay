@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rceman/reposuite-relay/internal/adminauth"
 	"github.com/rceman/reposuite-relay/internal/auth"
 	"github.com/rceman/reposuite-relay/internal/client"
 	"github.com/rceman/reposuite-relay/internal/config"
@@ -36,6 +37,12 @@ type statusReport struct {
 	// present-but-malformed/insecure one ("invalid") — corruption is
 	// surfaced, never masked as "not configured".
 	APIAuthStatus string `json:"apiAuthStatus"`
+	// AdminAuthStatus mirrors APIAuthStatus for the Web Admin credential:
+	// "missing" (setup mode), "configured", or "invalid" (malformed or
+	// insecure admin.json). The username, hash, and every browser token
+	// are never part of this projection.
+	AdminAuthStatus     string `json:"adminAuthStatus"`
+	AdminAuthConfigured bool   `json:"adminAuthConfigured"`
 }
 
 // cmdStatus implements `reposuite-relay status [--json]` — the product
@@ -81,6 +88,16 @@ func cmdStatus(args []string) int {
 		rep.APIAuthStatus = "configured"
 	} else if !errors.Is(err, os.ErrNotExist) {
 		rep.APIAuthStatus = "invalid"
+	}
+
+	// Web Admin auth presence: admin.json is validated, never read into
+	// output. Missing means setup mode; malformed/insecure is "invalid".
+	rep.AdminAuthStatus = "missing"
+	if _, err := adminauth.Load(p.AdminCredentials()); err == nil {
+		rep.AdminAuthConfigured = true
+		rep.AdminAuthStatus = "configured"
+	} else if !errors.Is(err, os.ErrNotExist) {
+		rep.AdminAuthStatus = "invalid"
 	}
 
 	// A live daemon generation? Dial validates the descriptor and
@@ -148,4 +165,11 @@ func printStatus(r statusReport) {
 		auth = "INVALID (malformed or insecure credential)"
 	}
 	fmt.Printf("API auth:     %s\n", auth)
+	admin := "not configured"
+	if r.AdminAuthConfigured {
+		admin = "configured"
+	} else if r.AdminAuthStatus == "invalid" {
+		admin = "INVALID (malformed or insecure credential)"
+	}
+	fmt.Printf("Admin auth:   %s\n", admin)
 }

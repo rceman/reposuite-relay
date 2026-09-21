@@ -59,8 +59,12 @@ endpoint authenticates with **either** that rotating descriptor bearer
 `~/.reposuite/relay/config/api.token` (minted once, `0600`, never
 exposed) — see `docs/GATEWAY_API.md` for the machine-client contract.
 The CLI auto-starts the daemon when genuinely absent; `status` and
-`daemon stop` never do. `GET /` is the reserved Web Admin entry point on
-the same origin (a placeholder today). The `fixture` harness is a
+`daemon stop` never do. `GET /` is the Web Admin entry point: on first
+run it serves a one-time admin setup (Argon2id-hashed credential in
+`config/admin.json`, create-once), afterwards login — issuing an
+`HttpOnly`, `SameSite=Strict` browser session that also authenticates
+`/v1` (with Origin + CSRF obligations on unsafe methods). The full model
+is `docs/WEB_ADMIN_SECURITY.md`. The `fixture` harness is a
 deterministic development/test child — **not** a real agent harness.
 
 **Native Codex sessions.** `serve codex` creates a durable session with
@@ -103,10 +107,11 @@ answered by policy (never converted into requested input, which is
 `UNSUPPORTED_OPERATION` for ACP harnesses).
 
 **Not yet implemented:** Codex approval requests and `turn/steer`,
-rate-limit surfaces, ACP requested-input, the embedded Web Admin
-(same-origin on `/`), the GPT Tunnel integration, cross-platform
-singleton locking. A TUI is not planned — the management surfaces are
-the machine API (automation) and the future Web Admin (humans).
+rate-limit surfaces, ACP requested-input, the Web Admin dashboard (the
+auth/security foundation — setup, login, sessions, CSRF, Host and
+Origin enforcement — is in place), the GPT Tunnel integration,
+cross-platform singleton locking. A TUI is not planned — the management
+surfaces are the machine API (automation) and the Web Admin (humans).
 
 ## Layout
 
@@ -128,6 +133,9 @@ the machine API (automation) and the future Web Admin (humans).
 - `internal/paths` — `${REPOSUITE_HOME}/relay` path contract
 - `internal/config` — persistent `config/relay.json` stable endpoint
 - `internal/auth` — persistent `config/api.token` machine credential
+- `internal/adminauth` — Web Admin credential domain: `config/admin.json`
+  (Argon2id PHC), memory-only browser sessions, CSRF/form tokens, login
+  throttling
 - `tools/` — nested developer-tool module: exact `o200k_base` token
   counter and `gofmt-struct` (never imported by production)
 - `scripts/` — Go hygiene gates (`check-go-files.sh`, `check-go-format.sh`)
