@@ -77,11 +77,67 @@ func Load(path string) (Credentials, error) {
 	return c, nil
 }
 
+// PostCommitError reports a failure AFTER the canonical commit point:
+// admin.json was already linked into the config namespace, so the
+// credential IS committed — callers must never treat this as a clean
+// rollback or allow a second setup to overwrite authority.
+type PostCommitError struct {
+	Op  string // "cleanup" | "dirsync"
+	Err error
+}
+
+func (e *PostCommitError) Error() string {
+	return fmt.Sprintf("admin credentials committed; post-commit %s failed: %v", e.Op, e.Err)
+}
+func (e *PostCommitError) Unwrap() error { return e.Err }
+
+// Hooks is the narrow deterministic fault seam for commit-path failure
+// injection — tests only; production passes nil.
+type Hooks struct {
+	Link    func(oldname, newname string) error
+	Remove  func(name string) error
+	SyncDir func(dir string) error
+}
+
+func (h *Hooks) link(oldname, newname string) error {
+	if h != nil && h.Link != nil {
+		return h.Link(oldname, newname)
+	}
+	return os.Link(oldname, newname)
+}
+func (h *Hooks) remove(name string) error {
+	if h != nil && h.Remove != nil {
+		return h.Remove(name)
+	}
+	return os.Remove(name)
+}
+func (h *Hooks) syncDir(dir string) error {
+	if h != nil && h.SyncDir != nil {
+		return h.SyncDir(dir)
+	}
+	return syncDir(dir)
+}
+
 // CommitOnce persists the credential atomically and exactly once:
-// same-directory temp (0600), fsync, atomic hard-link create (which fails
-// if the target already exists), temp removal, directory fsync. It never
-// overwrites an existing credential — os.Link fails with EEXIST.
-func CommitOnce(path string, c Credentials) (created bool, err error) {
+// same-directory temp (0600), fsync, atomic hard-link create, temp
+// removal, directory fsync.
+//
+// COMMIT POINT: the successful os.Link is the namespace commit — after
+// it, admin.json EXISTS and is canonical. Outcomes:
+//
+//	pre-commit failure:   created=false, err!=nil — nothing committed
+//	already exists:       created=false, err=nil  — a winner is committed
+//	full durable commit:  created=true,  err=nil
+//	post-commit failure:  created=true,  err=*PostCommitError — the
+//	                      credential IS committed; only cleanup or the
+//	                      directory fsync is uncertain
+func CommitOnce(path string, c Credentials) (bool, error) {
+	return CommitOnceWith(path, c, nil)
+}
+
+// CommitOnceWith is CommitOnce with an explicit fault-injection seam —
+// daemon tests only; production callers pass nil via CommitOnce.
+func CommitOnceWith(path string, c Credentials, hooks *Hooks) (created bool, err error) {
 	if err := c.Validate(); err != nil {
 		return false, fmt.Errorf("admin credentials: %w", err)
 	}
@@ -93,7 +149,7 @@ func CommitOnce(path string, c Credentials) (created bool, err error) {
 	tmpPath := tmp.Name()
 	fail := func(err error) (bool, error) {
 		tmp.Close()
-		os.Remove(tmpPath)
+		hooks.remove(tmpPath)
 		return false, fmt.Errorf("admin credentials: %w", err)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
@@ -115,16 +171,28 @@ func CommitOnce(path string, c Credentials) (created bool, err error) {
 	// Atomic create-once: link() names the staged content at path only if
 	// path does not already exist — a loser of a setup race keeps its own
 	// unlinked temp and reports "not created", never clobbering the winner.
-	if err := os.Link(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	// This IS the commit point: anything after it is post-commit.
+	if err := hooks.link(tmpPath, path); err != nil {
+		hooks.remove(tmpPath)
 		if errors.Is(err, os.ErrExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("admin credentials create: %w", err)
 	}
-	os.Remove(tmpPath)
-	if err := syncDir(dir); err != nil {
-		return false, fmt.Errorf("admin credentials dir sync: %w", err)
+	// Post-commit: canonical admin.json exists. A leftover staged temp
+	// file or an uncertain directory fsync must surface as committed-with-
+	// uncertainty, never as a clean failure.
+	if err := hooks.remove(tmpPath); err != nil {
+		return true, &PostCommitError{
+			Op:  "cleanup",
+			Err: err,
+		}
+	}
+	if err := hooks.syncDir(dir); err != nil {
+		return true, &PostCommitError{
+			Op:  "dirsync",
+			Err: err,
+		}
 	}
 	return true, nil
 }

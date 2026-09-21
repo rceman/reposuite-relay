@@ -180,7 +180,7 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 	// Web Admin credential domain: admin.json absent means first-run setup
 	// mode; malformed or insecure content fails startup closed. Browser
 	// sessions live only in memory and die with this generation.
-	web, err := newWebAuth(p, d.endpoint(), d.opts.AdminKDF, d.opts.AdminClock)
+	web, err := newWebAuth(p, d.endpoint(), d.opts)
 	if err != nil {
 		d.ln.Close()
 		d.releaseLock()

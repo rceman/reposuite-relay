@@ -220,12 +220,28 @@ func TestBrowserSessionDiesWithDaemon(t *testing.T) {
 }
 
 // TestSetupDoesNotLeakSecrets proves no credential material crosses the
-// wire: the password, hash, and machine token are absent from responses.
+// wire: the password, the exact persisted PHC hash, the browser session
+// token, and the machine token are absent from every response surface.
+// The hash itself exists only in admin.json — its canonical home.
 func TestSetupDoesNotLeakSecrets(t *testing.T) {
 	d, c := webDaemon(t)
 	endpoint := d.endpoint()
 	token := setupAdmin(t, d, c, "admin", "correct-horse-12")
 
+	creds, err := adminauth.Load(d.paths.AdminCredentials())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(d.paths.AdminCredentials())
+	if strings.Contains(string(raw), "correct-horse-12") {
+		t.Fatal("admin.json contains the plaintext password")
+	}
+	if !strings.Contains(string(raw), creds.PasswordHash) {
+		t.Fatal("admin.json does not contain its canonical PHC hash")
+	}
+	secrets := []string{"correct-horse-12", creds.PasswordHash, d.machineToken, d.token, token}
+
+	// Browser surfaces.
 	for _, path := range []string{"/", "/auth/session"} {
 		req, _ := http.NewRequest(http.MethodGet, endpoint+path, nil)
 		req.AddCookie(&http.Cookie{
@@ -235,18 +251,28 @@ func TestSetupDoesNotLeakSecrets(t *testing.T) {
 		resp := doReq(t, req)
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		for _, secret := range []string{"correct-horse-12", d.machineToken, token} {
+		for _, secret := range secrets {
 			if strings.Contains(string(body), secret) {
 				t.Fatalf("%s leaked secret material", path)
 			}
 		}
 	}
-	// admin.json never contains the plaintext.
-	raw, _ := os.ReadFile(d.paths.AdminCredentials())
-	if strings.Contains(string(raw), "correct-horse-12") {
-		t.Fatal("admin.json contains the plaintext password")
+	// Authenticated /v1 with the browser cookie.
+	resp := doReq(t, cookieRequest(t, http.MethodGet, endpoint, "/v1/daemon", token, "", ""))
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, secret := range secrets {
+		if strings.Contains(string(body), secret) {
+			t.Fatal("/v1/daemon leaked secret material")
+		}
 	}
-	if !strings.Contains(string(raw), "$argon2id$") {
-		t.Fatal("admin.json lacks a PHC record")
+	// Error bodies carry no secret.
+	resp = doReq(t, cookieRequest(t, http.MethodPost, endpoint, "/v1/sessions", token, "", ""))
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, secret := range secrets {
+		if strings.Contains(string(body), secret) {
+			t.Fatal("error body leaked secret material")
+		}
 	}
 }

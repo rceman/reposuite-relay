@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/rceman/reposuite-relay/internal/adminauth"
@@ -43,8 +42,9 @@ type webAuth struct {
 	origin   string // exact canonical origin http://127.0.0.1:<port>
 	hostPort string // exact accepted Host header
 
-	dummyOnce sync.Once
-	dummy     string // fixed PHC hash used to equalize bad-username timing
+	// Test seams — production defaults apply when nil.
+	verify func(password, encoded string) bool
+	hooks  *adminauth.Hooks
 }
 
 // authKind distinguishes the credential domain that authenticated a
@@ -62,11 +62,12 @@ const (
 // newWebAuth loads the admin credential (absent = setup mode) and builds
 // the runtime browser-auth state. Malformed or insecure admin.json fails
 // startup closed.
-func newWebAuth(p paths.Paths, endpoint string, kdf adminauth.Params, now adminauth.Clock) (*webAuth, error) {
-	mgr, err := adminauth.NewManager(now)
+func newWebAuth(p paths.Paths, endpoint string, opts Options) (*webAuth, error) {
+	mgr, err := adminauth.NewManager(opts.AdminClock)
 	if err != nil {
 		return nil, err
 	}
+	kdf := opts.AdminKDF
 	if kdf == (adminauth.Params{}) {
 		kdf = adminauth.ProductionParams
 	}
@@ -77,6 +78,11 @@ func newWebAuth(p paths.Paths, endpoint string, kdf adminauth.Params, now admina
 		mgr:    mgr,
 		kdf:    kdf,
 		origin: endpoint,
+		hooks:  opts.AdminHooks,
+		verify: adminauth.Verify,
+	}
+	if opts.AdminVerify != nil {
+		w.verify = opts.AdminVerify
 	}
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "http://"))
 	if err != nil {
@@ -99,23 +105,6 @@ func (w *webAuth) configured() bool { return w.creds.Load() != nil }
 
 // credentials returns the loaded credential (nil in setup mode).
 func (w *webAuth) credentials() *adminauth.Credentials { return w.creds.Load() }
-
-// dummyHash returns a fixed PHC record used to equalize verification
-// cost when the submitted username does not match. Computed lazily once
-// per daemon under the configured KDF params.
-func (w *webAuth) dummyHash() string {
-	w.dummyOnce.Do(func() {
-		// A fixed non-credential input; the hash is never stored and the
-		// plaintext is never a real password.
-		h, err := adminauth.Hash("relay-webadmin-dummy-timing-equalizer", w.kdf)
-		if err != nil {
-			// Params are validated at startup; this cannot happen.
-			h = "$argon2id$v=19$m=65536,t=3,p=2$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-		}
-		w.dummy = h
-	})
-	return w.dummy
-}
 
 // adminPath reports whether the path is a Web Admin surface that
 // requires the canonical Host header.

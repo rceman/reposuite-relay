@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -106,10 +107,8 @@ func ValidatePassword(password string) error {
 	if strings.ContainsRune(password, 0) {
 		return errors.New("password must not contain NUL")
 	}
-	for _, r := range password {
-		if r == 0xFFFD {
-			return errors.New("password must be valid UTF-8")
-		}
+	if !utf8.ValidString(password) {
+		return errors.New("password must be valid UTF-8")
 	}
 	return nil
 }
@@ -155,30 +154,30 @@ func parsePHC(encoded string) (parsedPHC, error) {
 	if err != nil || version != phcVersion {
 		return fail()
 	}
+	// Canonical parameter order is exact: m=<KiB>,t=<iterations>,p=<par>.
+	// Reordered, duplicated, missing, or unknown fields are rejected.
 	var mem, iter, par uint64
-	seen := map[byte]bool{}
-	for _, field := range strings.Split(parts[3], ",") {
-		if len(field) < 3 || field[1] != '=' || seen[field[0]] {
+	fields := strings.Split(parts[3], ",")
+	if len(fields) != 3 {
+		return fail()
+	}
+	for i, want := range []byte{'m', 't', 'p'} {
+		f := fields[i]
+		if len(f) < 3 || f[0] != want || f[1] != '=' {
 			return fail()
 		}
-		seen[field[0]] = true
-		v, err := strconv.ParseUint(field[2:], 10, 32)
+		v, err := strconv.ParseUint(f[2:], 10, 32)
 		if err != nil {
 			return fail()
 		}
-		switch field[0] {
+		switch want {
 		case 'm':
 			mem = v
 		case 't':
 			iter = v
 		case 'p':
 			par = v
-		default:
-			return fail()
 		}
-	}
-	if !seen['m'] || !seen['t'] || !seen['p'] {
-		return fail()
 	}
 	p := Params{
 		MemoryKiB:   uint32(mem),

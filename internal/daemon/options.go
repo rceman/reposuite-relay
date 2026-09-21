@@ -65,6 +65,12 @@ type Options struct {
 	AdminKDF adminauth.Params
 	// AdminClock overrides the browser-auth clock — test seam only.
 	AdminClock adminauth.Clock
+	// AdminHooks injects deterministic commit-path faults — test seam
+	// only; production commits with the real filesystem primitives.
+	AdminHooks *adminauth.Hooks
+	// AdminVerify overrides password verification — test seam only for
+	// counting structural Verify calls.
+	AdminVerify func(password, encoded string) bool
 }
 
 func (o Options) withDefaults() Options {

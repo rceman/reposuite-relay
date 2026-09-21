@@ -33,7 +33,7 @@ exposed to the browser surface.
   (64 MiB), iterations 3, parallelism 2, 128-bit `crypto/rand` salt,
   256-bit derived key. `golang.org/x/crypto/argon2` is the single
   approved cryptographic dependency.
-- The PHC parser is strict: exact field set and order, no duplicates,
+- The PHC parser is strict: exact field set in canonical `m,t,p` order,
   `v=19` only, bounded parameters (memory 8 MiB–1 GiB, iterations 1–8,
   parallelism 1–8, salt 16–64 B, key 32–64 B). An out-of-bounds record
   is rejected before hashing so verification cannot be turned into a
@@ -123,8 +123,13 @@ No HSTS: the transport is plain loopback HTTP.
 
 ## Secret non-disclosure
 
-Nowhere in responses, status output, logs, or files may appear: the
-plaintext password, the password hash, a browser session token, the
-machine bearer, or the descriptor bearer. `status`/`status --json`
-report only `adminAuthStatus` ∈ `missing|configured|invalid` and never
-mutate the credential file.
+- **Plaintext password**: never persisted, never returned, never logged.
+- **Password hash**: exists only in `config/admin.json` — never returned
+  through the Web Admin HTML, `/auth/*`, `/v1/*`, `status`, or logs.
+- **Browser session token**: memory/cookie only — never returned in a
+  body, log, status, or durable file (the store indexes `SHA-256`).
+- **Machine/descriptor bearers**: retain their accepted domains and are
+  never exposed through the Web Admin surface.
+
+`status`/`status --json` report only `adminAuthStatus` ∈
+`missing|configured|invalid` and never mutate the credential file.

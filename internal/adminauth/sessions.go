@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"errors"
 	"sync"
 	"time"
 )
@@ -230,5 +229,3 @@ func (m *Manager) SessionCount() int {
 	defer m.mu.Unlock()
 	return len(m.byToken)
 }
-
-var ErrSetupConflict = errors.New("admin credentials already configured")

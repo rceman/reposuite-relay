@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,4 +149,146 @@ func pathsHasDescriptor(p paths.Paths) (bool, error) {
 		return true, nil
 	}
 	return false, err
+}
+
+// TestSetupPostCommitFailsClosed proves the commit-point contract at the
+// HTTP layer: a directory-fsync failure AFTER the canonical link must
+// not roll anything back, must not leave the daemon in setup mode, must
+// not issue a session, and must initiate shutdown so restart reconciles
+// the durable credential.
+func TestSetupPostCommitFailsClosed(t *testing.T) {
+	p := testPaths(t)
+	d, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+		AdminHooks: &adminauth.Hooks{
+			SyncDir: func(string) error { return errors.New("injected dirsync failure") },
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := serveDaemon(t, d)
+	jar, _ := cookiejarForTest()
+	c := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := c.Do(webForm(d, "setup", url.Values{
+		"form_token": {d.web.mgr.FormToken("setup")},
+		"username":   {"admin"},
+		"password":   {"correct-horse-12"},
+		"confirm":    {"correct-horse-12"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("post-commit setup: %d, want 500", resp.StatusCode)
+	}
+	// No session cookie was issued.
+	if len(jar.Cookies(mustURL(t, d.endpoint()))) != 0 {
+		t.Fatal("post-commit uncertainty issued a session cookie")
+	}
+	// The committed credential IS canonical — readable from disk, and the
+	// daemon recognized it in-memory: setup mode can never run again in
+	// this generation even while shutdown is already draining.
+	loaded, err := adminauth.Load(p.AdminCredentials())
+	if err != nil || loaded.Username != "admin" {
+		t.Fatalf("committed credential unreadable: %v", err)
+	}
+	if !d.web.configured() {
+		t.Fatal("daemon still considers itself unconfigured after committed credential")
+	}
+	// Shutdown was initiated — the operator restart reconciles state.
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("daemon did not shut down after post-commit uncertainty")
+	}
+	// After the restart, the durable credential loads into login mode —
+	// setup never runs again.
+	d2, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d2)
+	resp, err = c.Get(d2.endpoint() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "Web Admin setup") {
+		t.Fatal("restart still serving setup mode with a committed credential")
+	}
+	if !strings.Contains(string(body), "Web Admin sign in") {
+		t.Fatalf("expected login page after restart: %q", body)
+	}
+}
+
+// TestLoginSingleVerification proves every admitted login attempt runs
+// exactly one password verification against the stored credential —
+// wrong username included (no dummy-hash double-hash path).
+func TestLoginSingleVerification(t *testing.T) {
+	p := testPaths(t)
+	var calls atomic.Int32
+	var lastEncoded atomic.Value
+	d, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+		AdminVerify: func(pw, enc string) bool {
+			calls.Add(1)
+			lastEncoded.Store(enc)
+			return adminauth.Verify(pw, enc)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, _ := cookiejarForTest()
+	c := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	serveDaemon(t, d)
+	setupAdmin(t, d, c, "admin", "correct-horse-12")
+	stored, err := adminauth.Load(p.AdminCredentials())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("setup must not perform password verification")
+	}
+	loginToken := d.web.mgr.FormToken("login")
+	attempt := func(user, pass string, want int) {
+		before := calls.Load()
+		resp, err := c.Do(webForm(d, "login", url.Values{
+			"form_token": {loginToken}, "username": {user}, "password": {pass}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("login(%q): %d, want %d", user, resp.StatusCode, want)
+		}
+		if got := calls.Load() - before; got != 1 {
+			t.Fatalf("login(%q) ran %d verifications, want exactly 1", user, got)
+		}
+		if lastEncoded.Load() != stored.PasswordHash {
+			t.Fatalf("login(%q) verified against a non-stored hash", user)
+		}
+	}
+	attempt("nobody", "wrong-password!", http.StatusUnauthorized)
+	attempt("nobody", "correct-horse-12", http.StatusUnauthorized)
+	attempt("admin", "wrong-password!", http.StatusUnauthorized)
+	attempt("admin", "correct-horse-12", http.StatusSeeOther)
 }

@@ -6,6 +6,7 @@ package daemon
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -167,8 +168,21 @@ func (d *Daemon) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Username:      username,
 		PasswordHash:  hash,
 	}
-	created, err := adminauth.CommitOnce(d.paths.AdminCredentials(), creds)
+	created, err := adminauth.CommitOnceWith(d.paths.AdminCredentials(), creds, d.web.hooks)
 	if err != nil {
+		var pce *adminauth.PostCommitError
+		if errors.As(err, &pce) {
+			// The credential IS committed — never report a rollback and
+			// never leave the daemon in setup mode where a second attempt
+			// could redefine authority. Publish the committed credential,
+			// fail closed with a bounded diagnostic, and restart so an
+			// operator reboot reconciles the durable state from disk.
+			d.web.creds.Store(&creds)
+			writeErr(w, http.StatusInternalServerError, api.ErrInternal,
+				"admin credential committed but post-commit durability failed; restarting")
+			go d.initiate()
+			return
+		}
 		fail(http.StatusInternalServerError, "admin credential commit failed")
 		return
 	}
@@ -187,9 +201,9 @@ func (d *Daemon) handleSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogin verifies credentials and issues a browser session. Wrong
-// username and wrong password share one public failure shape; the wrong-
-// username path still runs an equivalent Argon2id verification against a
-// fixed dummy hash.
+// username and wrong password share one public failure shape, and every
+// admitted attempt performs exactly one Argon2id verification against
+// the stored credential — username correctness never short-circuits it.
 func (d *Daemon) handleLogin(w http.ResponseWriter, r *http.Request) {
 	fail := func(status int, msg string) {
 		writeErr(w, status, api.ErrInvalidRequest, msg)
@@ -215,13 +229,15 @@ func (d *Daemon) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusTooManyRequests, "too many login attempts")
 		return
 	}
-	username := r.FormValue("username")
+	// Exactly one Argon2id verification per admitted attempt, always
+	// against the same stored credential — with a single admin account a
+	// dummy hash is unnecessary, and skipping Verify on a wrong username
+	// would make the attempt trivially distinguishable.
 	creds := d.web.credentials()
-	stored := creds.PasswordHash
-	if subtle.ConstantTimeCompare([]byte(username), []byte(creds.Username)) != 1 {
-		stored = d.web.dummyHash()
-	}
-	if !adminauth.Verify(r.FormValue("password"), stored) {
+	usernameOK := subtle.ConstantTimeCompare(
+		[]byte(r.FormValue("username")), []byte(creds.Username)) == 1
+	passwordOK := d.web.verify(r.FormValue("password"), creds.PasswordHash)
+	if !(usernameOK && passwordOK) {
 		d.web.mgr.RecordLoginFailure()
 		fail(http.StatusUnauthorized, "invalid credentials")
 		return
