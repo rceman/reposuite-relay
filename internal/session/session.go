@@ -97,10 +97,10 @@ func NewSessionID() (string, error) { return newID() }
 // and is never persisted.
 func NewRuntimeID() (string, error) { return newID() }
 
-// RelaySession is the canonical durable logical session. It survives TUI
-// disconnects, runtime sleep/death, and relayd restart. Generation counts
-// how many runtimes have ever been established for it (restart alone does
-// not increment it).
+// RelaySession is the canonical durable logical session. It survives
+// client disconnects (CLI, Web Admin), runtime sleep/death, and relayd
+// restart. Generation counts how many runtimes have ever been
+// established for it (restart alone does not increment it).
 type RelaySession struct {
 	ID              string // stable Relay-owned session ID (crypto/rand)
 	Key             string // human/client session key

@@ -3,8 +3,9 @@
 // recent-event replay ring, and bounded live subscribers.
 //
 // This is deliberately a small Relay-specific component, not a generic
-// event bus. Events are the domain currency for HTTP NDJSON streaming, a
-// future TUI, and a future Gateway bridge; they are not transport structs.
+// event bus. Events are the domain currency for HTTP NDJSON streaming to
+// the CLI, the Web Admin, and external machine integrations (Gateway);
+// they are not transport structs.
 //
 // Sequence semantics: every event (durable or transient) consumes a
 // canonical per-session uint64 seq that strictly increases and is never

@@ -210,3 +210,24 @@ is unchanged.
 
 `status`/`status --json` report only `adminAuthStatus` ∈
 `missing|configured|invalid` and never mutate the credential file.
+
+## Session control surface
+
+The authenticated SPA drives the full session lifecycle through the same
+cookie + Origin + CSRF domain (`docs/WEB_ADMIN_SESSION_CONTROL.md`):
+
+- **Reads** (`GET session`, `GET transcript`, `GET events` NDJSON
+  stream) are cookie-authenticated safe methods — no CSRF header — and
+  never wake a COLD session.
+- **Mutations** (create, prompt, cancel, input, config, delete) are
+  unsafe methods requiring exact Origin + `X-Relay-CSRF`.
+- **Secret requested input**: a native `isSecret` question is forwarded
+  verbatim to the harness, but its answer is redacted from the durable
+  `input.resolved` record (question ID listed under `redacted`) — the
+  transcript never contains the plaintext. The browser holds it only in
+  a password field cleared on submit.
+- **Browser state**: transcript drafts, pending input, CSRF token, and
+  stream cursors are memory-only — nothing is written to
+  `localStorage`, `sessionStorage`, or IndexedDB.
+- **Rendering**: all session/agent/user content is plain text — no
+  `{@html}`, no remote assets, no Markdown/HTML injection surface.

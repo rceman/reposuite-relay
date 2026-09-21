@@ -73,9 +73,12 @@ IMPLEMENTED:
   CSRF for cookie-auth unsafe methods — see `docs/WEB_ADMIN_SECURITY.md`.
 - `GET /` — embedded SvelteKit Web Admin (`web/` + `web/embed.go`):
   anonymous SPA shell, `/auth/session` bootstrap → setup → login →
-  authenticated shell with Overview and read-only Sessions views. The
-  committed `web/build/` release artifact is served by `go:embed` — no
-  Node at production runtime.
+  authenticated shell with Overview, Sessions list, and the session
+  control surface (`/sessions/<key>`: durable transcript +
+  history→live NDJSON cutover, prompt/cancel/input/config/delete —
+  `docs/WEB_ADMIN_SESSION_CONTROL.md`). The committed `web/build/`
+  release artifact is served by `go:embed` — no Node at production
+  runtime.
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
   uptime, session counts, API auth, admin auth) that never auto-starts.
 - NDJSON canonical event-stream foundation (`internal/events`):
@@ -111,9 +114,7 @@ NOT YET IMPLEMENTED:
 - ACP session listing/deletion beyond Relay's own registry, ACP
   `authenticate` beyond the initialize handshake, and native ACP tool-call
   or plan surfacing (ignored deliberately, not guessed at).
-- Web Admin session controls (prompt/cancel/config/input/create/delete —
-  the embedded foundation covers auth, shell, overview, and read-only
-  sessions only), GPT Tunnel integration.
+- GPT Tunnel integration.
   A TUI is NOT planned: the management surfaces are the machine API and
   the Web Admin; the CLI is bootstrap/diagnostics only.
 - Cross-platform singleton locking (currently Linux `flock`; the
@@ -177,7 +178,17 @@ report each as PASS/FAIL/N/A with evidence.
   IndexedDB): the cookie is HttpOnly and the frontend holds only
   `username`/`csrfToken`/`formToken` in memory.
 - No CSP weakening: hash-based `script-src`, never `unsafe-eval` or
-  `unsafe-inline`.
+  `unsafe-inline`. Model/user/transcript text renders as plain text —
+  never `{@html}`.
+- Session-control invariants (`docs/WEB_ADMIN_SESSION_CONTROL.md`):
+  history→live cutover subscribes at `transcript.throughSeq` (never the
+  last record seq); all seq/cursor values must pass
+  `Number.isSafeInteger` (fail closed, never round); one NDJSON stream
+  per viewed session, aborted on navigation; the Sessions list opens no
+  streams; transcript tail ≤ 1000 records; durable truth only — nothing
+  optimistic; `isSecret` answers are forwarded to the harness but
+  redacted from durable `input.resolved` payloads and never touch
+  browser storage.
 
 ## Harness adapter invariants (ADR-005, implemented)
 
@@ -283,7 +294,8 @@ report each as PASS/FAIL/N/A with evidence.
 - `__fixture` — deterministic same-binary child (fixture harness).
 - `__fake-codex` — deterministic fake Codex app-server: scripted
   JSON-RPC, no model call, no network, no quota. Selected with
-  `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `die-on-turn`,
+  `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `input-secret`,
+  `die-on-turn`,
   `resume-error`, `stubborn`, `child`). Hidden modes are never listed in
   help and never part of the public CLI contract.
 - `__fake-acp` — deterministic fake ACP agent (both vendors) behind the

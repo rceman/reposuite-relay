@@ -72,8 +72,15 @@ first run → one-time admin setup (Argon2id-hashed credential in
 `config/admin.json`, create-once); afterwards → login — issuing an
 `HttpOnly`, `SameSite=Strict` browser session that also authenticates
 `/v1` (with Origin + CSRF obligations on unsafe methods). The
-authenticated shell currently offers an Overview page and a read-only
-Sessions page. The full model is `docs/WEB_ADMIN_SECURITY.md`. The
+authenticated shell offers an Overview page, a Sessions list, and the
+session detail/control surface (`/sessions/<key>`): durable transcript
+history with an exact history→live cutover (`transcript.throughSeq` →
+`events?after=`), live agent deltas, prompt, cancel, requested-input
+answers (including native `isSecret` questions whose answers are
+redacted from the durable `input.resolved` record), desired model/mode
+config, and durable delete. Session-control semantics live in
+`docs/WEB_ADMIN_SESSION_CONTROL.md`; the full security model is
+`docs/WEB_ADMIN_SECURITY.md`. The
 `fixture` harness is a deterministic development/test child — **not**
 a real agent harness.
 
@@ -117,12 +124,9 @@ answered by policy (never converted into requested input, which is
 `UNSUPPORTED_OPERATION` for ACP harnesses).
 
 **Not yet implemented:** Codex approval requests and `turn/steer`,
-rate-limit surfaces, ACP requested-input, Web Admin session controls
-(the foundation — setup, login, shell, overview, read-only sessions —
-is in place; prompt/cancel/config controls are a later milestone), the
-GPT Tunnel integration, cross-platform singleton locking. A TUI is not
-planned — the management surfaces are the machine API (automation) and
-the Web Admin (humans).
+rate-limit surfaces, ACP requested-input, the GPT Tunnel integration,
+cross-platform singleton locking. A TUI is not planned — the management
+surfaces are the machine API (automation) and the Web Admin (humans).
 
 ## Layout
 
