@@ -58,10 +58,13 @@ rendered page; on success it commits `admin.json` atomically, creates an
 authenticated browser session, and redirects to `/`.
 
 When configured, `GET /` renders the login form. `POST /auth/login`
-runs the same Origin + form-token checks, verifies the password with a
-constant-time Argon2id comparison, and issues a session cookie. A wrong
-username still verifies against a fixed dummy hash so gross timing does
-not reveal whether the username matched; failures are one uniform `401`.
+runs the same Origin + form-token checks and issues a session cookie on
+success. Verification is uniform: the submitted username is compared
+against the stored username in constant time, and every admitted
+configured attempt performs exactly one Argon2id verification against
+the same stored credential hash — username correctness never
+short-circuits password verification. Wrong username, wrong password,
+and both wrong share one public `401` response shape.
 
 Login throttling is in-memory and clock-seamed: 5 failures within 5
 minutes returns `429` with a bounded `Retry-After` (~30 s). A successful

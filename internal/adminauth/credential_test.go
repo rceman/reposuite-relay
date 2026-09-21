@@ -234,3 +234,21 @@ func TestCredentialStrictLoad(t *testing.T) {
 		}
 	})
 }
+
+// TestSecurityDocMatchesLoginContract: docs/WEB_ADMIN_SECURITY.md is the
+// browser-auth contract — it must not describe the removed dummy-hash
+// behavior as production, and must state the current uniform-verify
+// algorithm.
+func TestSecurityDocMatchesLoginContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "WEB_ADMIN_SECURITY.md"))
+	if err != nil {
+		t.Fatalf("read WEB_ADMIN_SECURITY.md: %v", err)
+	}
+	doc := string(raw)
+	if strings.Contains(doc, "dummy hash") || strings.Contains(doc, "dummyHash") {
+		t.Fatal("WEB_ADMIN_SECURITY.md describes the removed dummy-hash path")
+	}
+	if !strings.Contains(doc, "exactly one Argon2id verification") {
+		t.Fatal("WEB_ADMIN_SECURITY.md does not document the single-Verify contract")
+	}
+}
