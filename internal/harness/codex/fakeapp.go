@@ -24,6 +24,7 @@ import (
 //	""/"happy"      initialize, thread start/resume, one completed turn
 //	"fail-turn"     the turn completes with status failed
 //	"input"         the turn asks for user input before completing
+//	"input-secret"  the turn asks one normal plus one isSecret question
 //	"die-on-turn"   the process exits right after accepting a turn
 //	"resume-error"  thread/resume always fails
 //	"stubborn"      ignores stdin forever (forces the bounded kill path)
@@ -197,9 +198,27 @@ func (f *fakeServer) startTurn(msg frame) {
 		text:     text,
 	}
 
-	if f.mode == "input" {
+	if f.mode == "input" || f.mode == "input-secret" {
 		f.nextID++
 		f.pending.reqID = f.nextID
+		questions := []map[string]any{{
+			"id":       "q1",
+			"header":   "Choose",
+			"question": "Pick one",
+			"options": []map[string]any{
+				{"label": "alpha", "description": "first"},
+				{"label": "beta", "description": "second"},
+			},
+		}}
+		if f.mode == "input-secret" {
+			questions = append(questions, map[string]any{
+				"id":       "q2",
+				"header":   "Credential",
+				"question": "Enter the token",
+				"isOther":  true,
+				"isSecret": true,
+			})
+		}
 		f.write(frame{
 			ID:     &f.pending.reqID,
 			Method: MethodRequestUserInput,
@@ -208,15 +227,7 @@ func (f *fakeServer) startTurn(msg frame) {
 				"turnId":     turnID,
 				"itemId":     "item_input_1",
 				"isBlocking": true,
-				"questions": []map[string]any{{
-					"id":       "q1",
-					"header":   "Choose",
-					"question": "Pick one",
-					"options": []map[string]any{
-						{"label": "alpha", "description": "first"},
-						{"label": "beta", "description": "second"},
-					},
-				}},
+				"questions":  questions,
 			}),
 		})
 		return // completion waits for the answer

@@ -91,6 +91,10 @@ type pendingInput struct {
 	turnID       string
 	itemID       string
 	questionIDs  []string
+	// secret marks question IDs whose answers must never be persisted —
+	// they are forwarded to the native harness and withheld from the
+	// durable input.resolved record.
+	secret map[string]bool
 }
 
 // Metrics is the last-known in-memory harness accounting for a session.

@@ -58,13 +58,22 @@ func (a *Adapter) AnswerInput(ctx context.Context, m *session.Managed, inputID s
 	delete(st.inputs, inputID)
 	a.mu.Unlock()
 
+	// The durable record must never contain a secret answer: answers to
+	// isSecret questions are withheld and listed only by question ID in
+	// the redacted set. The native response above still received them.
 	flat := map[string][]string{}
+	var redacted []string
 	for q, ans := range answers {
+		if pending.secret[q] {
+			redacted = append(redacted, q)
+			continue
+		}
 		flat[q] = ans.Answers
 	}
 	if err := a.publishDurable(m, api.EventInputResolved, inputResolvedPayload{
-		InputID: inputID,
-		Answers: flat,
+		InputID:  inputID,
+		Answers:  flat,
+		Redacted: redacted,
 	}); err != nil {
 		return err
 	}
@@ -108,6 +117,7 @@ func (a *Adapter) handleRequestUserInput(_ context.Context, id int64, params jso
 	}
 	questions := make([]inputQuestion, 0, len(p.Questions))
 	ids := make([]string, 0, len(p.Questions))
+	secret := map[string]bool{}
 	for _, q := range p.Questions {
 		questions = append(questions, inputQuestion{
 			ID:       q.ID,
@@ -115,8 +125,12 @@ func (a *Adapter) handleRequestUserInput(_ context.Context, id int64, params jso
 			Question: q.Question,
 			Options:  q.Options,
 			IsOther:  q.IsOther,
+			IsSecret: q.IsSecret,
 		})
 		ids = append(ids, q.ID)
+		if q.IsSecret {
+			secret[q.ID] = true
+		}
 	}
 	a.mu.Lock()
 	st.inputs[inputID] = &pendingInput{
@@ -126,6 +140,7 @@ func (a *Adapter) handleRequestUserInput(_ context.Context, id int64, params jso
 		turnID:       p.TurnID,
 		itemID:       p.ItemID,
 		questionIDs:  ids,
+		secret:       secret,
 	}
 	a.mu.Unlock()
 	// The blocker is registered before the event that announces it: any

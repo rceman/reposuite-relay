@@ -11,6 +11,10 @@ type inputQuestion struct {
 	Question string                    `json:"question"`
 	Options  []ToolRequestUserInputOpt `json:"options,omitempty"`
 	IsOther  bool                      `json:"isOther,omitempty"`
+	// IsSecret marks a question whose answer is a credential/secret: the
+	// answer is forwarded to the native harness but never persisted in a
+	// durable Relay record.
+	IsSecret bool `json:"isSecret,omitempty"`
 }
 
 type inputRequestedPayload struct {
@@ -21,9 +25,14 @@ type inputRequestedPayload struct {
 	Questions  []inputQuestion `json:"questions"`
 }
 
+// inputResolvedPayload is the durable input.resolved record. Answers
+// holds only non-secret question answers; a question the native request
+// marked isSecret is listed in Redacted by question ID — its plaintext
+// answer is never written to the durable transcript.
 type inputResolvedPayload struct {
-	InputID string              `json:"inputId"`
-	Answers map[string][]string `json:"answers"`
+	InputID  string              `json:"inputId"`
+	Answers  map[string][]string `json:"answers"`
+	Redacted []string            `json:"redacted,omitempty"`
 }
 
 type inputAbortedPayload struct {
