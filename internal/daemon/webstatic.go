@@ -152,6 +152,22 @@ func (d *Daemon) serveStatic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
 		return
 	}
+	// There is exactly one Web Admin document, reachable at "/" and at
+	// extensionless client routes via serveIndex. An HTML artifact name
+	// is never a public route: /index.html canonicalizes to /, and any
+	// other *.html is rejected rather than served through the CSP-less
+	// generic asset path.
+	if rel == "index.html" {
+		h := w.Header()
+		h.Set("Cache-Control", "no-store")
+		d.staticHeaders(h)
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+		return
+	}
+	if strings.HasSuffix(rel, ".html") {
+		writeErr(w, http.StatusNotFound, api.ErrInvalidRequest, "unknown route")
+		return
+	}
 	if f, err := d.static.fsys.Open(rel); err == nil {
 		defer f.Close()
 		fi, err := f.Stat()
