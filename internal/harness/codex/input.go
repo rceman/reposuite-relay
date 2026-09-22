@@ -10,6 +10,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"sort"
 )
 
 // AnswerInput resolves a native requested-input request by exact Relay
@@ -70,6 +71,9 @@ func (a *Adapter) AnswerInput(ctx context.Context, m *session.Managed, inputID s
 		}
 		flat[q] = ans.Answers
 	}
+	// Map iteration order is nondeterministic; a durable record must not
+	// be. The redacted set is published in canonical (sorted) order.
+	sort.Strings(redacted)
 	if err := a.publishDurable(m, api.EventInputResolved, inputResolvedPayload{
 		InputID:  inputID,
 		Answers:  flat,

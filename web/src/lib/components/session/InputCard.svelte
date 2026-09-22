@@ -9,6 +9,7 @@
 	import { api } from '$lib/api/client';
 	import { RelayError } from '$lib/api/errors';
 	import type { InputRequestedPayload } from '$lib/api/types';
+	import { buildAnswers, hasAnyAnswer } from '$lib/session/answers';
 	import { Button } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Input } from '$lib/components/ui/input';
@@ -34,11 +35,9 @@
 		selected = { ...selected, [qid]: on ? [...cur, label] : cur.filter((l) => l !== label) };
 	}
 
-	const hasAnswer = $derived(
-		request.questions.some(
-			(q) => (selected[q.id]?.length ?? 0) > 0 || (freeText[q.id]?.trim() ?? '') !== ''
-		)
-	);
+	// Free text is forwarded verbatim — an isSecret value may legally
+	// contain surrounding whitespace and must never be rewritten.
+	const hasAnswer = $derived(hasAnyAnswer(request.questions, { selected, freeText }));
 
 	async function submit() {
 		if (!hasAnswer || submitting) return;
@@ -47,14 +46,7 @@
 		try {
 			await api.answerInput(sessionKey, {
 				inputId: request.inputId,
-				answers: request.questions
-					.map((q) => {
-						const out = [...(selected[q.id] ?? [])];
-						const t = freeText[q.id]?.trim();
-						if (t) out.push(t);
-						return { questionId: q.id, answers: out };
-					})
-					.filter((a) => a.answers.length > 0)
+				answers: buildAnswers(request.questions, { selected, freeText })
 			});
 			// Accepted — input.resolved reconciles pending state. Clear local
 			// fields now so a secret never lingers in the page.

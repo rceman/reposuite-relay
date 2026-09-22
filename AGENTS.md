@@ -295,7 +295,7 @@ report each as PASS/FAIL/N/A with evidence.
 - `__fake-codex` — deterministic fake Codex app-server: scripted
   JSON-RPC, no model call, no network, no quota. Selected with
   `FAKE_CODEX_MODE` (`happy`, `fail-turn`, `input`, `input-secret`,
-  `die-on-turn`,
+  `input-secrets`, `die-on-turn`,
   `resume-error`, `stubborn`, `child`). Hidden modes are never listed in
   help and never part of the public CLI contract.
 - `__fake-acp` — deterministic fake ACP agent (both vendors) behind the

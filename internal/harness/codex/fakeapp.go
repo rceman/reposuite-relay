@@ -25,6 +25,8 @@ import (
 //	"fail-turn"     the turn completes with status failed
 //	"input"         the turn asks for user input before completing
 //	"input-secret"  the turn asks one normal plus one isSecret question
+//	"input-secrets" the turn asks one normal plus two isSecret questions
+//	                (question IDs ordered so lexical ≠ a likely answer order)
 //	"die-on-turn"   the process exits right after accepting a turn
 //	"resume-error"  thread/resume always fails
 //	"stubborn"      ignores stdin forever (forces the bounded kill path)
@@ -198,7 +200,7 @@ func (f *fakeServer) startTurn(msg frame) {
 		text:     text,
 	}
 
-	if f.mode == "input" || f.mode == "input-secret" {
+	if f.mode == "input" || f.mode == "input-secret" || f.mode == "input-secrets" {
 		f.nextID++
 		f.pending.reqID = f.nextID
 		questions := []map[string]any{{
@@ -218,6 +220,24 @@ func (f *fakeServer) startTurn(msg frame) {
 				"isOther":  true,
 				"isSecret": true,
 			})
+		}
+		if f.mode == "input-secrets" {
+			questions = append(questions,
+				map[string]any{
+					"id":       "zz",
+					"header":   "Credential Z",
+					"question": "Enter the Z token",
+					"isOther":  true,
+					"isSecret": true,
+				},
+				map[string]any{
+					"id":       "aa",
+					"header":   "Credential A",
+					"question": "Enter the A token",
+					"isOther":  true,
+					"isSecret": true,
+				},
+			)
 		}
 		f.write(frame{
 			ID:     &f.pending.reqID,
