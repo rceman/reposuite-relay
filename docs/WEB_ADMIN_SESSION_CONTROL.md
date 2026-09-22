@@ -86,8 +86,8 @@ failure.
 
 - `message.user` → user row; `message.agent.completed` → agent row.
 - `message.agent.delta` (transient) accumulates into a live draft keyed
-  by `turnId`+`itemId`; the durable completion replaces the draft in
-  place — durable truth is always authoritative.
+  by the collision-proof `(turnId, itemId)` pair; the durable completion
+  replaces the draft in place — durable truth is always authoritative.
 - `turn.failed`, `turn.interrupted`, `harness.started`, `runtime.exited`,
   `session.native`, `session.config`, `harness.error`, `input.*` render
   as quiet system rows; `metrics.updated` updates the metrics panel.
@@ -99,6 +99,50 @@ failure.
 Pending requested input is reconstructed from **durable** records
 (`input.requested` adds; `input.resolved`/`input.aborted` removes by
 exact `inputId`), so a browser reload restores the pending state.
+
+## Requested-input resolution durability
+
+`POST .../input` is a two-commit-point transaction in the Codex adapter.
+Per input, the in-memory lifecycle is:
+
+```
+pending → responding → answered → committing → (removed)
+   ↑________|                  ↑________|
+   Respond failed (retryable)  durable append failed (retryable,
+                              never re-Responds)
+```
+
+- **Native commit point:** `Conn.Respond` is the irreversible external
+  side effect and is sent **at most once** per input. The caller that
+  claims `pending → responding` owns it; concurrent answers converge on
+  `SESSION_BUSY`, and a post-commit retry hits `answered` which retries
+  only the durable commit — it can never re-send the native response or
+  replace the native-accepted payload with different answers.
+- **Durable commit point:** the sanitized `input.resolved` payload
+  (non-secret answers + sorted `redacted` IDs, zero secret plaintext) is
+  built *before* `Respond` and retained while `answered`, so a failed
+  durable append is retryable without the original answers.
+- **Terminal sweep:** turn completion, runtime exit, and session stop
+  publish `input.aborted` for `pending` inputs — but commit the retained
+  `input.resolved` for `answered` ones, never the contradictory opposite.
+  Inputs owned by an in-flight side effect are marked and reconciled by
+  their owner. Exactly one terminal outcome (`resolved` XOR `aborted`)
+  exists per input, and a pending entry is discarded only *after* its
+  durable terminal record commits — a failed append retains it.
+- **Non-clean visibility:** while a terminal record is uncommitted, the
+  session stays `waiting_input` (a hard sleep blocker — the retained
+  reconciliation state cannot be slept away). It settles `idle`/`active`
+  when the commit converges.
+- **Restart reconciliation:** a native request dies with its daemon
+  generation. On startup, sessions restored as `waiting_input` get an
+  O(n) transcript scan; every unresolved `input.requested` is durably
+  `input.aborted` (`"daemon restarted before requested input resolution
+  committed"`) and the state normalizes — startup **fails closed** if the
+  compensating record cannot be committed.
+
+A commit that crosses a daemon generation is indistinguishable from an
+unanswered request, so the canonical restart outcome is `input.aborted`
+even when the native side already received the answer.
 
 ## History window
 
