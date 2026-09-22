@@ -31,6 +31,12 @@ import (
 //	"resume-error"  thread/resume always fails
 //	"stubborn"      ignores stdin forever (forces the bounded kill path)
 //	"child"         spawns a grandchild and reports its pid (tree teardown)
+//
+// FAKE_CODEX_INPUTRESP_FILE, when set, receives the running count of
+// responses the fake receives for its requested-input request ID —
+// written on every matching response so tests can prove at-most-once
+// native delivery (including a duplicate arriving after the request was
+// already answered).
 func RunFakeAppServer(in io.Reader, out io.Writer) int {
 	mode := os.Getenv("FAKE_CODEX_MODE")
 	f := &fakeServer{
@@ -65,6 +71,11 @@ type fakeServer struct {
 	threadID string
 	// resumeCount counts successful resumes (test evidence).
 	resumeCount int
+	// lastReqID is the most recent requested-input request ID;
+	// inputResponses counts every response frame sent for it (double
+	// responses after finishTurn still count — at-most-once evidence).
+	lastReqID      int64
+	inputResponses int
 }
 
 type pendingTurn struct {
@@ -95,6 +106,10 @@ func (f *fakeServer) loop() {
 		}
 		if msg.Method == "" && msg.ID != nil {
 			// A response to the fake's own requested-input request.
+			if *msg.ID == f.lastReqID && f.lastReqID != 0 {
+				f.inputResponses++
+				f.reportInputResponses()
+			}
 			if f.pending != nil && *msg.ID == f.pending.reqID {
 				f.finishTurn()
 			}
@@ -203,42 +218,7 @@ func (f *fakeServer) startTurn(msg frame) {
 	if f.mode == "input" || f.mode == "input-secret" || f.mode == "input-secrets" {
 		f.nextID++
 		f.pending.reqID = f.nextID
-		questions := []map[string]any{{
-			"id":       "q1",
-			"header":   "Choose",
-			"question": "Pick one",
-			"options": []map[string]any{
-				{"label": "alpha", "description": "first"},
-				{"label": "beta", "description": "second"},
-			},
-		}}
-		if f.mode == "input-secret" {
-			questions = append(questions, map[string]any{
-				"id":       "q2",
-				"header":   "Credential",
-				"question": "Enter the token",
-				"isOther":  true,
-				"isSecret": true,
-			})
-		}
-		if f.mode == "input-secrets" {
-			questions = append(questions,
-				map[string]any{
-					"id":       "zz",
-					"header":   "Credential Z",
-					"question": "Enter the Z token",
-					"isOther":  true,
-					"isSecret": true,
-				},
-				map[string]any{
-					"id":       "aa",
-					"header":   "Credential A",
-					"question": "Enter the A token",
-					"isOther":  true,
-					"isSecret": true,
-				},
-			)
-		}
+		f.lastReqID = f.nextID
 		f.write(frame{
 			ID:     &f.pending.reqID,
 			Method: MethodRequestUserInput,
@@ -247,7 +227,7 @@ func (f *fakeServer) startTurn(msg frame) {
 				"turnId":     turnID,
 				"itemId":     "item_input_1",
 				"isBlocking": true,
-				"questions":  questions,
+				"questions":  f.inputQuestions(),
 			}),
 		})
 		return // completion waits for the answer

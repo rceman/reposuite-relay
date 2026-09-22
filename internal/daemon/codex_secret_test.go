@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/session"
 )
 
 // TestCodexSecretInputRedacted: a native isSecret question is preserved in
@@ -172,6 +174,79 @@ func TestCodexMultiSecretRedactionOrder(t *testing.T) {
 	for _, s := range []string{secretZ, secretA} {
 		if bytes.Contains(raw, []byte(s)) {
 			t.Fatalf("secret answer %q persisted in transcript.jsonl", s)
+		}
+	}
+}
+
+// TestCodexSecretSurvivesCommitFailure: through the degraded path —
+// native Respond succeeds, the durable input.resolved append fails, the
+// turn completes, and a retry commits — the secret plaintext is never
+// persisted: not in transcript.jsonl, not in session.json, not in the
+// served transcript. The retained commit-retry state holds only the
+// sanitized resolution payload.
+func TestCodexSecretSurvivesCommitFailure(t *testing.T) {
+	t.Setenv("FAKE_CODEX_MODE", "input-secret")
+	var failResolved atomic.Bool
+	failResolved.Store(true)
+	_, p, c, _ := startInProcess(t, func(o *Options) {
+		codexOptions(o)
+		o.StoreHooks = transcriptFault(func(b []byte) error {
+			if failResolved.Load() && bytes.Contains(b, []byte(api.EventInputResolved)) {
+				return errInjectedWrite
+			}
+			return nil
+		})
+	})
+	sess := serveCodex(t, c, "secfail")
+
+	ctx, cancel := tctx(t)
+	defer cancel()
+	if _, err := c.Prompt(ctx, "secfail", "ask me", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	inputID := requestedInputID(t, c, "secfail")
+
+	const secret = "s3cr3t-fa1lur3-p4th-n3v3r-p3rs1st"
+	if _, err := c.AnswerInput(ctx, "secfail", inputID, []api.InputAnswer{
+		{QuestionID: "q1", Answers: []string{"alpha"}},
+		{QuestionID: "q2", Answers: []string{secret}},
+	}); err == nil {
+		t.Fatal("expected the durable publish to fail")
+	}
+	// The turn completes with the resolution retained but uncommitted.
+	waitDurableTypes(t, c, "secfail", api.EventMessageAgentCompleted)
+	waitSessionState(t, c, "secfail", session.StateWaitingInput)
+
+	// The retry needs no secret plaintext — the sanitized payload is
+	// retained. An empty selection still commits the stored resolution.
+	failResolved.Store(false)
+	if _, err := c.AnswerInput(ctx, "secfail", inputID, nil); err != nil {
+		t.Fatalf("commit retry: %v", err)
+	}
+	waitSessionState(t, c, "secfail", session.StateIdle)
+
+	// Non-disclosure across every durable surface and the served page.
+	raw, err := os.ReadFile(transcriptPath(t, p, sess.SessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(secret)) {
+		t.Fatal("secret answer persisted in transcript.jsonl through the failure path")
+	}
+	meta, err := os.ReadFile(filepath.Join(p.SessionsDir(), sess.SessionID, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(meta, []byte(secret)) {
+		t.Fatal("secret answer persisted in session.json")
+	}
+	page, err := c.Transcript(ctx, "secfail", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range page.Records {
+		if bytes.Contains(r.Payload, []byte(secret)) {
+			t.Fatalf("secret answer visible in served record %d", r.Seq)
 		}
 	}
 }

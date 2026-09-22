@@ -84,6 +84,28 @@ type activeTurn struct {
 	agentItemID    string
 }
 
+// inputPhase is the durable-resolution lifecycle of one requested input.
+// Map presence alone was never enough: the commit point splits the
+// lifecycle around the native side effect, so the phase — not the map —
+// carries who may send, retry, or terminate.
+type inputPhase int
+
+const (
+	// inputPending: the native request exists and no response was sent.
+	inputPending inputPhase = iota
+	// inputResponding: one caller owns the in-flight Respond write;
+	// concurrent answers converge on BUSY, terminal paths mark wantAbort.
+	inputResponding
+	// inputAnswered: Respond succeeded — the native commit point is past.
+	// Only the retained sanitized resolution may still commit; Respond is
+	// never repeated and input.aborted is never published for it.
+	inputAnswered
+	// inputCommitting: one caller owns the durable input.resolved append.
+	inputCommitting
+	// inputAborting: a terminal path owns the durable input.aborted append.
+	inputAborting
+)
+
 type pendingInput struct {
 	relayID      string
 	nativeReqID  int64
@@ -95,6 +117,19 @@ type pendingInput struct {
 	// they are forwarded to the native harness and withheld from the
 	// durable input.resolved record.
 	secret map[string]bool
+
+	phase inputPhase
+	// wantAbort means a terminal path (turn completion, runtime exit,
+	// session stop) visited while a side effect owned the input; the
+	// side-effect owner reconciles after its write returns. It also
+	// marks an entry whose durable terminal append failed — retained so
+	// a later retry or daemon-restart reconciliation can still commit.
+	wantAbort   bool
+	abortReason string
+	// resolution is the sanitized durable input.resolved payload, built
+	// BEFORE Respond so a commit retry needs no secret plaintext. It is
+	// retained only while phase == inputAnswered.
+	resolution *inputResolvedPayload
 }
 
 // Metrics is the last-known in-memory harness accounting for a session.

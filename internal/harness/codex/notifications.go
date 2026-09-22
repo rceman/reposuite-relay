@@ -189,8 +189,15 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	a.mu.Lock()
 	st.current = nil
 	a.mu.Unlock()
-	// Unresolved input cannot outlive its turn.
-	a.abortInputs(st, "turn "+p.Turn.Status)
+	// Unresolved input cannot outlive its turn. Inputs whose durable
+	// terminal record could not be committed stay retained and keep the
+	// session visibly non-clean (waiting_input) until a retry or restart
+	// reconciliation lands them.
+	if a.abortInputs(st, "turn "+p.Turn.Status) > 0 {
+		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityWaitingInput)
+		_ = a.setSessionState(m, session.StateWaitingInput)
+		return
+	}
 	a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
 	_ = a.setSessionState(m, session.StateIdle)
 }

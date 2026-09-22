@@ -3,37 +3,138 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/client"
+	"github.com/rceman/reposuite-relay/internal/paths"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/store"
 )
 
-// TestCodexInputResolvedPublishGap is the WEBCTRL02 commit-point audit
-// probe for Adapter.AnswerInput, whose ordering is:
-//
-//	native Respond(...)            — external side effect
-//	delete st.inputs[inputID]      — pending consumed in memory
-//	publishDurable input.resolved  — durable commit
-//
-// If the durable publish fails after the native response was accepted,
-// this test proves the exact outcome: the answer cannot be re-submitted
-// (fail-closed, UNKNOWN_INPUT — never a double-answer), the turn
-// proceeds, and the durable input.requested is left UNRESOLVED — no
-// input.resolved, and no compensating input.aborted, because the pending
-// entry was already dropped before the failed publish. The stale
-// requested input therefore remains in the durable transcript forever.
-//
-// The test asserts this observed behavior verbatim so the gap is
-// reproducible; the proposed correction (delete the pending entry only
-// after a successful publish, letting turn-end/runtime-exit abortInputs
-// reconcile durably) is reported with the audit, not applied here.
-func TestCodexInputResolvedPublishGap(t *testing.T) {
+var errInjectedWrite = errors.New("injected transcript write failure")
+
+// transcriptFault routes every transcript.jsonl record append through
+// fn — returning an error injects a durable-append failure; blocking
+// inside fn holds a commit window open for deterministic race tests.
+func transcriptFault(fn func(b []byte) error) *store.Hooks {
+	return &store.Hooks{
+		WriteFile: func(f *os.File, b []byte) (int, error) {
+			if strings.HasSuffix(f.Name(), "transcript.jsonl") && fn != nil {
+				if err := fn(b); err != nil {
+					return 0, err
+				}
+			}
+			return f.Write(b)
+		},
+	}
+}
+
+func transcriptPath(t *testing.T, p paths.Paths, sessionID string) string {
+	t.Helper()
+	return filepath.Join(p.SessionsDir(), sessionID, "transcript.jsonl")
+}
+
+// countType counts durable records of one type in transcript bytes.
+func countType(t *testing.T, raw []byte, typ string) int {
+	t.Helper()
+	return bytes.Count(raw, []byte(`"type":"`+typ+`"`))
+}
+
+// lastPayload decodes the payload of the last record of a type.
+func lastPayload(t *testing.T, raw []byte, typ string) json.RawMessage {
+	t.Helper()
+	var found json.RawMessage
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if !bytes.Contains(line, []byte(`"type":"`+typ+`"`)) {
+			continue
+		}
+		var r struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &r); err != nil {
+			t.Fatalf("malformed record: %v", err)
+		}
+		found = r.Payload
+	}
+	return found
+}
+
+// inputRespCount reads the fake's at-most-once evidence file. The fake
+// writes it asynchronously after receiving a response, so the read polls
+// until the file exists.
+func inputRespCount(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			return string(raw)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("input-response count file %s never appeared", path)
+	return ""
+}
+
+// waitSessionState polls until the session reports the given state.
+func waitSessionState(t *testing.T, c *client.Client, key, want string) {
+	t.Helper()
+	ctx, cancel := tctx(t)
+	defer cancel()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := c.Status(ctx, key)
+		if err == nil && st.Session.State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("session %s never reached state %s", key, want)
+}
+
+// pollFor polls a condition until the deadline.
+func pollFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestCodexInputCommitRetryAfterPublishFailure is the regression for the
+// audited INPUT_RESOLUTION_COMMIT_GAP: a durable input.resolved append
+// that fails AFTER the native Respond succeeds must not lose the input.
+// The turn's terminal sweep also fails the commit; the session stays
+// waiting_input (visibly non-clean); a later retry commits the retained
+// sanitized payload WITHOUT a second native response, and a retry
+// carrying different answers cannot rewrite native-accepted truth.
+func TestCodexInputCommitRetryAfterPublishFailure(t *testing.T) {
 	t.Setenv("FAKE_CODEX_MODE", "input")
-	_, p, c, _ := startInProcess(t, codexOptions)
+	respFile := filepath.Join(t.TempDir(), "resp")
+	t.Setenv("FAKE_CODEX_INPUTRESP_FILE", respFile)
+
+	var failResolved atomic.Bool
+	failResolved.Store(true)
+	_, p, c, _ := startInProcess(t, func(o *Options) {
+		codexOptions(o)
+		o.StoreHooks = transcriptFault(func(b []byte) error {
+			if failResolved.Load() && bytes.Contains(b, []byte(api.EventInputResolved)) {
+				return errInjectedWrite
+			}
+			return nil
+		})
+	})
 	sess := serveCodex(t, c, "gap")
 
 	ctx, cancel := tctx(t)
@@ -42,70 +143,71 @@ func TestCodexInputResolvedPublishGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := waitDurableTypes(t, c, "gap", api.EventInputRequested)
-	var req struct {
-		InputID string `json:"inputId"`
-	}
+	var inputID string
 	for _, r := range page.Records {
-		if r.Type != api.EventInputRequested {
-			continue
-		}
-		if err := json.Unmarshal(r.Payload, &req); err != nil {
-			t.Fatal(err)
+		if r.Type == api.EventInputRequested {
+			var req struct {
+				InputID string `json:"inputId"`
+			}
+			if err := json.Unmarshal(r.Payload, &req); err != nil {
+				t.Fatal(err)
+			}
+			inputID = req.InputID
 		}
 	}
-	if req.InputID == "" {
+	if inputID == "" {
 		t.Fatal("no input.requested record")
 	}
 
-	// Fault injection: the transcript file becomes unwritable, so the
-	// durable input.resolved append fails AFTER the native request has
-	// already been answered. Everything else (session.json, the fake
-	// harness) keeps working.
-	trPath := filepath.Join(p.SessionsDir(), sess.SessionID, "transcript.jsonl")
-	if err := os.Chmod(trPath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	_, err := c.AnswerInput(ctx, "gap", req.InputID,
-		[]api.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}})
-	if err := os.Chmod(trPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err == nil {
+	// The answer crosses the native commit point; the durable commit
+	// fails.
+	if _, err := c.AnswerInput(ctx, "gap", inputID,
+		[]api.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}}); err == nil {
 		t.Fatal("expected the durable publish to fail")
 	}
-
-	// Fail-closed: the pending entry is consumed — a retry is a clean
-	// UNKNOWN_INPUT, never a second native response.
-	if _, err := c.AnswerInput(ctx, "gap", req.InputID,
-		[]api.InputAnswer{{QuestionID: "q1", Answers: []string{"alpha"}}}); err == nil {
-		t.Fatal("re-answering a consumed input must fail")
-	} else {
-		wantAPIErr(t, err, api.ErrUnknownInput)
+	// Exactly one native response was sent.
+	if got := inputRespCount(t, respFile); got != "1" {
+		t.Fatalf("native response count = %s, want 1", got)
 	}
+	// The turn completes; its terminal sweep attempts the retained
+	// resolution commit — which fails too — so the session must stay
+	// visibly non-clean: waiting_input, pending entry retained.
+	waitDurableTypes(t, c, "gap", api.EventMessageAgentCompleted)
+	waitSessionState(t, c, "gap", session.StateWaitingInput)
 
-	// The turn completes natively (the harness already has the answer).
-	// Wait for the terminal bookkeeping — session state returns to idle —
-	// then inspect the durable transcript: the requested input must be
-	// reconciled there. IT IS NOT: this is the audited gap.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		st, serr := c.Status(ctx, "gap")
-		if serr == nil && st.Session.State == session.StateIdle {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Storage recovers: a retry commits the stored sanitized payload —
+	// no second Respond, and the retry's different answers cannot
+	// replace the native-accepted resolution.
+	failResolved.Store(false)
+	if _, err := c.AnswerInput(ctx, "gap", inputID,
+		[]api.InputAnswer{{QuestionID: "q1", Answers: []string{"beta"}}}); err != nil {
+		t.Fatalf("commit retry: %v", err)
 	}
-	raw, err := os.ReadFile(trPath)
+	if got := inputRespCount(t, respFile); got != "1" {
+		t.Fatalf("retry re-sent the native response (count = %s)", got)
+	}
+	waitSessionState(t, c, "gap", session.StateIdle)
+
+	raw, err := os.ReadFile(transcriptPath(t, p, sess.SessionID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(raw, []byte(api.EventInputRequested)) {
-		t.Fatal("input.requested missing from durable transcript")
+	if n := countType(t, raw, api.EventInputRequested); n != 1 {
+		t.Fatalf("input.requested count = %d, want 1", n)
 	}
-	if bytes.Contains(raw, []byte(api.EventInputResolved)) {
-		t.Fatal("input.resolved present despite the failed durable publish")
+	if n := countType(t, raw, api.EventInputResolved); n != 1 {
+		t.Fatalf("input.resolved count = %d, want exactly 1", n)
 	}
-	if bytes.Contains(raw, []byte(api.EventInputAborted)) {
-		t.Fatal("input.aborted present — pending entry should have been consumed")
+	if n := countType(t, raw, api.EventInputAborted); n != 0 {
+		t.Fatalf("input.aborted count = %d, want 0 (resolved is exclusive)", n)
+	}
+	var res struct {
+		Answers map[string][]string `json:"answers"`
+	}
+	if err := json.Unmarshal(lastPayload(t, raw, api.EventInputResolved), &res); err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Answers["q1"]; len(got) != 1 || got[0] != "alpha" {
+		t.Fatalf("resolved answers = %v, want the native-accepted alpha", got)
 	}
 }

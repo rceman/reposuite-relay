@@ -148,6 +148,14 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 			return nil, fmt.Errorf("session store: %w", err)
 		}
 	}
+	// Restart reconciliation: a durable input.requested with no terminal
+	// record names a native request that died with the previous
+	// generation. Abort it durably and normalize the session — or fail
+	// closed before any listener or descriptor exists.
+	if err := d.reconcileRestoredInputs(); err != nil {
+		d.releaseLock()
+		return nil, err
+	}
 	// The stable control-plane endpoint is resolved under singleton
 	// authority: first start binds a free loopback port and commits it to
 	// config/relay.json atomically; later starts bind the configured port

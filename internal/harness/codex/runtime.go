@@ -193,28 +193,99 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 				Error:  "runtime exited: " + detail,
 			})
 		}
-		a.abortInputs(st, "runtime exited: "+detail)
+		unresolved := a.abortInputs(st, "runtime exited: "+detail)
 		a.mu.Lock()
 		st.current = nil
 		a.mu.Unlock()
-		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
-		_ = a.setSessionState(m, session.StateIdle)
+		// Inputs whose durable terminal record failed to commit are
+		// retained: the session stays visibly non-clean (waiting_input
+		// still names the unresolved authority) until a retry or the
+		// next daemon generation reconciles them.
+		if unresolved > 0 {
+			a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityWaitingInput)
+			_ = a.setSessionState(m, session.StateWaitingInput)
+		} else {
+			a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
+			_ = a.setSessionState(m, session.StateIdle)
+		}
 	}
 }
 
-// abortInputs publishes input.aborted for every unresolved request and
-// drops the mapping (a dead runtime can never answer them).
-func (a *Adapter) abortInputs(st *sessState, reason string) {
+// abortInputs terminates every unresolved input durably, coordinating
+// with the per-input resolution phase:
+//
+//   - pending: never crossed the native commit point → publish
+//     input.aborted; the entry is dropped only after the durable record
+//     commits. A failed append retains the entry (marked wantAbort) so a
+//     later sweep or restart reconciliation can retry — the durable
+//     outcome commits BEFORE live pending authority is discarded.
+//   - answered: the native answer already crossed its commit point →
+//     publish the retained sanitized input.resolved instead; a native
+//     answer is never rewritten into the contradictory input.aborted.
+//   - responding/committing/aborting: a side effect owns the input →
+//     mark wantAbort; the owner reconciles after its write returns
+//     (failed Respond → abort, committed/failed resolution → answered
+//     or deleted).
+//
+// The return value counts inputs whose durable terminal record is still
+// uncommitted after the sweep — the caller must keep the session visibly
+// non-clean (waiting_input) until authority converges.
+func (a *Adapter) abortInputs(st *sessState, reason string) int {
 	a.mu.Lock()
-	pending := st.inputs
-	st.inputs = map[string]*pendingInput{}
-	a.mu.Unlock()
-	for id := range pending {
-		_ = a.publishDurable(st.m, api.EventInputAborted, inputAbortedPayload{
-			InputID: id,
-			Reason:  reason,
-		})
+	ids := make([]string, 0, len(st.inputs))
+	for id := range st.inputs {
+		ids = append(ids, id)
 	}
+	a.mu.Unlock()
+	unresolved := 0
+	for _, id := range ids {
+		a.mu.Lock()
+		pi, ok := st.inputs[id]
+		if !ok {
+			a.mu.Unlock()
+			continue
+		}
+		var publish func() error
+		revert := pi.phase
+		switch pi.phase {
+		case inputPending:
+			// Retries a retained wantAbort entry too — a new sweep is a
+			// fresh chance to land the durable record.
+			pi.phase = inputAborting
+			publish = func() error {
+				return a.publishDurable(st.m, api.EventInputAborted, inputAbortedPayload{
+					InputID: id,
+					Reason:  reason,
+				})
+			}
+		case inputAnswered:
+			pi.phase = inputCommitting
+			publish = func() error {
+				return a.publishDurable(st.m, api.EventInputResolved, pi.resolution)
+			}
+		default:
+			// A side effect owns the input; it reconciles on return.
+			pi.wantAbort = true
+			pi.abortReason = reason
+			unresolved++
+			a.mu.Unlock()
+			continue
+		}
+		a.mu.Unlock()
+		if err := publish(); err != nil {
+			a.mu.Lock()
+			pi.phase = revert
+			pi.wantAbort = true
+			pi.abortReason = reason
+			a.mu.Unlock()
+			unresolved++
+			continue
+		}
+		a.mu.Lock()
+		delete(st.inputs, id)
+		a.mu.Unlock()
+	}
+	return unresolved
 }
 
 // setSessionState durably records the logical session state. The
