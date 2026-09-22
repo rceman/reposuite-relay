@@ -9,6 +9,7 @@
 	import { auth } from '$lib/auth/auth.svelte';
 	import { page } from '$app/state';
 	import { SessionLive, liveDeps } from '$lib/session/live.svelte';
+	import { DetailLoader } from '$lib/session/detail';
 	import type { SessionInfo } from '$lib/api/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
@@ -37,6 +38,10 @@
 	let cancelErr = $state<string | null>(null);
 	let cancelling = $state(false);
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	// Owned by the current route effect — aborts/invalidates in-flight
+	// detail reads on key change, teardown, or logout so a stale response
+	// can never overwrite a newer route's session.
+	let detail: DetailLoader | null = null;
 
 	// Events that change the session projection — coalesce into one refresh.
 	const STATE_EVENTS = new Set([
@@ -53,15 +58,18 @@
 	]);
 
 	async function refreshSession(k: string) {
-		try {
-			const resp = await api.getSession(k);
-			session = resp.session;
-			notFound = null;
-		} catch (err) {
-			if (err instanceof RelayError && err.status === 404) {
+		const loader = detail;
+		if (loader === null) return;
+		const res = await loader.load(k, (kk, signal) => api.getSession(kk, { signal }));
+		if (res.kind === 'stale') return; // superseded by a newer load/route
+		if (res.kind === 'error') {
+			if (res.error instanceof RelayError && res.error.status === 404) {
 				notFound = 'This session no longer exists.';
 			}
+			return;
 		}
+		session = res.response.session;
+		notFound = null;
 	}
 
 	function onStateEvent(type: string) {
@@ -76,6 +84,8 @@
 	$effect(() => {
 		if (!auth.authenticated || !KEY_RE.test(key)) return;
 		const k = key;
+		const loader = new DetailLoader();
+		detail = loader;
 		const l = new SessionLive(k, liveDeps(k, () => void auth.refresh()), onStateEvent);
 		live = l;
 		limitIdx = 0;
@@ -85,6 +95,8 @@
 		void l.start();
 		return () => {
 			l.stop();
+			loader.stop();
+			if (detail === loader) detail = null;
 			if (refreshTimer !== null) clearTimeout(refreshTimer);
 			refreshTimer = null;
 		};

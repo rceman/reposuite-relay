@@ -43,19 +43,25 @@ error) rather than rounding.
 
 ## NDJSON stream
 
-`lib/api/stream.ts` parses `Response.body` with `TextDecoder` in stream
-mode — arbitrary chunk boundaries, multi-line chunks, and UTF-8 splits
-are handled; a final unterminated line still parses. One frame is bounded
-by the canonical `MaxEventFrameBytes` (4 MiB); an over-bound frame aborts
-the stream as a protocol error. Terminal `{error:{code,message}}` frames
-(`STREAM_CLOSED`, `SUBSCRIBER_EVICTED`) are recognized separately from
-events and trigger reconnect, not decode failure.
+`lib/api/stream.ts` parses `Response.body` as raw bytes — arbitrary
+chunk boundaries, multi-line chunks, and UTF-8 splits are handled by
+accumulating `Uint8Array` chunks, and a final unterminated line still
+parses. One frame is bounded by the canonical `MaxEventFrameBytes`
+(4 MiB) measured on the frame's **UTF-8 bytes** — never JS string
+length, which undercounts multibyte text; an over-bound frame aborts the
+stream as a protocol error before it is decoded. Terminal
+`{error:{code,message}}` frames (`STREAM_CLOSED`, `SUBSCRIBER_EVICTED`)
+are recognized separately from events and trigger reconnect, not decode
+failure.
 
 ## Reconnect and cursor recovery
 
 - Stream end/error → reconnect `events?after=<lastAppliedSeq>` with
-  bounded backoff (250 ms → 2 s cap). Replay duplicates are deduplicated
-  by seq; events are never reordered.
+  bounded backoff (250 ms → 500 → 1 s → 2 s cap). The backoff resets only
+  after useful progress — the first applied event — so an
+  open→immediate-close stream escalates instead of hot-looping at
+  250 ms. Replay duplicates are deduplicated by seq; events are never
+  reordered.
 - `409 CURSOR_TOO_OLD` — the replay window no longer proves the cursor:
   discard transient state, re-fetch the transcript, subscribe after the
   **new** `throughSeq`.
@@ -66,6 +72,13 @@ events and trigger reconnect, not decode failure.
   protected retry loop.
 - Route change / key change / unmount / logout → `AbortController`
   aborts the stream and any pending reconnect timer.
+- One SessionLive owns at most one stream and one pending timer at any
+  instant: `connect()` cancels a pending reconnect and aborts the old
+  stream, and "Load more history" rehydrates the durable snapshot BEFORE
+  the old stream is replaced — no transient gap, no second subscription.
+- Detail reads are guarded by a per-route `DetailLoader`: a new key (or
+  teardown) aborts the in-flight `getSession` and a superseded response
+  resolves stale — it can never overwrite a newer route's session.
 
 ## Timeline
 
@@ -101,7 +114,7 @@ beyond the API window — it never claims completeness.
 |---|---|---|
 | Prompt | `POST /v1/sessions/<key>/prompt` | `{text}` only — harness-neutral (ACP rejects per-turn overrides). Accepted prompt on a COLD session wakes it intentionally. Empty text rejected client-side. |
 | Cancel | `POST /v1/sessions/<key>/cancel` | Enabled on `active`/`waiting_input`. A raced `NO_ACTIVE_TURN` is a quiet reconcile, not an error. |
-| Input | `POST /v1/sessions/<key>/input` | `{inputId, answers:[{questionId, answers:[…]}]}`; options are multi-select-safe (`[]string`); `isOther` offers free text; `isSecret` uses a password field. The pending card reconciles only through `input.resolved`/`input.aborted`. |
+| Input | `POST /v1/sessions/<key>/input` | `{inputId, answers:[{questionId, answers:[…]}]}`; options are multi-select-safe (`[]string`); `isOther` offers free text; `isSecret` uses a password field. Free text is forwarded **verbatim** — no trim; a secret may legally contain surrounding whitespace. The pending card reconciles only through `input.resolved`/`input.aborted`. |
 | Config | `PATCH /v1/sessions/<key>/config` | Sends only changed fields; empty patch never sent. `SessionInfo.model/mode` = **desired**; `SessionMetrics.model/mode` = **effective** — labeled separately, never conflated. |
 | Delete | `DELETE /v1/sessions/<key>` | Durable deletion, AlertDialog-confirmed with the key named; success aborts the stream and returns to `/sessions`. |
 | Create | `POST /v1/sessions/<provider>` | `codex`/`devin`/`opencode`; durable COLD (generation 0, pid 0) — no harness process until first prompt. |
@@ -110,10 +123,13 @@ beyond the API window — it never claims completeness.
 
 A native `isSecret` question is preserved in the durable
 `input.requested` payload (`"isSecret": true`). Its answer is forwarded
-to the harness but **never persisted**: the durable `input.resolved`
+to the harness **exactly as entered** — leading/trailing whitespace is
+significant — but **never persisted**: the durable `input.resolved`
 record withholds secret answers and lists the question IDs under
-`"redacted"`. The browser clears the field on submit and stores nothing.
-Non-secret answers record normally — `answers[questionId] = []string`.
+`"redacted"` in canonical (sorted) order, so the durable record is
+deterministic regardless of answer-submission order. The browser clears
+the field on submit and stores nothing. Non-secret answers record
+normally — `answers[questionId] = []string`.
 
 ## Resource guarantees
 

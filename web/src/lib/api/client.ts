@@ -71,8 +71,12 @@ async function relayRequest(path: string, init: RequestInit = {}): Promise<Respo
 	return resp;
 }
 
-async function getJSON<T>(path: string, decode: (v: unknown) => T): Promise<T> {
-	const resp = await relayRequest(path);
+async function getJSON<T>(
+	path: string,
+	decode: (v: unknown) => T,
+	init?: RequestInit
+): Promise<T> {
+	const resp = await relayRequest(path, init);
 	let body: unknown;
 	try {
 		body = await resp.json();
@@ -115,9 +119,14 @@ export const api = {
 	/** GET /v1/sessions — observer read; never wakes a COLD session. */
 	listSessions: (): Promise<SessionList> => getJSON('/v1/sessions', decodeSessionList),
 
-	/** GET /v1/sessions/{key} — observer read; never wakes a COLD session. */
-	getSession: (key: string): Promise<SessionResponse> =>
-		getJSON(sessionPath(key), decodeSessionResponse),
+	/**
+	 * GET /v1/sessions/{key} — observer read; never wakes a COLD session.
+	 * An optional AbortSignal lets the route cancel a stale in-flight
+	 * detail request on navigation (a superseded response must never
+	 * overwrite a newer route's state).
+	 */
+	getSession: (key: string, init?: { signal?: AbortSignal }): Promise<SessionResponse> =>
+		getJSON(sessionPath(key), decodeSessionResponse, init),
 
 	/** POST /v1/sessions/{provider} — durable COLD creation. */
 	createSession: (provider: string, body: CreateSessionBody): Promise<SessionResponse> =>

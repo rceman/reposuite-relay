@@ -72,6 +72,15 @@ export class Timeline {
 	/** Live agent drafts keyed by turnId+itemId until completion lands. */
 	private drafts = new Map<string, TimelineRow & { kind: 'agent' }>();
 
+	/**
+	 * Draft identity is the (turnId, itemId) PAIR — JSON tuple encoding is
+	 * unambiguous where string concatenation would alias ("ab"+"c" vs
+	 * "a"+"bc").
+	 */
+	private static draftKey(turnId: string, itemId: string | undefined): string {
+		return JSON.stringify([turnId, itemId ?? null]);
+	}
+
 	get state(): TimelineView {
 		return this.view;
 	}
@@ -148,7 +157,7 @@ export class Timeline {
 				// Transient draft chunk: accumulate by turn+item; the durable
 				// completion replaces it wholesale.
 				const p = decodeMessageAgent(payload);
-				const id = `${p.turnId}${p.itemId ?? ''}`;
+				const id = Timeline.draftKey(p.turnId, p.itemId);
 				const draft = this.drafts.get(id);
 				if (draft) {
 					draft.text += p.text ?? '';
@@ -171,7 +180,7 @@ export class Timeline {
 			}
 			case 'message.agent.completed': {
 				const p = decodeMessageAgent(payload);
-				const id = `${p.turnId}${p.itemId ?? ''}`;
+				const id = Timeline.draftKey(p.turnId, p.itemId);
 				const draft = this.drafts.get(id);
 				const row: TimelineRow = {
 					kind: 'agent',

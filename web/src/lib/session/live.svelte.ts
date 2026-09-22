@@ -93,6 +93,9 @@ export class SessionLive {
 	 * setLimit grows the durable tail window (load-more-history) and
 	 * rehydrates. The stream is re-established from the new throughSeq so
 	 * events published between the old and new snapshots replay exactly.
+	 * connect() cancels any pending reconnect timer and aborts the old
+	 * stream AFTER the snapshot — the ≤1 stream / ≤1 timer invariant
+	 * holds at every instant.
 	 */
 	async setLimit(limit: number): Promise<void> {
 		this.transcriptLimit = limit;
@@ -103,15 +106,20 @@ export class SessionLive {
 			this.error = err instanceof Error ? err.message : 'history reload failed';
 			return;
 		}
-		// Restart the stream from the NEW throughSeq.
-		this.abortCtl?.abort();
-		this.abortCtl = null;
+		// User-initiated restart: fresh attempt counter, fresh cursor.
 		this.attempt = 0;
 		this.connect();
 	}
 
+	/**
+	 * connect is the ONLY stream-establishment path: it first cancels a
+	 * pending reconnect timer and aborts the previous stream (if any),
+	 * so active streams ≤ 1 and pending timers ≤ 1 always.
+	 */
 	private connect(): void {
 		if (this.stopped) return;
+		this.cancelReconnectTimer();
+		this.abortCtl?.abort();
 		const ctl = new AbortController();
 		this.abortCtl = ctl;
 		this.state = this.attempt === 0 ? 'connecting' : 'reconnecting';
@@ -122,8 +130,6 @@ export class SessionLive {
 		const after = this.timeline.cursor;
 		try {
 			const frames = await this.deps.openStream(after, ctl.signal);
-			// Stream established: clear the reconnect counter.
-			this.attempt = 0;
 			this.cursorErrors = 0;
 			this.state = 'live';
 			this.error = null;
@@ -135,6 +141,10 @@ export class SessionLive {
 					break;
 				}
 				if (this.timeline.applyEvent(frame.event) === 'applied') {
+					// Useful stream progress — only NOW does the reconnect
+					// backoff reset. An open→immediate-close stream is a
+					// failure and must escalate, not restart at 250 ms.
+					this.attempt = 0;
 					this.sync();
 					this.onStateEvent?.(frame.event.type);
 				}
@@ -189,10 +199,21 @@ export class SessionLive {
 
 	private scheduleReconnect(): void {
 		if (this.stopped) return;
+		this.cancelReconnectTimer();
 		const delay = BACKOFF[Math.min(this.attempt, BACKOFF.length - 1)];
 		this.attempt++;
 		this.state = 'reconnecting';
-		this.timer = setTimeout(() => this.connect(), delay);
+		this.timer = setTimeout(() => {
+			this.timer = null;
+			this.connect();
+		}, delay);
+	}
+
+	private cancelReconnectTimer(): void {
+		if (this.timer !== null) {
+			clearTimeout(this.timer);
+			this.timer = null;
+		}
 	}
 
 	/** Snapshot the timeline into the reactive view. */
@@ -203,10 +224,7 @@ export class SessionLive {
 	/** stop aborts the stream, the pending timer, and any in-flight work. */
 	stop(): void {
 		this.stopped = true;
-		if (this.timer !== null) {
-			clearTimeout(this.timer);
-			this.timer = null;
-		}
+		this.cancelReconnectTimer();
 		this.abortCtl?.abort();
 		this.abortCtl = null;
 	}

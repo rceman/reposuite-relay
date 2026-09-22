@@ -172,6 +172,21 @@ describe('Timeline', () => {
 		expect(tl.state.rows[0]).toMatchObject({ kind: 'system', label: 'Malformed message.user event' });
 	});
 
+	it('keeps drafts distinct for aliasing turnId/itemId pairs', () => {
+		// "ab"+"c" and "a"+"bc" alias under naive concatenation — the
+		// draft key must encode the pair unambiguously.
+		const tl = new Timeline();
+		tl.hydrate(page([], 0));
+		tl.applyEvent(event(1, 'message.agent.delta', { turnId: 'ab', itemId: 'c', text: 'one' }));
+		tl.applyEvent(event(2, 'message.agent.delta', { turnId: 'a', itemId: 'bc', text: 'two' }));
+		expect(tl.state.rows).toHaveLength(2);
+		// Each completion replaces only its own draft, in place.
+		tl.applyEvent(event(3, 'message.agent.completed', { turnId: 'ab', itemId: 'c', text: 'done-1' }));
+		expect(tl.state.rows).toHaveLength(2);
+		expect(tl.state.rows[0]).toMatchObject({ kind: 'agent', live: false, text: 'done-1' });
+		expect(tl.state.rows[1]).toMatchObject({ kind: 'agent', live: true, text: 'two' });
+	});
+
 	it('hydrate resets prior state (rehydration after cursor recovery)', () => {
 		const tl = new Timeline();
 		tl.hydrate(page([{ seq: 1, type: 'message.user', payload: { text: 'a' } }], 1));

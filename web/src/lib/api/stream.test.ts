@@ -84,6 +84,46 @@ describe('parseNDJSON', () => {
 		await expect(collect([encode(big)])).rejects.toThrow(DecodeError);
 	});
 
+	it('accepts an ASCII frame at exactly the canonical bound', async () => {
+		// The bound is a BYTE bound: a well-formed event whose line is
+		// exactly MAX_FRAME_BYTES is still inside it.
+		const base = ev(1);
+		// base has a 1-char pad; extending it to MAX_FRAME_BYTES - base + 1
+		// makes the total line exactly MAX_FRAME_BYTES.
+		const line = ev(1).replace('"text":"x"', `"text":"${'x'.repeat(MAX_FRAME_BYTES - base.length + 1)}"`);
+		expect(encode(line).length).toBe(MAX_FRAME_BYTES);
+		const frames = await collect([encode(line + '\n')]);
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.kind).toBe('event');
+	});
+
+	it('rejects a frame one byte over the bound even when newline-delimited', async () => {
+		const base = ev(1);
+		const line = ev(1).replace('"text":"x"', `"text":"${'x'.repeat(MAX_FRAME_BYTES - base.length + 2)}"`);
+		expect(encode(line).length).toBe(MAX_FRAME_BYTES + 1);
+		await expect(collect([encode(`${line}\n`)])).rejects.toThrow(DecodeError);
+	});
+
+	it('enforces the bound on UTF-8 bytes, not JS string length (CJK)', async () => {
+		// '界' is 1 UTF-16 code unit but 3 UTF-8 bytes: the string length
+		// stays below 4 MiB while the wire frame exceeds it. The old
+		// code-unit check would have accepted this frame.
+		const pad = '界'.repeat(2 << 20); // ~2 Mi chars, ~6 MiB on the wire
+		const line = `{"seq":1,"pad":"${pad}"}`;
+		expect(line.length).toBeLessThan(MAX_FRAME_BYTES);
+		expect(encode(line).length).toBeGreaterThan(MAX_FRAME_BYTES);
+		await expect(collect([encode(`${line}\n`)])).rejects.toThrow(DecodeError);
+	});
+
+	it('enforces the bound on UTF-8 bytes, not JS string length (emoji)', async () => {
+		// '😀' is 2 UTF-16 code units but 4 UTF-8 bytes.
+		const pad = '😀'.repeat(1500 << 10); // ~3 Mi code units, ~6 MiB
+		const line = `{"seq":1,"pad":"${pad}"}`;
+		expect(line.length).toBeLessThan(MAX_FRAME_BYTES);
+		expect(encode(line).length).toBeGreaterThan(MAX_FRAME_BYTES);
+		await expect(collect([encode(line)])).rejects.toThrow(DecodeError);
+	});
+
 	it('recognizes a stream error frame separately from events', async () => {
 		const errFrame = JSON.stringify({
 			error: { code: 'SUBSCRIBER_EVICTED', message: 'subscriber evicted: queue full' }

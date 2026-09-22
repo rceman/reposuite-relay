@@ -246,6 +246,79 @@ describe('SessionLive', () => {
 		expect(f.streams).toHaveLength(1); // no reconnect after unmount
 	});
 
+	it('escalates backoff on open→immediate-close: 250, 500, 1000, 2000, 2000', async () => {
+		const f = fake();
+		const live = new SessionLive('s1', f.deps);
+		await live.start();
+		await tick();
+		const delays = [250, 500, 1000, 2000, 2000];
+		for (let i = 0; i < delays.length; i++) {
+			// Each stream opens then ends with zero events — no useful
+			// progress, so the backoff must NOT reset.
+			f.streams[i]?.end();
+			await tick();
+			expect(live.state).toBe('reconnecting');
+			await vi.advanceTimersByTimeAsync(delays[i]! - 1);
+			expect(f.streams).toHaveLength(i + 1); // timer not yet fired
+			await vi.advanceTimersByTimeAsync(1);
+			await tick();
+			expect(f.streams).toHaveLength(i + 2); // fired exactly on schedule
+		}
+		live.stop();
+	});
+
+	it('resets the backoff only after an applied event, not on open', async () => {
+		const f = fake();
+		const live = new SessionLive('s1', f.deps);
+		await live.start();
+		await tick();
+		// Two open→immediate-close cycles: 250 then 500 — an HTTP 200 alone
+		// does not prove recovery.
+		f.streams[0]?.end();
+		await tick();
+		await vi.advanceTimersByTimeAsync(250);
+		await tick();
+		expect(f.streams).toHaveLength(2);
+		f.streams[1]?.end();
+		await tick();
+		await vi.advanceTimersByTimeAsync(499);
+		expect(f.streams).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		await tick();
+		expect(f.streams).toHaveLength(3);
+		// Stream 3 applies a real event — useful progress resets backoff;
+		// its own later failure retries from 250 ms again.
+		f.streams[2]?.push({ kind: 'event', event: event(6) });
+		f.streams[2]?.end();
+		await tick();
+		await vi.advanceTimersByTimeAsync(250);
+		await tick();
+		expect(f.streams).toHaveLength(4);
+		expect(f.streams[3]?.after).toBe(6);
+		live.stop();
+	});
+
+	it('setLimit during a pending reconnect cancels the stale timer', async () => {
+		const f = fake();
+		const live = new SessionLive('s1', f.deps);
+		await live.start();
+		await tick();
+		f.streams[0]?.end();
+		await tick();
+		expect(live.state).toBe('reconnecting'); // 250 ms timer pending
+		// Load-more rehydrates, then reconnects from the NEW throughSeq —
+		// exactly one replacement stream, and the old timer never fires.
+		f.pages.push(transcriptPage(42));
+		await live.setLimit(400);
+		await tick();
+		expect(f.streams).toHaveLength(2);
+		expect(f.streams[1]?.after).toBe(42);
+		await vi.advanceTimersByTimeAsync(60_000);
+		await tick();
+		expect(f.streams).toHaveLength(2); // no stale-timer second stream
+		live.stop();
+	});
+
 	it('a protocol/decode error goes offline without reconnecting', async () => {
 		const f = fake();
 		// Malformed wire data (unsafe seq, bad JSON) surfaces as DecodeError
