@@ -79,10 +79,12 @@ type fakeServer struct {
 	// completes only after every one has a response. lastReqID is the most
 	// recent request ID; inputResponses counts every response frame sent
 	// for a tracked request (double responses after finishTurn still
-	// count — at-most-once evidence).
+	// count — at-most-once evidence) and inputErrs classifies the RPC
+	// error subset.
 	awaiting       map[int64]bool
 	lastReqID      int64
 	inputResponses int
+	inputErrs      int
 }
 
 type pendingTurn struct {
@@ -114,16 +116,14 @@ func (f *fakeServer) loop() {
 			// A response to the fake's own requested-input request.
 			if f.awaiting[*msg.ID] {
 				delete(f.awaiting, *msg.ID)
-				f.inputResponses++
-				f.reportInputResponses()
+				f.noteInputResponse(msg)
 				if len(f.awaiting) == 0 {
 					f.finishTurn()
 				}
 			} else if *msg.ID == f.lastReqID && f.lastReqID != 0 {
 				// A duplicate response to an already-answered request
 				// still counts — at-most-once evidence.
-				f.inputResponses++
-				f.reportInputResponses()
+				f.noteInputResponse(msg)
 			}
 			continue
 		}

@@ -126,6 +126,15 @@ after `input.requested`. If the announce-time state rollback itself
 fails, a stale durable `waiting_input` with zero unresolved requests is
 normalized to `idle` on restart.
 
+The `ready` barrier that releases `AnswerInput` callers parked on an
+`announcing` input means only *"the announcement left its initial
+phase"* — never *"the input is answerable"*. Terminal intent dominates:
+an input marked `wantAbort` is not claimable for `Respond` even while
+`pending` (a failed `input.aborted` append leaves exactly that retained,
+non-answerable state until a retry commits). One native request
+therefore receives at most **one** response frame — the deferred answer
+or the handler's RPC error, never both.
+
 ## Session activity/state projection
 
 One canonical rule derives activity/state from actual adapter state —

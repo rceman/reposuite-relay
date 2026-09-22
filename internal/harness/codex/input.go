@@ -31,7 +31,7 @@ import (
 // Terminal paths (turn completion, runtime exit, session stop) never
 // publish input.aborted over an inputAnswered entry — a native-accepted
 // answer commits input.resolved, never the contradictory opposite.
-func (a *Adapter) AnswerInput(_ context.Context, m *session.Managed, inputID string, sel []harness.InputAnswer) error {
+func (a *Adapter) AnswerInput(ctx context.Context, m *session.Managed, inputID string, sel []harness.InputAnswer) error {
 	st := a.state(m.Session.ID)
 	if st == nil {
 		return fmt.Errorf("session %s not tracked by the codex adapter", m.Session.ID)
@@ -47,12 +47,28 @@ func (a *Adapter) AnswerInput(_ context.Context, m *session.Managed, inputID str
 		case inputAnnouncing:
 			// The durable input.requested is still committing — wait for
 			// the announcement to settle, then re-evaluate: a committed
-			// announcement is pending; a failed one is gone.
+			// announcement is pending; a failed one is gone. ready says
+			// ONLY that the entry left announcing — never that the input
+			// is answerable. A canceled caller leaves promptly; the
+			// announcement itself stays owned by its native handler.
 			ready := pi.ready
 			a.mu.Unlock()
-			<-ready
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return fmt.Errorf("answer input %s: %w", inputID, ctx.Err())
+			}
 			continue
 		case inputPending:
+			// Terminal intent dominates the answer claim: a pending input
+			// marked wantAbort was already declared dead by a terminal
+			// path — Respond must never be sent for it (a failed
+			// input.aborted append leaves exactly this retained state,
+			// still non-answerable until the abort commits).
+			if pi.wantAbort {
+				a.mu.Unlock()
+				return fmt.Errorf("%w: input %s resolution in flight", ErrBusy, inputID)
+			}
 			pi.phase = inputResponding
 			a.mu.Unlock()
 			if err := a.respondNative(st, pi, sel); err != nil {

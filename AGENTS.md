@@ -235,7 +235,10 @@ report each as PASS/FAIL/N/A with evidence.
   BEFORE `input.requested` (both checked — a failure removes the entry
   and errors the native request, never leaving answerable authority
   without a durable request), and `input.aborted` may never precede
-  `input.requested`. Session activity/state derives from one canonical
+  `input.requested`. The `ready` barrier releases parked answers only to
+  re-evaluate under the lock — `pending + wantAbort` is non-answerable,
+  so terminal intent dominates and one native request gets at most one
+  response frame. Session activity/state derives from one canonical
   projection (`inputs nonempty → waiting_input; turn in flight →
   active; else idle`) — several pending inputs may coexist and each
   keeps `waiting_input` until its own durable terminal record commits.

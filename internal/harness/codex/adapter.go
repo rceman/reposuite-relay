@@ -129,10 +129,11 @@ type pendingInput struct {
 	secret map[string]bool
 
 	phase inputPhase
-	// ready is closed exactly once when the announcement resolves —
-	// either the entry became inputPending (input.requested committed)
-	// or it was removed without ever being answerable. AnswerInput waits
-	// on it rather than acting on a half-established input.
+	// ready is closed exactly once when the entry leaves the announcing
+	// phase — either input.requested committed (pending) or the entry
+	// was removed. It does NOT mean the input is answerable: terminal
+	// intent (wantAbort) may already be set, and AnswerInput must
+	// re-check membership, phase, and wantAbort under a.mu after waking.
 	ready chan struct{}
 	// wantAbort means a terminal path (turn completion, runtime exit,
 	// session stop) visited while a side effect owned the input; the

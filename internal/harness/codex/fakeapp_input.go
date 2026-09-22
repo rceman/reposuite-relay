@@ -84,17 +84,34 @@ func (f *fakeServer) inputQuestions() []map[string]any {
 	return questions
 }
 
-// reportInputResponses persists the running native-response count for
-// the current requested-input request — the at-most-once evidence seam.
-// Atomic rewrite: readers never see a torn count.
+// noteInputResponse counts one response frame for a tracked requested-
+// input request ID and classifies it: a normal answer payload vs an RPC
+// error — the race evidence that a request never gets BOTH.
+func (f *fakeServer) noteInputResponse(msg frame) {
+	f.inputResponses++
+	if msg.Error != nil {
+		f.inputErrs++
+	}
+	f.reportInputResponses()
+}
+
+// reportInputResponses persists the running native-response counts for
+// the current requested-input request — the at-most-once evidence seam:
+// FAKE_CODEX_INPUTRESP_FILE holds the total response-frame count and
+// FAKE_CODEX_INPUTERR_FILE the RPC-error subset, so tests can prove a
+// terminal path produced exactly one ERROR response and zero normal
+// answers. Atomic rewrites: readers never see a torn count.
 func (f *fakeServer) reportInputResponses() {
-	path := os.Getenv("FAKE_CODEX_INPUTRESP_FILE")
-	if path == "" {
-		return
+	writeCount := func(path string, n int) {
+		if path == "" {
+			return
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, []byte(strconv.Itoa(n)), 0o600); err != nil {
+			return
+		}
+		_ = os.Rename(tmp, path)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.Itoa(f.inputResponses)), 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, path)
+	writeCount(os.Getenv("FAKE_CODEX_INPUTRESP_FILE"), f.inputResponses)
+	writeCount(os.Getenv("FAKE_CODEX_INPUTERR_FILE"), f.inputErrs)
 }
