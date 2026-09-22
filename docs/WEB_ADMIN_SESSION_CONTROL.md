@@ -98,7 +98,50 @@ failure.
 
 Pending requested input is reconstructed from **durable** records
 (`input.requested` adds; `input.resolved`/`input.aborted` removes by
-exact `inputId`), so a browser reload restores the pending state.
+exact `inputId`), so a browser reload restores the pending state. A
+session may carry **multiple** unresolved inputs at once — the pending
+projection is the full unresolved set, never "the last request".
+
+## Requested-input establishment
+
+A native `item/tool/requestUserInput` is itself a transaction. The
+pending entry is installed as `announcing` *before* any durable work —
+a terminal path racing the handler can mark `wantAbort`, and the sweep
+never publishes `input.aborted` for a request whose `input.requested`
+record does not yet exist (`input.aborted` never precedes
+`input.requested`). Then, in order:
+
+1. durable `Session.State = waiting_input` commits — checked, not
+   ignored: restart reconciliation scans on exactly this signal, so no
+   unresolved `input.requested` may exist without it;
+2. durable `input.requested` commits — checked;
+3. `announcing → pending` — only now is the input answerable.
+
+Either durable step failing is **fail-closed**: the entry is removed
+(the request was never durably announced, so no terminal record is
+owed), the canonical projection reconciles activity/state, and the
+native request receives an RPC error. If the announcement committed
+while a terminal path visited, the owner then publishes `input.aborted`
+after `input.requested`. If the announce-time state rollback itself
+fails, a stale durable `waiting_input` with zero unresolved requests is
+normalized to `idle` on restart.
+
+## Session activity/state projection
+
+One canonical rule derives activity/state from actual adapter state —
+used by announcement cleanup, resolution commit, abort, terminal sweeps,
+and runtime-exit reconciliation:
+
+```
+len(inputs) > 0   → waiting_input   (every retained phase counts:
+                                     announcing … aborting)
+current != nil    → active
+else              → idle
+```
+
+Resolving one of several inputs leaves `waiting_input` while any input
+remains; a `Respond` failure after a terminal visit converges to the
+durable `input.aborted` plus the projected state — no restart needed.
 
 ## Requested-input resolution durability
 
@@ -106,11 +149,13 @@ exact `inputId`), so a browser reload restores the pending state.
 Per input, the in-memory lifecycle is:
 
 ```
-pending → responding → answered → committing → (removed)
-   ↑________|                  ↑________|
-   Respond failed (retryable)  durable append failed (retryable,
-                              never re-Responds)
+announcing → pending → responding → answered → committing → (removed)
+                ↑________|              ↑________|
+                Respond failed          durable append failed (retryable,
+                (retryable)             never re-Responds)
 ```
+
+`announcing` is internal only — it is never a durable event type.
 
 - **Native commit point:** `Conn.Respond` is the irreversible external
   side effect and is sent **at most once** per input. The caller that
@@ -134,11 +179,14 @@ pending → responding → answered → committing → (removed)
   reconciliation state cannot be slept away). It settles `idle`/`active`
   when the commit converges.
 - **Restart reconciliation:** a native request dies with its daemon
-  generation. On startup, sessions restored as `waiting_input` get an
-  O(n) transcript scan; every unresolved `input.requested` is durably
-  `input.aborted` (`"daemon restarted before requested input resolution
-  committed"`) and the state normalizes — startup **fails closed** if the
-  compensating record cannot be committed.
+  generation. On startup, sessions restored as `waiting_input` get a
+  full transcript scan (exact record count, no cap); every unresolved
+  `input.requested` is durably `input.aborted` (`"daemon restarted
+  before requested input resolution committed"`) and the state
+  normalizes — startup **fails closed** if the compensating record
+  cannot be committed, and a malformed `input.*` authority record (bad
+  payload or missing `inputId`) fails closed too rather than being read
+  as "nothing unresolved".
 
 A commit that crosses a daemon generation is indistinguishable from an
 unanswered request, so the canonical restart outcome is `input.aborted`
@@ -158,7 +206,7 @@ beyond the API window — it never claims completeness.
 |---|---|---|
 | Prompt | `POST /v1/sessions/<key>/prompt` | `{text}` only — harness-neutral (ACP rejects per-turn overrides). Accepted prompt on a COLD session wakes it intentionally. Empty text rejected client-side. |
 | Cancel | `POST /v1/sessions/<key>/cancel` | Enabled on `active`/`waiting_input`. A raced `NO_ACTIVE_TURN` is a quiet reconcile, not an error. |
-| Input | `POST /v1/sessions/<key>/input` | `{inputId, answers:[{questionId, answers:[…]}]}`; options are multi-select-safe (`[]string`); `isOther` offers free text; `isSecret` uses a password field. Free text is forwarded **verbatim** — no trim; a secret may legally contain surrounding whitespace. The pending card reconciles only through `input.resolved`/`input.aborted`. |
+| Input | `POST /v1/sessions/<key>/input` | `{inputId, answers:[{questionId, answers:[…]}]}`; options are multi-select-safe (`[]string`); `isOther` offers free text **in addition to** any structured options (never discards them); `isSecret` uses a password field. Free text is forwarded **verbatim** — no trim; a secret may legally contain surrounding whitespace. The pending card reconciles only through `input.resolved`/`input.aborted`. |
 | Config | `PATCH /v1/sessions/<key>/config` | Sends only changed fields; empty patch never sent. `SessionInfo.model/mode` = **desired**; `SessionMetrics.model/mode` = **effective** — labeled separately, never conflated. |
 | Delete | `DELETE /v1/sessions/<key>` | Durable deletion, AlertDialog-confirmed with the key named; success aborts the stream and returns to `/sessions`. |
 | Create | `POST /v1/sessions/<provider>` | `codex`/`devin`/`opencode`; durable COLD (generation 0, pid 0) — no harness process until first prompt. |
@@ -171,9 +219,15 @@ to the harness **exactly as entered** — leading/trailing whitespace is
 significant — but **never persisted**: the durable `input.resolved`
 record withholds secret answers and lists the question IDs under
 `"redacted"` in canonical (sorted) order, so the durable record is
-deterministic regardless of answer-submission order. The browser clears
-the field on submit and stores nothing. Non-secret answers record
-normally — `answers[questionId] = []string`.
+deterministic regardless of answer-submission order. Non-secret answers
+record normally — `answers[questionId] = []string`.
+
+Browser-side, the request body is built first and the secret draft is
+cleared from component memory **before the send is awaited** — the
+native side may already hold the answer while the durable commit fails,
+so an ambiguous rejection must never leave a credential in page state.
+The request body alone carries the exact secret for the send; nothing
+secret ever touches browser storage.
 
 ## Resource guarantees
 

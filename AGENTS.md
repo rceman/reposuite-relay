@@ -229,6 +229,16 @@ report each as PASS/FAIL/N/A with evidence.
   durable fields directly from another goroutine.
 - A turn is in flight until its terminal durable record is published;
   unresolved requested input is a hard runtime sleep blocker.
+- **Requested-input establishment is a transaction too** (see
+  `docs/WEB_ADMIN_SESSION_CONTROL.md`): the entry is installed as
+  `announcing` before durable work, durable `waiting_input` state commits
+  BEFORE `input.requested` (both checked — a failure removes the entry
+  and errors the native request, never leaving answerable authority
+  without a durable request), and `input.aborted` may never precede
+  `input.requested`. Session activity/state derives from one canonical
+  projection (`inputs nonempty → waiting_input; turn in flight →
+  active; else idle`) — several pending inputs may coexist and each
+  keeps `waiting_input` until its own durable terminal record commits.
 - **Requested-input resolution is a two-commit-point transaction**
   (see `docs/WEB_ADMIN_SESSION_CONTROL.md`): the native `Respond` is
   sent at most once per input (claimed via the `pending → responding`
@@ -244,7 +254,9 @@ report each as PASS/FAIL/N/A with evidence.
   (non-clean, unsleepable) until authority converges. Daemon restart
   reconciliation durably aborts unresolved `input.requested` records
   (the native RPC died with the generation) and fails startup closed if
-  the compensating record cannot be committed.
+  the compensating record cannot be committed or an `input.*` authority
+  record is malformed. `isOther` questions keep their structured
+  `options` — a free-form path is additive, never a discard.
 - Runtime death (unexpected) fails in-flight work durably; a deliberate
   stop has no in-flight work by construction. The supervisor reports
   each runtime generation gone exactly once (`OnGone`).
