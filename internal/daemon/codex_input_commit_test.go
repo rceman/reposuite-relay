@@ -20,20 +20,44 @@ import (
 
 var errInjectedWrite = errors.New("injected transcript write failure")
 
-// transcriptFault routes every transcript.jsonl record append through
-// fn — returning an error injects a durable-append failure; blocking
-// inside fn holds a commit window open for deterministic race tests.
-func transcriptFault(fn func(b []byte) error) *store.Hooks {
+// storeWriteFault routes every store WriteFile through fn — returning an
+// error injects a write failure; blocking inside fn holds a commit window
+// open for deterministic race tests.
+func storeWriteFault(fn func(f *os.File, b []byte) error) *store.Hooks {
 	return &store.Hooks{
 		WriteFile: func(f *os.File, b []byte) (int, error) {
-			if strings.HasSuffix(f.Name(), "transcript.jsonl") && fn != nil {
-				if err := fn(b); err != nil {
+			if fn != nil {
+				if err := fn(f, b); err != nil {
 					return 0, err
 				}
 			}
 			return f.Write(b)
 		},
 	}
+}
+
+// transcriptFault routes every transcript.jsonl record append through
+// fn — returning an error injects a durable-append failure.
+func transcriptFault(fn func(b []byte) error) *store.Hooks {
+	return storeWriteFault(func(f *os.File, b []byte) error {
+		if strings.HasSuffix(f.Name(), "transcript.jsonl") {
+			return fn(b)
+		}
+		return nil
+	})
+}
+
+// sessionMetaFault fails session.json writes whose record bytes contain
+// needle — the durable state-transition injection seam (session.json is
+// written through a tmp file, so matching is on content).
+func sessionMetaFault(fail *atomic.Bool, needle string) *store.Hooks {
+	return storeWriteFault(func(f *os.File, b []byte) error {
+		if fail.Load() && !strings.HasSuffix(f.Name(), "transcript.jsonl") &&
+			bytes.Contains(b, []byte(needle)) {
+			return errInjectedWrite
+		}
+		return nil
+	})
 }
 
 func transcriptPath(t *testing.T, p paths.Paths, sessionID string) string {

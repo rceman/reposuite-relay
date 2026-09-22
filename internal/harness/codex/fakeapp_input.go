@@ -1,9 +1,42 @@
 package codex
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
+
+// askInputs issues the mode's requested-input server requests (zero, one,
+// or — "input-pair" — two concurrent ones) and reports whether the turn
+// is waiting on answers. Every issued request ID is tracked in
+// f.awaiting: the turn completes only after ALL of them are answered.
+func (f *fakeServer) askInputs(threadID, turnID string) bool {
+	nReq := 0
+	switch f.mode {
+	case "input", "input-secret", "input-secrets", "input-other":
+		nReq = 1
+	case "input-pair":
+		nReq = 2
+	}
+	for i := 0; i < nReq; i++ {
+		f.nextID++
+		reqID := f.nextID
+		f.awaiting[reqID] = true
+		f.lastReqID = reqID
+		f.write(frame{
+			ID:     &reqID,
+			Method: MethodRequestUserInput,
+			Params: mustJSON(map[string]any{
+				"threadId":   threadID,
+				"turnId":     turnID,
+				"itemId":     fmt.Sprintf("item_input_%d", i+1),
+				"isBlocking": true,
+				"questions":  f.inputQuestions(),
+			}),
+		})
+	}
+	return nReq > 0
+}
 
 // inputQuestions builds the scripted requested-input question set for
 // the current fake mode.
@@ -17,6 +50,10 @@ func (f *fakeServer) inputQuestions() []map[string]any {
 			{"label": "beta", "description": "second"},
 		},
 	}}
+	if f.mode == "input-other" {
+		// A question can offer structured options AND a free-form path.
+		questions[0]["isOther"] = true
+	}
 	if f.mode == "input-secret" {
 		questions = append(questions, map[string]any{
 			"id":       "q2",

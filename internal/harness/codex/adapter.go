@@ -53,6 +53,10 @@ type Adapter struct {
 	servers  map[string]*Server    // by runtime key
 	// wg counts adapter-owned goroutines: each runtime's transport reader.
 	wg sync.WaitGroup
+	// testBeforeRespond is a test-only seam invoked inside respondNative
+	// immediately before the single native response write — deterministic
+	// terminal-race barriers without sleeps. Never set in production.
+	testBeforeRespond func()
 }
 
 type sessState struct {
@@ -91,8 +95,14 @@ type activeTurn struct {
 type inputPhase int
 
 const (
+	// inputAnnouncing: the entry is installed but its durable
+	// input.requested record has not committed yet — the input is not
+	// answerable and never abortable (input.aborted must never precede
+	// input.requested). A terminal path marks wantAbort; the announcement
+	// owner reconciles after its durable operation returns.
+	inputAnnouncing inputPhase = iota
 	// inputPending: the native request exists and no response was sent.
-	inputPending inputPhase = iota
+	inputPending
 	// inputResponding: one caller owns the in-flight Respond write;
 	// concurrent answers converge on BUSY, terminal paths mark wantAbort.
 	inputResponding
@@ -119,6 +129,11 @@ type pendingInput struct {
 	secret map[string]bool
 
 	phase inputPhase
+	// ready is closed exactly once when the announcement resolves —
+	// either the entry became inputPending (input.requested committed)
+	// or it was removed without ever being answerable. AnswerInput waits
+	// on it rather than acting on a half-established input.
+	ready chan struct{}
 	// wantAbort means a terminal path (turn completion, runtime exit,
 	// session stop) visited while a side effect owned the input; the
 	// side-effect owner reconciles after its write returns. It also

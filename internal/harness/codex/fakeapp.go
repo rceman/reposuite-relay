@@ -27,6 +27,9 @@ import (
 //	"input-secret"  the turn asks one normal plus one isSecret question
 //	"input-secrets" the turn asks one normal plus two isSecret questions
 //	                (question IDs ordered so lexical ≠ a likely answer order)
+//	"input-other"   the turn asks one question with options AND isOther
+//	"input-pair"    the turn issues TWO concurrent requested-input
+//	                requests and completes only after both are answered
 //	"die-on-turn"   the process exits right after accepting a turn
 //	"resume-error"  thread/resume always fails
 //	"stubborn"      ignores stdin forever (forces the bounded kill path)
@@ -40,10 +43,11 @@ import (
 func RunFakeAppServer(in io.Reader, out io.Writer) int {
 	mode := os.Getenv("FAKE_CODEX_MODE")
 	f := &fakeServer{
-		mode:   mode,
-		in:     bufio.NewScanner(in),
-		out:    out,
-		nextID: 100,
+		mode:     mode,
+		in:       bufio.NewScanner(in),
+		out:      out,
+		nextID:   100,
+		awaiting: map[int64]bool{},
 	}
 	if mode == "stubborn" {
 		select {} // never exits on stdin EOF
@@ -71,9 +75,12 @@ type fakeServer struct {
 	threadID string
 	// resumeCount counts successful resumes (test evidence).
 	resumeCount int
-	// lastReqID is the most recent requested-input request ID;
-	// inputResponses counts every response frame sent for it (double
-	// responses after finishTurn still count — at-most-once evidence).
+	// awaiting holds the outstanding requested-input request IDs — a turn
+	// completes only after every one has a response. lastReqID is the most
+	// recent request ID; inputResponses counts every response frame sent
+	// for a tracked request (double responses after finishTurn still
+	// count — at-most-once evidence).
+	awaiting       map[int64]bool
 	lastReqID      int64
 	inputResponses int
 }
@@ -82,7 +89,6 @@ type pendingTurn struct {
 	threadID string
 	turnID   string
 	text     string
-	reqID    int64
 }
 
 type frame struct {
@@ -106,12 +112,18 @@ func (f *fakeServer) loop() {
 		}
 		if msg.Method == "" && msg.ID != nil {
 			// A response to the fake's own requested-input request.
-			if *msg.ID == f.lastReqID && f.lastReqID != 0 {
+			if f.awaiting[*msg.ID] {
+				delete(f.awaiting, *msg.ID)
 				f.inputResponses++
 				f.reportInputResponses()
-			}
-			if f.pending != nil && *msg.ID == f.pending.reqID {
-				f.finishTurn()
+				if len(f.awaiting) == 0 {
+					f.finishTurn()
+				}
+			} else if *msg.ID == f.lastReqID && f.lastReqID != 0 {
+				// A duplicate response to an already-answered request
+				// still counts — at-most-once evidence.
+				f.inputResponses++
+				f.reportInputResponses()
 			}
 			continue
 		}
@@ -215,22 +227,8 @@ func (f *fakeServer) startTurn(msg frame) {
 		text:     text,
 	}
 
-	if f.mode == "input" || f.mode == "input-secret" || f.mode == "input-secrets" {
-		f.nextID++
-		f.pending.reqID = f.nextID
-		f.lastReqID = f.nextID
-		f.write(frame{
-			ID:     &f.pending.reqID,
-			Method: MethodRequestUserInput,
-			Params: mustJSON(map[string]any{
-				"threadId":   p.ThreadID,
-				"turnId":     turnID,
-				"itemId":     "item_input_1",
-				"isBlocking": true,
-				"questions":  f.inputQuestions(),
-			}),
-		})
-		return // completion waits for the answer
+	if f.askInputs(p.ThreadID, turnID) {
+		return // completion waits for the answers
 	}
 	f.finishTurn()
 }

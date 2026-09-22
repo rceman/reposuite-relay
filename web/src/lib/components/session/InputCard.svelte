@@ -9,7 +9,7 @@
 	import { api } from '$lib/api/client';
 	import { RelayError } from '$lib/api/errors';
 	import type { InputRequestedPayload } from '$lib/api/types';
-	import { buildAnswers, hasAnyAnswer } from '$lib/session/answers';
+	import { hasAnyAnswer, planSubmit } from '$lib/session/answers';
 	import { Button } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Input } from '$lib/components/ui/input';
@@ -43,13 +43,18 @@
 		if (!hasAnswer || submitting) return;
 		submitting = true;
 		error = null;
+		// The native commit point is inside this call: the harness may
+		// already hold the answer while the durable commit failed, so a
+		// rejected submit is ambiguous. Secret drafts leave component
+		// memory BEFORE the send resolves — the request body alone
+		// carries them. A re-answer (when genuinely needed) requires
+		// re-entry, which beats retaining a credential.
+		const plan = planSubmit(request.questions, { selected, freeText }, request.inputId);
+		freeText = plan.draft.freeText;
 		try {
-			await api.answerInput(sessionKey, {
-				inputId: request.inputId,
-				answers: buildAnswers(request.questions, { selected, freeText })
-			});
-			// Accepted — input.resolved reconciles pending state. Clear local
-			// fields now so a secret never lingers in the page.
+			await api.answerInput(sessionKey, plan.body);
+			// Accepted — input.resolved reconciles pending state. Clear the
+			// remaining local fields now.
 			selected = {};
 			freeText = {};
 		} catch (err) {

@@ -70,14 +70,20 @@ func (d *Daemon) reconcileRestoredInputs() error {
 // unresolvedInputIDs scans the full durable transcript and returns the
 // input IDs of every input.requested with no later matching
 // input.resolved/input.aborted, in request order. Gated callers only:
-// the scan is O(transcript length).
+// the scan is O(transcript length) and covers the transcript's exact
+// current record count — no arbitrary ceiling.
+//
+// The three input.* records are the requested-input authority; a
+// malformed payload or missing inputId in any of them inside a
+// waiting_input session's transcript is corruption, not evidence — the
+// scan fails closed rather than guess at unresolved state.
 func (d *Daemon) unresolvedInputIDs(m *session.Managed) ([]string, error) {
 	tr, err := d.store.Transcript(m.Session.ID)
 	if err != nil {
 		return nil, err
 	}
 	defer tr.Close()
-	recs, _, err := tr.Tail(1 << 30)
+	recs, _, err := tr.Tail(tr.Len())
 	if err != nil {
 		return nil, err
 	}
@@ -89,15 +95,18 @@ func (d *Daemon) unresolvedInputIDs(m *session.Managed) ([]string, error) {
 		}
 		switch r.Type {
 		case api.EventInputRequested:
-			if json.Unmarshal(r.Payload, &p) != nil || p.InputID == "" || open[p.InputID] {
-				continue
+			if err := json.Unmarshal(r.Payload, &p); err != nil || p.InputID == "" {
+				return nil, fmt.Errorf("malformed %s record (seq %d)", r.Type, r.Seq)
 			}
-			open[p.InputID] = true
-			order = append(order, p.InputID)
+			if !open[p.InputID] {
+				open[p.InputID] = true
+				order = append(order, p.InputID)
+			}
 		case api.EventInputResolved, api.EventInputAborted:
-			if json.Unmarshal(r.Payload, &p) == nil {
-				delete(open, p.InputID)
+			if err := json.Unmarshal(r.Payload, &p); err != nil || p.InputID == "" {
+				return nil, fmt.Errorf("malformed %s record (seq %d)", r.Type, r.Seq)
 			}
+			delete(open, p.InputID)
 		}
 	}
 	out := order[:0]

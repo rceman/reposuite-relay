@@ -193,27 +193,24 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 				Error:  "runtime exited: " + detail,
 			})
 		}
-		unresolved := a.abortInputs(st, "runtime exited: "+detail)
+		a.abortInputs(st, "runtime exited: "+detail)
 		a.mu.Lock()
 		st.current = nil
 		a.mu.Unlock()
 		// Inputs whose durable terminal record failed to commit are
-		// retained: the session stays visibly non-clean (waiting_input
-		// still names the unresolved authority) until a retry or the
-		// next daemon generation reconciles them.
-		if unresolved > 0 {
-			a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityWaitingInput)
-			_ = a.setSessionState(m, session.StateWaitingInput)
-		} else {
-			a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
-			_ = a.setSessionState(m, session.StateIdle)
-		}
+		// retained: the canonical projection keeps the session visibly
+		// non-clean (waiting_input still names the unresolved authority)
+		// until a retry or the next daemon generation reconciles them.
+		a.settleSessionState(st)
 	}
 }
 
 // abortInputs terminates every unresolved input durably, coordinating
 // with the per-input resolution phase:
 //
+//   - announcing: the durable input.requested has not committed → mark
+//     wantAbort; the announcement owner reconciles (a committed
+//     announcement aborts after it; a failed one owes no record).
 //   - pending: never crossed the native commit point → publish
 //     input.aborted; the entry is dropped only after the durable record
 //     commits. A failed append retains the entry (marked wantAbort) so a
@@ -227,9 +224,8 @@ func (a *Adapter) OnRuntimeGone(key string, rt *runtime.Runtime, reason string) 
 //     (failed Respond → abort, committed/failed resolution → answered
 //     or deleted).
 //
-// The return value counts inputs whose durable terminal record is still
-// uncommitted after the sweep — the caller must keep the session visibly
-// non-clean (waiting_input) until authority converges.
+// Callers follow with settleSessionState, which derives the session's
+// activity/state from the inputs that actually remain.
 func (a *Adapter) abortInputs(st *sessState, reason string) int {
 	a.mu.Lock()
 	ids := make([]string, 0, len(st.inputs))
@@ -294,6 +290,39 @@ func (a *Adapter) abortInputs(st *sessState, reason string) int {
 // notification goroutines.
 func (a *Adapter) setSessionState(m *session.Managed, state string) error {
 	return a.deps.Materialize(m, harness.SessionUpdate{State: &state})
+}
+
+// settleSessionState derives the canonical session activity/state
+// projection from actual adapter state — the single convergence point
+// for every path that removes or retains requested-input authority:
+//
+//	len(st.inputs) > 0  → waiting_input (every retained phase —
+//	                      announcing, pending, responding, answered,
+//	                      committing, aborting — holds unresolved
+//	                      authority until its durable terminal record
+//	                      commits and the entry is removed)
+//	st.current != nil   → active
+//	else                → idle
+//
+// The snapshot is taken under a.mu; the supervisor and durable writes
+// run without holding it.
+func (a *Adapter) settleSessionState(st *sessState) {
+	m := st.m
+	a.mu.Lock()
+	hasInput := len(st.inputs) > 0
+	hasTurn := st.current != nil
+	a.mu.Unlock()
+	switch {
+	case hasInput:
+		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityWaitingInput)
+		_ = a.setSessionState(m, session.StateWaitingInput)
+	case hasTurn:
+		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityActive)
+		_ = a.setSessionState(m, session.StateActive)
+	default:
+		a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
+		_ = a.setSessionState(m, session.StateIdle)
+	}
 }
 
 // --- prompt / turn --------------------------------------------------

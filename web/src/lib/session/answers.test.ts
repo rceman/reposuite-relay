@@ -2,7 +2,7 @@
 // because a secret may legally contain surrounding whitespace. Presence
 // is rawValue.length > 0; questions with no answer are omitted.
 import { describe, expect, it } from 'vitest';
-import { buildAnswers, hasAnyAnswer } from './answers';
+import { buildAnswers, hasAnyAnswer, planSubmit } from './answers';
 import type { InputQuestion } from '$lib/api/types';
 
 const QUESTIONS: InputQuestion[] = [
@@ -60,6 +60,43 @@ describe('buildAnswers', () => {
 		expect(
 			buildAnswers(QUESTIONS, { selected: {}, freeText: { q2: '   ' } })
 		).toEqual([{ questionId: 'q2', answers: ['   '] }]);
+	});
+});
+
+describe('planSubmit', () => {
+	it('carries the exact secret in the body but strips it from the retained draft', () => {
+		// The durable-commit-failure path returns an error AFTER the native
+		// side may already hold the answer — so the secret leaves component
+		// memory before the send is awaited, not after it succeeds. The
+		// cleared draft is what the component keeps while awaiting and
+		// after a failure; the body still forwards the secret verbatim.
+		const plan = planSubmit(
+			QUESTIONS,
+			{
+				selected: { q1: ['alpha'] },
+				freeText: { q2: '  secret token  ', q3: 'a note' }
+			},
+			'in_x'
+		);
+		expect(plan.body).toEqual({
+			inputId: 'in_x',
+			answers: [
+				{ questionId: 'q1', answers: ['alpha'] },
+				{ questionId: 'q2', answers: ['  secret token  '] },
+				{ questionId: 'q3', answers: ['a note'] }
+			]
+		});
+		// The retained draft (visible while the promise is in flight AND
+		// after an API failure) contains no secret value.
+		expect(plan.draft.freeText.q2).toBeUndefined();
+		expect(plan.draft.freeText.q3).toBe('a note'); // non-secret stays for retry UX
+		expect(plan.draft.selected.q1).toEqual(['alpha']);
+	});
+
+	it('does not mutate the caller draft', () => {
+		const draft = { selected: {}, freeText: { q2: 'tok' } };
+		planSubmit(QUESTIONS, draft, 'in_x');
+		expect(draft.freeText.q2).toBe('tok');
 	});
 });
 
