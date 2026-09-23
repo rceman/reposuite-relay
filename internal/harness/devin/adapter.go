@@ -92,6 +92,11 @@ type Deps struct {
 	Version string
 	// Now is a clock seam.
 	Now func() time.Time
+	// AttachGate is a test seam invoked once, inside the serialized
+	// attach section, before any native call — used to prove a second
+	// attach cannot run orphan cleanup while a first attach holds the
+	// generation pre-bind.
+	AttachGate func()
 }
 
 // Adapter maps the Devin ACP runtime onto canonical Relay sessions. All of its
@@ -107,6 +112,10 @@ type Adapter struct {
 	byNative map[string]string
 	// servers is the live runtime generation per runtime key.
 	servers map[string]*acp.Server
+	// attachMu serializes attach: every Bind into a shared generation
+	// happens inside attach, so while a failed attach runs orphan
+	// cleanup no other attach can be mid-flight on that generation.
+	attachMu sync.Mutex
 	// wg counts adapter-owned goroutines: transport readers and spawned
 	// turn-completion workers.
 	wg sync.WaitGroup

@@ -57,6 +57,9 @@ const (
 	// sessionId — the real devin acp 3000.11.1 behavior (modes +
 	// configOptions only, no identity echo).
 	FakeLoadNoEcho = "load-no-echo"
+	// FakeLoadMismatch answers session/load with a DIFFERENT sessionId —
+	// an identity substitution the client must reject hard.
+	FakeLoadMismatch = "load-mismatch"
 	// FakeDieOnPrompt exits while accepting a prompt.
 	FakeDieOnPrompt = "die-on-prompt"
 	// FakeDieOnPermission exits while an approval request is in flight.
@@ -255,6 +258,12 @@ func (a *fakeAgent) onSessionLoad(_ context.Context, _ int64, params json.RawMes
 		// Provider does not echo the identity back — the request named
 		// it; the client normalizes to the requested id.
 		return LoadSessionResult{ConfigOptions: a.configOptions(rec)}, nil
+	}
+	if a.cfg.Mode == FakeLoadMismatch {
+		return LoadSessionResult{
+			ConfigOptions: a.configOptions(rec),
+			SessionID:     "wrong-" + rec.ID,
+		}, nil
 	}
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(rec),

@@ -76,6 +76,21 @@ Dogfood verified with the versions above — no claim about other versions.
 - **Restart**: both sessions COLD, `generation=2`, fingerprints
   unchanged, provider PIDs reaped.
 
+## REAL OBSERVATION vs DETERMINISTIC REGRESSION
+
+REAL OBSERVATION: `devin acp` 3000.11.1 `session/load` returns
+`{_meta, modes, configOptions}` — no `sessionId` echo — and holds a
+per-process `session_locked` claim on an opened session.
+
+DETERMINISTIC REGRESSION: fake mode `load-no-echo` reproduces the
+no-echo result shape; `load-mismatch` covers identity substitution;
+`TestSessionLoadIdentityContract` covers absent/matching/mismatched
+echo directly at the shared ACP client; `TestLoadWithoutIdentityEcho`
+covers the Devin end-to-end resume; the orphan tests cover sole-fail
+reap, bound-shared survival, and pre-bind attach serialization.
+
+CURRENT PRODUCT GAP: no automatic idle→COLD scheduler.
+
 ## Confirmed Relay defects (fixed on this branch)
 
 1. **ACP `session/load` echo requirement too strict.**
@@ -91,22 +106,46 @@ Dogfood verified with the versions above — no claim about other versions.
    `session/load`, or permission-mode application failed on a freshly
    spawned generation, the runtime was never stopped — leaving a
    `devin acp` process holding the provider session lock, which returned
-   `session_locked` to every later attempt. Fix: `stopOrphanRuntime` in
-   both ACP adapters reaps a zero-bound-session generation on any attach
-   failure (shared generations are never touched). Regression covered by
-   the extended `TestFailedExactLoadNeverSubstitutes`.
+   `session_locked` to every later attempt. Fix (hardened in REALDOG02):
+   `Supervisor.StopIfUnbound` decides atomically under the supervisor
+   lock — reap only when the generation has ZERO bound sessions — and
+   every ACP attach runs under a per-adapter `attachMu`, so no attach can
+   be mid-bind while cleanup runs. Regressions:
+   `TestFailedLoadKeepsBoundSharedSession`,
+   `TestOrphanCleanupCannotKillPreBindAttach`,
+   `TestConcurrentFailedAttachesReapOncePerGeneration` (both adapters).
 
 No Codex adapter defect found; the Turn-2 failure is a provider-side
 usage limit (ENVIRONMENT).
 
-## Transcript correctness
+## Transcript correctness — exact paths
 
-Per provider: `message.user` → `harness.started` (gen 1 `resumed=false`,
-gen 2 `resumed=true`) → `session.native` exactly once (first proven
-materialization) → `message.agent.completed`; `runtime.exited` on
-daemon stop. No duplicate terminal events, no contradictory completion,
-no credential material in any record. Devin's failed first Turn-2
-attempt is durably recorded as `turn.failed` — correct history.
+Codex: `message.user` (T1) → `harness.started resumed=false` →
+`session.native` (exactly once) → `message.agent.completed` (T1);
+`runtime.exited` at daemon stop; `message.user` (T2) →
+`harness.started resumed=true` → **`turn.failed`** (provider usage
+limit surfaced verbatim — the exact resume succeeded, the model call
+was environment-blocked; NO `message.agent.completed` for T2).
+
+Devin: `message.user` (T1) → `harness.started resumed=false` →
+`session.native` (exactly once) → `message.agent.completed` (T1);
+`message.user` (T2, pre-fix attempt) → `harness.started resumed=true` →
+**`turn.failed`** (`session/load` rejected — Relay bug, fixed);
+`message.user` (T2, post-fix) → `harness.started resumed=true` →
+`message.agent.completed` — `session.native` count stayed 1.
+
+No duplicate terminal events, no contradictory completion, no
+credential material in any record.
+
+## Result classification
+
+REAL_RUN_RESULT: `REAL_PROVIDER_DOGFOOD_PARTIAL_ENVIRONMENT_BLOCK` —
+Devin's exact resume passed end-to-end; Codex's exact resume was proven
+(resumed=true, stable fingerprint, new runtime id) but its second model
+completion was blocked by a provider usage limit (ENVIRONMENT).
+
+CODE_CANDIDATE_RESULT: `REAL_PROVIDER_DOGFOOD_ACCEPT_CANDIDATE` — all
+discovered Relay defects are fixed with deterministic regressions.
 
 ## Process ownership
 

@@ -113,16 +113,14 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd, model string) (*acp.Se
 	return srv, key, nil
 }
 
-// stopOrphanRuntime reaps a generation a failed bind left behind: a
-// runtime with zero bound sessions can only be the one this attach just
-// spawned — stopping it frees the provider-side resources it holds
-// (Devin ACP holds a per-process session lock; an orphaned server
-// poisons every later session/load with session_locked). A shared
-// generation with bound sessions is never touched.
+// stopOrphanRuntime reaps a generation a failed bind left behind — a
+// real Devin dogfood finding: an orphaned devin acp process holds the
+// provider session lock and poisons every later session/load with
+// session_locked. Called only inside the serialized attach, so no other
+// attach can be mid-bind; the supervisor atomically declines when any
+// session is bound, so a shared generation is never destroyed.
 func (a *Adapter) stopOrphanRuntime(key string) {
-	if rt, ok := a.deps.Supervisor.Get(key); ok && len(rt.Sessions()) == 0 {
-		_ = a.deps.Supervisor.StopIfIdle(key)
-	}
+	_, _ = a.deps.Supervisor.StopIfUnbound(key)
 }
 
 // bind attaches a session to a live runtime generation.

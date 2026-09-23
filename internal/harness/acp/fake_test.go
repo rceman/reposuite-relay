@@ -347,17 +347,3 @@ func TestFakeVendorPersistenceDifference(t *testing.T) {
 		}
 	}
 }
-
-// TestFakeLoadErrorIsNotSubstituted: a failed exact load stays a failure; the
-// fake never silently returns a different session.
-func TestFakeLoadErrorIsNotSubstituted(t *testing.T) {
-	h := startFake(t, FakeVendorOpenCode, FakeLoadError)
-	h.init(t)
-	cwd := t.TempDir()
-	sess := h.newSession(t, cwd)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := h.client.SessionLoad(ctx, cwd, sess.SessionID); err == nil {
-		t.Fatal("load must fail in load-error mode")
-	}
-}

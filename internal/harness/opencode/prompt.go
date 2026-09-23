@@ -113,6 +113,14 @@ func (a *Adapter) runtimeID(sessionID string) string {
 //
 // There is no fallback from a failed exact load to a new session.
 func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState) (*acp.Session, error) {
+	// Serialize: Supervisor.Bind is only ever reached inside attach, so
+	// holding attachMu for the whole attach means a failing attach's
+	// orphan cleanup can never race another attach's pre-bind work.
+	a.attachMu.Lock()
+	defer a.attachMu.Unlock()
+	if a.deps.AttachGate != nil {
+		a.deps.AttachGate()
+	}
 	a.mu.Lock()
 	handle, srv, nativeID := st.handle, st.srv, st.nativeID
 	a.mu.Unlock()

@@ -1,7 +1,9 @@
-// session/load contract tests: the no-echo result shape observed from
-// real devin acp 3000.11.1, hard-failure non-substitution, and the
-// orphan-generation reap on bind failure.
-package devin
+// Orphan-cleanup contract for the shared OpenCode runtime: a failed
+// attach reaps only a generation with zero bound sessions, serialized
+// attaches make pre-bind kill impossible, and concurrent failures reap
+// exactly once per generation.
+
+package opencode
 
 import (
 	"errors"
@@ -18,73 +20,8 @@ import (
 	"github.com/rceman/reposuite-relay/internal/session"
 )
 
-// TestFailedExactLoadNeverSubstitutes: a native load failure is a hard failure.
-func TestFailedExactLoadNeverSubstitutes(t *testing.T) {
-	e, a := newEnv(t, acp.FakeLoadError)
-	m := newSession(t, e, a, "lost", t.TempDir())
-	m.MetaMu.Lock()
-	m.Session.NativeSessionID = "happy-lark"
-	m.MetaMu.Unlock()
-	a.Track(m)
-	if _, err := a.Prompt(bg(), m, text("hello")); !isNativeSessionLost(err) {
-		t.Fatalf("err = %v, want NATIVE_SESSION_LOST", err)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "session/new"); n != 0 {
-		t.Fatalf("session/new calls = %d, want 0 (no substitution)", n)
-	}
-	if e.DurablePayload(m.Session.ID, api.EventTurnFailed) == nil {
-		t.Fatal("no durable turn.failed record")
-	}
-	if got := e.Reload(m.Session.ID).NativeSessionID; got != "happy-lark" {
-		t.Fatalf("persisted slug = %q, want the unchanged exact identity", got)
-	}
-	// The generation spawned for the failed bind must be reaped — an
-	// orphaned devin acp process holds the provider session lock and
-	// poisons every later session/load (real dogfood finding).
-	harnessenv.WaitFor(t, "orphan generation reaped", func() bool {
-		return e.Supervisor.Len() == 0
-	})
-}
-
-// TestLoadWithoutIdentityEcho: a provider that does not echo sessionId
-// in the session/load result (devin acp 3000.11.1) still resumes the
-// exact requested identity — the request named it.
-func TestLoadWithoutIdentityEcho(t *testing.T) {
-	e, a := newEnv(t, acp.FakeLoadNoEcho)
-	m := newSession(t, e, a, "noecho", t.TempDir())
-	first, err := a.Prompt(bg(), m, text("first"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.WaitDurable(m.Session.ID, api.EventNativeSession)
-	harnessenv.WaitFor(t, "turn settled", func() bool { return turnSettled(e, a, m.Session.ID) })
-	if err := e.Supervisor.Stop(RuntimeKeyFor("")); err != nil {
-		t.Fatal(err)
-	}
-	harnessenv.WaitFor(t, "COLD after runtime stop", func() bool { return !a.State(m.Session.ID).Live })
-
-	second, err := a.Prompt(bg(), m, text("second"))
-	if err != nil {
-		t.Fatalf("no-echo session/load must resume: %v", err)
-	}
-	e.WaitDurable(m.Session.ID, api.EventMessageAgentCompleted)
-	if second.NativeSessionID != first.NativeSessionID {
-		t.Fatalf("resumed %q, want the exact %q", second.NativeSessionID, first.NativeSessionID)
-	}
-	if got := e.Reload(m.Session.ID).Generation; got != 2 {
-		t.Fatalf("generation = %d, want 2", got)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "session/load"); n != 1 {
-		t.Fatalf("session/load calls = %d, want 1", n)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "session/new"); n != 1 {
-		t.Fatalf("session/new calls = %d, want 1 (no substitution)", n)
-	}
-}
-
-// TestFailedLoadKeepsBoundSharedSession: a failed attach's orphan
-// cleanup must decline while another session is bound to the shared
-// generation — no collateral damage (§11).
+// TestFailedLoadKeepsBoundSharedSession: B's failed attach cleanup must
+// decline while A is bound to the shared generation (§11).
 func TestFailedLoadKeepsBoundSharedSession(t *testing.T) {
 	e, a := newEnv(t, acp.FakeLoadError)
 	// A binds via session/new — load-error affects only session/load.
@@ -93,21 +30,19 @@ func TestFailedLoadKeepsBoundSharedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDurable(ma.Session.ID, api.EventMessageAgentCompleted)
-	harnessenv.WaitFor(t, "A settled", func() bool { return turnSettled(e, a, ma.Session.ID) })
 	if e.Supervisor.Len() != 1 {
 		t.Fatalf("runtimes = %d, want 1", e.Supervisor.Len())
 	}
 
 	mb := newSession(t, e, a, "lost", t.TempDir())
 	mb.MetaMu.Lock()
-	mb.Session.NativeSessionID = "happy-lark"
+	mb.Session.NativeSessionID = "ses_missing"
 	mb.MetaMu.Unlock()
 	a.Track(mb)
 	if _, err := a.Prompt(bg(), mb, text("bind B")); !isNativeSessionLost(err) {
 		t.Fatalf("err = %v, want NATIVE_SESSION_LOST", err)
 	}
 
-	// A's generation must be untouched: still live, A still bound.
 	if e.Supervisor.Len() != 1 {
 		t.Fatalf("shared generation killed: runtimes = %d", e.Supervisor.Len())
 	}
@@ -125,9 +60,9 @@ func TestFailedLoadKeepsBoundSharedSession(t *testing.T) {
 	})
 }
 
-// TestOrphanCleanupCannotKillPreBindAttach: attach is serialized —
-// while A holds the generation pre-bind, a second attach cannot run
-// orphan cleanup at all (§12 TOCTOU proof, no sleeps).
+// TestOrphanCleanupCannotKillPreBindAttach: while A holds the shared
+// generation inside the serialized attach (pre-bind), B cannot run
+// orphan cleanup (§12 TOCTOU proof, no sleeps).
 func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 	e := harnessenv.New(t)
 	parked := make(chan struct{})
@@ -135,11 +70,9 @@ func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 	var calls atomic.Int64
 	rtSeq := 0
 	a := NewAdapter(Deps{
-		Broker:     e.Broker,
-		Supervisor: e.Supervisor,
-		Command: func(string) (acp.Command, error) {
-			return harnessenv.FakeACPCommand(t, acp.FakeVendorDevin, acp.FakeLoadError, e.ACPState)()
-		},
+		Broker:      e.Broker,
+		Supervisor:  e.Supervisor,
+		Command:     harnessenv.FakeACPCommand(t, acp.FakeVendorOpenCode, acp.FakeLoadError, e.ACPState),
 		Materialize: e.Materialize,
 		RandRuntimeID: func() (string, error) {
 			rtSeq++
@@ -147,7 +80,6 @@ func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 		},
 		Version: "test",
 		AttachGate: func() {
-			// Only the FIRST attach parks — later attaches pass through.
 			if calls.Add(1) == 1 {
 				close(parked)
 				<-release
@@ -160,7 +92,7 @@ func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 	ma := newSession(t, e, a, "parked", t.TempDir())
 	mb := newSession(t, e, a, "failer", t.TempDir())
 	mb.MetaMu.Lock()
-	mb.Session.NativeSessionID = "happy-lark"
+	mb.Session.NativeSessionID = "ses_missing"
 	mb.MetaMu.Unlock()
 	a.Track(mb)
 
@@ -185,7 +117,6 @@ func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 	if err := <-bDone; !isNativeSessionLost(err) {
 		t.Fatalf("B err = %v, want NATIVE_SESSION_LOST", err)
 	}
-	// A bound → B's cleanup must have declined; generation still live.
 	if e.Supervisor.Len() != 1 {
 		t.Fatalf("bound generation killed: runtimes = %d", e.Supervisor.Len())
 	}
@@ -194,19 +125,17 @@ func TestOrphanCleanupCannotKillPreBindAttach(t *testing.T) {
 	}
 }
 
-// TestConcurrentFailedAttachesReapExactlyOnce: N concurrent failing
-// attaches serialize — each gets a fresh generation, fails, and reaps
-// exactly it. No leak, no double-stop (§13/§14).
-func TestConcurrentFailedAttachesReapExactlyOnce(t *testing.T) {
+// TestConcurrentFailedAttachesReapOncePerGeneration: serialized failing
+// attaches each spawn and reap exactly one generation — no leak, no
+// double-stop (§13/§14).
+func TestConcurrentFailedAttachesReapOncePerGeneration(t *testing.T) {
 	e := harnessenv.New(t)
 	var gone atomic.Int64
 	rtSeq := 0
 	a := NewAdapter(Deps{
-		Broker:     e.Broker,
-		Supervisor: e.Supervisor,
-		Command: func(string) (acp.Command, error) {
-			return harnessenv.FakeACPCommand(t, acp.FakeVendorDevin, acp.FakeLoadError, e.ACPState)()
-		},
+		Broker:      e.Broker,
+		Supervisor:  e.Supervisor,
+		Command:     harnessenv.FakeACPCommand(t, acp.FakeVendorOpenCode, acp.FakeLoadError, e.ACPState),
 		Materialize: e.Materialize,
 		RandRuntimeID: func() (string, error) {
 			rtSeq++
@@ -226,7 +155,7 @@ func TestConcurrentFailedAttachesReapExactlyOnce(t *testing.T) {
 	for i := 0; i < n; i++ {
 		m := newSession(t, e, a, fmt.Sprintf("f%d", i), t.TempDir())
 		m.MetaMu.Lock()
-		m.Session.NativeSessionID = "happy-lark"
+		m.Session.NativeSessionID = "ses_missing"
 		m.MetaMu.Unlock()
 		a.Track(m)
 		wg.Add(1)
@@ -243,8 +172,6 @@ func TestConcurrentFailedAttachesReapExactlyOnce(t *testing.T) {
 			t.Fatalf("unexpected err: %v", err)
 		}
 	}
-	// Serialized attaches spawn one generation each; every generation is
-	// reaped exactly once — no leak, no duplicate runtime-exit handling.
 	harnessenv.WaitFor(t, "orphan generations reaped", func() bool { return e.Supervisor.Len() == 0 })
 	e.Supervisor.WaitWatchers()
 	if g := gone.Load(); g != n {

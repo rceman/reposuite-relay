@@ -38,6 +38,35 @@ func (s *Supervisor) StopIfIdle(key string) error {
 	return s.finishStop(rt)
 }
 
+// StopIfUnbound atomically stops a generation that has ZERO bound
+// sessions — the orphan-reap path for a just-spawned generation whose
+// only attach failed. Unlike StopIfIdle (a general sleep primitive for
+// idle-but-bound generations) this declines whenever a session is
+// bound: it must never destroy another session's runtime. The caller
+// serializes attaches so no pre-bind work can be in flight; the bound
+// count itself is checked and the generation removed under the same
+// lock, so the decision is atomic. Returns (true, nil) when reaped.
+func (s *Supervisor) StopIfUnbound(key string) (bool, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false, ErrClosed
+	}
+	rt, ok := s.runtimes[key]
+	if !ok {
+		s.mu.Unlock()
+		return false, ErrRuntimeGone
+	}
+	if len(rt.sessions) > 0 {
+		s.mu.Unlock()
+		return false, nil // shared generation in use — decline
+	}
+	rt.State = session.RuntimeStopping
+	delete(s.runtimes, key) // definite stop: the watcher must not re-handle it
+	s.mu.Unlock()
+	return true, s.finishStop(rt)
+}
+
 // Stop stops a runtime unconditionally (bounded, whole tree, confirmed).
 func (s *Supervisor) Stop(key string) error {
 	return s.stopKey(key, true)
