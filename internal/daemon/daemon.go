@@ -48,11 +48,15 @@ type Daemon struct {
 	adapters   map[string]adapterEntry
 	instanceID string
 	token      string
-	// machineMu serializes machine-bearer authentication against
-	// credential rotation: readers hold RLock for the constant-time
-	// compare; rotation holds the write lock across generate+commit+
-	// memory convergence, so a request either authenticates under the
-	// old credential or the committed new one — never a torn state.
+	// machineMu linearizes machine-bearer authentication against
+	// credential rotation: the complete constant-time compare runs
+	// inside RLock (the admission linearization point is the compare,
+	// not TCP arrival); rotation holds the write lock across
+	// generate+commit+memory convergence. A compare finishing before
+	// rotation commits may authenticate the old credential and finish
+	// normally; every compare starting after the switch sees only the
+	// committed token — a copied stale credential can never be
+	// authenticated post-commit.
 	machineMu    sync.RWMutex
 	machineToken string
 

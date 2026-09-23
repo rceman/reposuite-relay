@@ -5,9 +5,12 @@
 // It is a credential domain separate from the ephemeral daemon
 // descriptor bearer: created once under daemon singleton ownership,
 // loaded and strictly validated on every start, never published in the
-// descriptor, never returned by any API, never logged, and never printed
-// by any command. Malformed content fails closed — Relay never silently
-// replaces a credential.
+// descriptor, never logged, and never printed by any command. The
+// CURRENT token is never readable through ordinary APIs — the single
+// disclosure channel is the explicit admin-cookie-authenticated
+// rotation operation, which returns only the newly generated value.
+// Malformed content fails closed — Relay never silently replaces a
+// credential.
 package auth
 
 import (

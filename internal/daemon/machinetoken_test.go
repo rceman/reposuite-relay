@@ -7,12 +7,47 @@ package daemon
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/rceman/reposuite-relay/internal/adminauth"
 	"github.com/rceman/reposuite-relay/internal/api"
 	"github.com/rceman/reposuite-relay/internal/auth"
 )
+
+// cookieJSONDo is cookieJSON without t.Fatal — safe for worker
+// goroutines; the caller asserts on the returned values.
+func cookieJSONDo(c *http.Client, method, endpoint, path, csrf, body string) (*http.Response, error) {
+	req, err := http.NewRequest(method, endpoint+path, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", endpoint)
+	if csrf != "" {
+		req.Header.Set("X-Relay-CSRF", csrf)
+	}
+	return c.Do(req)
+}
+
+// bearerGetStatus is bearerStatus without t.Fatal — for goroutines.
+func bearerGetStatus(endpoint, bearer string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint+"/v1/daemon", nil)
+	if err != nil {
+		return 0, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
 
 // rawPost is a bearer-authed POST — machine/descriptor credential domain.
 func rawPost(t *testing.T, endpoint, path, bearer, body string) *http.Response {
@@ -171,5 +206,95 @@ func TestMachineTokenLiveRotation(t *testing.T) {
 	got, err := auth.Load(d.paths.MachineToken())
 	if err != nil || got != out.Token {
 		t.Fatal("disk/live credential divergence")
+	}
+}
+
+// TestMachineAuthLinearization — deterministic auth-vs-rotation proof:
+// a compare that ENTERS the RLock section before rotation linearizes
+// with the old credential (and rotation cannot complete until it
+// releases); every compare after the switch sees only the committed
+// token. No sleeps — the gate channel is the synchronization point.
+func TestMachineAuthLinearization(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	p := testPaths(t)
+	d, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+		MachineAuthGate: func() {
+			// Park the first compare inside the read lock.
+			once.Do(func() { close(entered); <-release })
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d)
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	endpoint := d.endpoint()
+	setupAdmin(t, d, c, "admin", "correct-horse-12")
+	csrf := webCSRF(t, d, c)
+	old, err := auth.Load(d.paths.MachineToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The OLD-token request parks inside the RLock compare.
+	authDone := make(chan int, 1)
+	go func() {
+		code, err := bearerGetStatus(endpoint, old)
+		if err != nil {
+			authDone <- -1
+			return
+		}
+		authDone <- code
+	}()
+	<-entered // compare is inside the read lock
+
+	// Start a rotation — it must queue on the write lock and cannot
+	// commit while the reader holds RLock. TryLock proves the lock is
+	// unavailable: a committed rotation would have released it.
+	rotDone := make(chan api.MachineTokenRotateResponse, 1)
+	go func() {
+		resp, err := cookieJSONDo(c, http.MethodPost, endpoint,
+			"/v1/settings/machine-token/rotate", csrf, "")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			rotDone <- api.MachineTokenRotateResponse{}
+			return
+		}
+		defer resp.Body.Close()
+		var out api.MachineTokenRotateResponse
+		if json.NewDecoder(resp.Body).Decode(&out) != nil {
+			rotDone <- api.MachineTokenRotateResponse{}
+			return
+		}
+		rotDone <- out
+	}()
+	// A free lock would mean the rotation already committed — it can't.
+	if d.machineMu.TryLock() {
+		d.machineMu.Unlock()
+		t.Fatal("rotation committed while a reader owned the compare")
+	}
+	close(release) // the parked compare now linearizes BEFORE rotation
+	if code := <-authDone; code != http.StatusOK {
+		t.Fatalf("pre-rotation OLD-token compare = %d, want 200", code)
+	}
+	out := <-rotDone
+	if !auth.Valid(out.Token) || out.Token == old {
+		t.Fatal("rotation did not commit a fresh token")
+	}
+	// Post-commit: only the new credential authenticates.
+	if s := bearerStatus(t, endpoint, old); s != http.StatusUnauthorized {
+		t.Fatalf("old token post-rotation: %d", s)
+	}
+	if s := bearerStatus(t, endpoint, out.Token); s != http.StatusOK {
+		t.Fatalf("new token post-rotation: %d", s)
 	}
 }

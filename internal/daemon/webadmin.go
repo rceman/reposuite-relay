@@ -150,10 +150,7 @@ func (d *Daemon) authenticate(r *http.Request) (authKind, *adminauth.Session) {
 		if subtle.ConstantTimeCompare(got, []byte(d.token)) == 1 {
 			return authDescriptorBearer, nil
 		}
-		d.machineMu.RLock()
-		machine := d.machineToken
-		d.machineMu.RUnlock()
-		if subtle.ConstantTimeCompare(got, []byte(machine)) == 1 {
+		if d.machineBearerOK(got) {
 			return authMachineBearer, nil
 		}
 	}
@@ -161,6 +158,22 @@ func (d *Daemon) authenticate(r *http.Request) (authKind, *adminauth.Session) {
 		return authAdminCookie, s
 	}
 	return authNone, nil
+}
+
+// machineBearerOK linearizes the machine-credential admission decision:
+// the ENTIRE constant-time compare runs inside the read lock — never a
+// copied-out credential compared after release. A compare that completes
+// before a rotation's write-locked commit authenticates the old
+// credential (the request finishes normally); every compare that begins
+// after the rotation's lock release sees only the committed token.
+// MachineAuthGate is a test-only seam inside the critical section.
+func (d *Daemon) machineBearerOK(got []byte) bool {
+	d.machineMu.RLock()
+	defer d.machineMu.RUnlock()
+	if d.opts.MachineAuthGate != nil {
+		d.opts.MachineAuthGate()
+	}
+	return subtle.ConstantTimeCompare(got, []byte(d.machineToken)) == 1
 }
 
 // setSessionCookie issues the authenticated browser session cookie.

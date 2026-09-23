@@ -7,6 +7,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"github.com/rceman/reposuite-relay/internal/api"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -151,9 +152,11 @@ func TestMachineTokenRestart(t *testing.T) {
 	}
 }
 
-// TestMachineTokenConcurrentRotation: serialized rotations — every
-// returned token is valid and unique, disk and live authority converge
-// on exactly one final credential.
+// TestMachineTokenConcurrentRotation: rotations serialize under the
+// write lock — every admitted request succeeds, every returned token is
+// valid and unique, and exactly the last committed credential
+// authenticates. Workers report results on a channel; all assertions
+// run on the main test goroutine.
 func TestMachineTokenConcurrentRotation(t *testing.T) {
 	d, _, c, _ := webDaemonBare(t)
 	endpoint := d.endpoint()
@@ -161,38 +164,59 @@ func TestMachineTokenConcurrentRotation(t *testing.T) {
 	csrf := webCSRF(t, d, c)
 
 	const N = 8
+	type result struct {
+		code  int
+		token string
+	}
+	resCh := make(chan result, N)
 	var wg sync.WaitGroup
-	toks := make(chan string, N)
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp := cookieJSON(t, c, http.MethodPost, endpoint,
+			resp, err := cookieJSONDo(c, http.MethodPost, endpoint,
 				"/v1/settings/machine-token/rotate", csrf, "")
-			if resp.StatusCode == http.StatusOK {
-				out := decodeRotate(t, resp)
-				toks <- out.Token
-			} else {
-				resp.Body.Close()
+			if err != nil {
+				resCh <- result{code: -1}
+				return
+			}
+			defer resp.Body.Close()
+			var out api.MachineTokenRotateResponse
+			if resp.StatusCode != http.StatusOK ||
+				json.NewDecoder(resp.Body).Decode(&out) != nil ||
+				!out.DurabilityConfirmed {
+				resCh <- result{code: resp.StatusCode}
+				return
+			}
+			resCh <- result{
+				code:  http.StatusOK,
+				token: out.Token,
 			}
 		}()
 	}
 	wg.Wait()
-	close(toks)
+	close(resCh)
+
 	seen := map[string]bool{}
-	var count int
-	for tok := range toks {
-		if !auth.Valid(tok) {
+	var ok, failed int
+	for r := range resCh {
+		if r.code != http.StatusOK {
+			failed++
+			continue
+		}
+		if !auth.Valid(r.token) {
 			t.Fatal("concurrent rotation returned a malformed token")
 		}
-		if seen[tok] {
+		if seen[r.token] {
 			t.Fatal("duplicate token generated")
 		}
-		seen[tok] = true
-		count++
+		seen[r.token] = true
+		ok++
 	}
-	if count == 0 {
-		t.Fatal("no rotation succeeded")
+	// Serialization has no contention failure: all admitted rotations
+	// must succeed.
+	if ok != N || failed != 0 {
+		t.Fatalf("rotations: %d ok, %d failed, want %d ok", ok, failed, N)
 	}
 	// Exactly the final committed token authenticates.
 	final, err := auth.Load(d.paths.MachineToken())
@@ -210,6 +234,81 @@ func TestMachineTokenConcurrentRotation(t *testing.T) {
 		if s := bearerStatus(t, endpoint, tok); s != want {
 			t.Fatalf("token admission = %d, want %d", s, want)
 		}
+	}
+}
+
+// TestMachineAuthVsRotation: machine-bearer reads race with admin
+// rotations under -race. Each read splits at the linearization point —
+// old token may be accepted pre-switch — but once a rotation has
+// returned, every later OLD-token request must reject.
+func TestMachineAuthVsRotation(t *testing.T) {
+	d, _, c, _ := webDaemonBare(t)
+	endpoint := d.endpoint()
+	setupAdmin(t, d, c, "admin", "correct-horse-12")
+	csrf := webCSRF(t, d, c)
+	old, err := auth.Load(d.paths.MachineToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const M = 32
+	type result struct {
+		code  int
+		token string
+	}
+	readsDone := make(chan int, M)
+	var wg sync.WaitGroup
+	for i := 0; i < M; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code, err := bearerGetStatus(endpoint, old)
+			if err != nil {
+				readsDone <- -1
+				return
+			}
+			readsDone <- code
+		}()
+	}
+	// Rotate while the reads are in flight.
+	rotCh := make(chan result, 1)
+	go func() {
+		resp, err := cookieJSONDo(c, http.MethodPost, endpoint,
+			"/v1/settings/machine-token/rotate", csrf, "")
+		if err != nil {
+			rotCh <- result{code: -1}
+			return
+		}
+		defer resp.Body.Close()
+		var out api.MachineTokenRotateResponse
+		if resp.StatusCode != http.StatusOK ||
+			json.NewDecoder(resp.Body).Decode(&out) != nil {
+			rotCh <- result{code: resp.StatusCode}
+			return
+		}
+		rotCh <- result{
+			code:  http.StatusOK,
+			token: out.Token,
+		}
+	}()
+	wg.Wait()
+	rot := <-rotCh
+	if rot.code != http.StatusOK || !auth.Valid(rot.token) {
+		t.Fatalf("rotation: %d", rot.code)
+	}
+	// In-flight reads may have split at the linearization point — any
+	// 200/401 mix is legal; a transport error (-1) is not.
+	for i := 0; i < M; i++ {
+		if code := <-readsDone; code == -1 {
+			t.Fatal("reader transport failure")
+		}
+	}
+	// Post-rotation admission is exact.
+	if s := bearerStatus(t, endpoint, old); s != http.StatusUnauthorized {
+		t.Fatalf("old token after committed rotation: %d", s)
+	}
+	if s := bearerStatus(t, endpoint, rot.token); s != http.StatusOK {
+		t.Fatalf("new token after committed rotation: %d", s)
 	}
 }
 

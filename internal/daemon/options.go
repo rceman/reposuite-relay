@@ -79,6 +79,10 @@ type Options struct {
 	// MachineTokenHooks injects deterministic credential commit-path
 	// faults for rotation — test seam only.
 	MachineTokenHooks *auth.Hooks
+	// MachineAuthGate runs inside the RLock-protected machine-token
+	// compare — test seam only; lets tests park an authentication
+	// decision deterministically inside the critical section.
+	MachineAuthGate func()
 }
 
 func (o Options) withDefaults() Options {
