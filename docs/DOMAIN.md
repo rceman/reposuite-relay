@@ -253,6 +253,19 @@ live, so no event is lost or duplicated across the cutover. A cursor
 older than the ring is refused with `CURSOR_TOO_OLD` rather than
 silently returning an incomplete stream.
 
+**Local Project** *(current)* — durable Relay-local
+presentation/grouping metadata: a stable opaque Project ID
+(`prj_<128-bit rand>`), a display name, and an absolute filesystem root.
+Owned by `internal/presentation` (`config/presentation.json`, schema v1,
+0600, strict load, atomic rename commit point). A session's project is
+**derived** — it is the most specific project root containing the
+session `cwd` (component-aware; longest root wins) — and is projected
+onto `SessionInfo.projectId`/`projectName` at read time only. A Local
+Project does not own session lifecycle, carries no execution authority,
+never mutates `session.json`, and is unrelated to GTW workflow
+authority (no GTW Project/Task/Lead/Worker semantics, no foreign IDs).
+See `docs/WEB_ADMIN_PROJECTS.md`.
+
 ## Attachments
 
 **Attachment** *(target)* — a client consuming a session's state and

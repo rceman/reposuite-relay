@@ -73,10 +73,11 @@ IMPLEMENTED:
   CSRF for cookie-auth unsafe methods — see `docs/WEB_ADMIN_SECURITY.md`.
 - `GET /` — embedded SvelteKit Web Admin (`web/` + `web/embed.go`):
   anonymous SPA shell, `/auth/session` bootstrap → setup → login →
-  authenticated shell with Overview, Sessions list, and the session
-  control surface (`/sessions/<key>`: durable transcript +
+  authenticated shell with Overview, project-grouped Sessions list,
+  the session control surface (`/sessions/<key>`: durable transcript +
   history→live NDJSON cutover, prompt/cancel/input/config/delete —
-  `docs/WEB_ADMIN_SESSION_CONTROL.md`). The committed `web/build/`
+  `docs/WEB_ADMIN_SESSION_CONTROL.md`), and Settings
+  (`docs/WEB_ADMIN_PROJECTS.md`). The committed `web/build/`
   release artifact is served by `go:embed` — no Node at production
   runtime.
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
@@ -97,6 +98,12 @@ IMPLEMENTED:
 - Canonical event payloads are shared by every adapter
   (`internal/api/events.go`): one wire shape per event regardless of the
   harness that produced it.
+- Relay-local presentation catalog (`internal/presentation` +
+  `config/presentation.json`): Local Projects — stable opaque IDs,
+  display names, absolute grouping roots — with strict load, an atomic
+  rename commit point, serialized mutations, and pure longest-root cwd
+  matching projected onto `SessionInfo` at read time
+  (`docs/WEB_ADMIN_PROJECTS.md`).
 - `internal/runtime` supervisor: one shared or dedicated harness process
   per runtime key, claim-first creation, activity/sleep-blocker policy,
   bounded process-group teardown, runtime-gone notification.
@@ -146,6 +153,13 @@ report each as PASS/FAIL/N/A with evidence.
 - Tests must use isolated temporary roots — never the developer's real
   `~/.reposuite` or `~/.airelay`.
 - Private state is user-private (mode `0700`/`0600` on Unix).
+- `internal/presentation` owns Relay-local display/grouping
+  configuration only. It must never become a generic workflow framework
+  or a GTW project model: no task/Lead/Worker/Planner semantics, no
+  foreign authority or identifiers. Session lifecycle stays in
+  `internal/session`, `internal/store`, and the harness adapters —
+  presentation metadata must not leak into those domains (no
+  `projectId` on `RelaySession`).
 
 ## Dependencies
 

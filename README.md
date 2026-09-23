@@ -78,7 +78,11 @@ history with an exact history→live cutover (`transcript.throughSeq` →
 `events?after=`), live agent deltas, prompt, cancel, requested-input
 answers (including native `isSecret` questions whose answers are
 redacted from the durable `input.resolved` record), desired model/mode
-config, and durable delete. Session-control semantics live in
+config, and durable delete. A Settings page (`/settings`) manages
+Relay-local Projects — grouping metadata (`config/presentation.json`)
+that derives each session's project from its cwd (most specific root
+wins) without touching session lifecycle; see
+`docs/WEB_ADMIN_PROJECTS.md`. Session-control semantics live in
 `docs/WEB_ADMIN_SESSION_CONTROL.md`; the full security model is
 `docs/WEB_ADMIN_SECURITY.md`. The
 `fixture` harness is a deterministic development/test child — **not**
