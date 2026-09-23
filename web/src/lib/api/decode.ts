@@ -407,14 +407,36 @@ function decodeRuntimeBinding(v: unknown): RuntimeBinding {
 	};
 }
 
+/** RFC3339/RFC3339Nano UTC timestamp — the only shape Go emits here. */
+function reqTimestamp(v: Record<string, unknown>, key: string): string {
+	const s = reqString(v, key);
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(s)) {
+		throw new DecodeError(key);
+	}
+	if (Number.isNaN(Date.parse(s))) throw new DecodeError(key);
+	return s;
+}
+
 function decodeRuntimeResources(v: unknown): RuntimeResources {
 	if (!isRecord(v)) throw new DecodeError('resources');
-	const out: RuntimeResources = { available: reqBool(v, 'available') };
-	for (const k of ['pssBytes', 'rssBytes', 'processCount'] as const) {
-		const n = optNonNeg(v, k);
-		if (n !== undefined) out[k] = n;
+	const available = reqBool(v, 'available');
+	const pss = optNonNeg(v, 'pssBytes');
+	const rss = optNonNeg(v, 'rssBytes');
+	const count = optNonNeg(v, 'processCount');
+	if (!available) {
+		// Canonical unavailable shape carries no numbers at all — a
+		// contradictory payload is rejected rather than silently read.
+		if (pss !== undefined || rss !== undefined || count !== undefined) {
+			throw new DecodeError('resources');
+		}
+		return { available: false };
 	}
-	return out;
+	// available=true requires the complete measurement; processCount is
+	// the number of measured processes so it must be at least one.
+	if (pss === undefined || rss === undefined || count === undefined || count < 1) {
+		throw new DecodeError('resources');
+	}
+	return { available: true, pssBytes: pss, rssBytes: rss, processCount: count };
 }
 
 function decodeRuntimeInfo(v: unknown): RuntimeInfo {
@@ -426,7 +448,7 @@ function decodeRuntimeInfo(v: unknown): RuntimeInfo {
 		harness: reqString(v, 'harness'),
 		shared: reqBool(v, 'shared'),
 		pid: reqNonNeg(v, 'pid'),
-		startedAt: reqString(v, 'startedAt'),
+		startedAt: reqTimestamp(v, 'startedAt'),
 		uptimeSeconds: reqNonNeg(v, 'uptimeSeconds'),
 		state: reqString(v, 'state'),
 		sessionCount: reqNonNeg(v, 'sessionCount'),
@@ -444,16 +466,20 @@ export function decodeRuntimeList(v: unknown): RuntimeList {
 	if (!Array.isArray(raw)) throw new DecodeError('runtimes');
 	const t = v.totals;
 	if (!isRecord(t)) throw new DecodeError('totals');
+	const measuredRuntimeCount = reqNonNeg(t, 'measuredRuntimeCount');
+	if (measuredRuntimeCount > reqNonNeg(t, 'runtimeCount')) {
+		throw new DecodeError('totals.measuredRuntimeCount');
+	}
 	return {
 		daemon: decodeDaemonInfo(v.daemon),
-		sampledAt: reqString(v, 'sampledAt'),
+		sampledAt: reqTimestamp(v, 'sampledAt'),
 		runtimes: raw.map(decodeRuntimeInfo),
 		totals: {
 			runtimeCount: reqNonNeg(t, 'runtimeCount'),
 			sessionCount: reqNonNeg(t, 'sessionCount'),
 			activeSessionCount: reqNonNeg(t, 'activeSessionCount'),
 			waitingInputCount: reqNonNeg(t, 'waitingInputCount'),
-			measuredRuntimeCount: reqNonNeg(t, 'measuredRuntimeCount'),
+			measuredRuntimeCount,
 			pssBytes: reqNonNeg(t, 'pssBytes'),
 			rssBytes: reqNonNeg(t, 'rssBytes')
 		}

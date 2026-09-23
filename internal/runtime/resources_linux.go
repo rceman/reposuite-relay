@@ -19,9 +19,12 @@ type TreeResources struct {
 // pid, discovered via /proc/<pid>/task/<pid>/children and measured via
 // /proc/<pid>/smaps_rollup. procRoot is injectable for tests.
 //
-// Best-effort: returns ok=false only when the ROOT cannot be measured at
-// all; descendants that vanish mid-traversal are skipped. The PID-seen
-// set prevents duplicate/cyclic accounting.
+// Best-effort: returns ok=false only when the ROOT cannot be measured —
+// a missing/unreadable/malformed root rollup is unavailable, never zero.
+// Descendants that vanish or read malformed mid-traversal are skipped.
+// ProcessCount counts successfully measured processes only — the PIDs
+// actually represented in the PSS/RSS aggregate, not merely discovered.
+// The PID-seen set prevents duplicate/cyclic accounting.
 func SampleTreeResources(procRoot string, pid int) (TreeResources, bool) {
 	var out TreeResources
 	rootPSS, rootRSS, ok := smapsRollup(procRoot, pid)
@@ -69,27 +72,32 @@ func procChildren(procRoot string, pid int) []int {
 	return out
 }
 
-// smapsRollup reads PSS and RSS KiB from one process's rollup.
+// smapsRollup reads PSS and RSS KiB from one process's rollup. Both
+// fields are required with a valid non-negative integer KiB value —
+// a missing, malformed, or negative field makes the measurement
+// unavailable (ok=false), never a false zero. A genuine "0 kB" is a
+// valid measured zero.
 func smapsRollup(procRoot string, pid int) (pssKiB, rssKiB int64, ok bool) {
 	b, err := os.ReadFile(procRoot + "/" + strconv.Itoa(pid) + "/smaps_rollup")
 	if err != nil {
 		return 0, 0, false
 	}
+	var gotPSS, gotRSS bool
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
-		if len(f) < 2 {
+		if len(f) < 3 || f[2] != "kB" {
 			continue
 		}
 		v, err := strconv.ParseInt(f[1], 10, 64)
-		if err != nil {
+		if err != nil || v < 0 {
 			continue
 		}
 		switch f[0] {
 		case "Pss:":
-			pssKiB = v
+			pssKiB, gotPSS = v, true
 		case "Rss:":
-			rssKiB = v
+			rssKiB, gotRSS = v, true
 		}
 	}
-	return pssKiB, rssKiB, true
+	return pssKiB, rssKiB, gotPSS && gotRSS
 }

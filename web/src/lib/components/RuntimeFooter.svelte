@@ -62,6 +62,8 @@
 		if (document.visibilityState === 'visible') {
 			poll();
 			timer = setInterval(poll, POLL_MS);
+		} else {
+			inFlight?.abort();
 		}
 	}
 

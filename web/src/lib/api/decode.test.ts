@@ -606,3 +606,78 @@ describe('decodeRuntimeList', () => {
 		).toThrow(DecodeError);
 	});
 });
+
+describe('decodeRuntimeList hardening', () => {
+	const goodRuntime = {
+		runtimeId: 'a1b2c3',
+		harness: 'codex',
+		shared: true,
+		pid: 1234,
+		startedAt: '2026-01-01T00:00:00Z',
+		uptimeSeconds: 42,
+		state: 'warm',
+		sessionCount: 0,
+		activeSessionCount: 0,
+		waitingInputCount: 0,
+		mutationCount: 0,
+		sessions: [],
+		resources: { available: true, pssBytes: 1000, rssBytes: 2000, processCount: 2 }
+	};
+	const good = {
+		daemon: {
+			instanceId: 'x', pid: 1, apiVersion: 1, uptimeSeconds: 1,
+			sessionCount: 0, activeSessions: 0, coldSessions: 0
+		},
+		sampledAt: '2026-01-01T00:00:00Z',
+		runtimes: [goodRuntime],
+		totals: {
+			runtimeCount: 1, sessionCount: 0, activeSessionCount: 0,
+			waitingInputCount: 0, measuredRuntimeCount: 1,
+			pssBytes: 1000, rssBytes: 2000
+		}
+	};
+
+	it.each(['', 'today', '2026-99-99', '2026-09-23', '1234', 'x'.repeat(20)])(
+		'rejects malformed sampledAt %j',
+		(ts) => {
+			expect(() => decodeRuntimeList({ ...good, sampledAt: ts })).toThrow(DecodeError);
+		}
+	);
+
+	it.each(['', 'today', '2026-09-23'])('rejects malformed startedAt %j', (ts) => {
+		expect(() =>
+			decodeRuntimeList({ ...good, runtimes: [{ ...goodRuntime, startedAt: ts }] })
+		).toThrow(DecodeError);
+	});
+
+	it('accepts RFC3339Nano and the Go zero-time for a starting runtime', () => {
+		const out = decodeRuntimeList({
+			...good,
+			sampledAt: '2026-09-23T17:45:12.123456789Z',
+			runtimes: [{ ...goodRuntime, startedAt: '0001-01-01T00:00:00Z' }]
+		});
+		expect(out.runtimes[0]?.startedAt).toBe('0001-01-01T00:00:00Z');
+	});
+
+	it.each([
+		{ available: true, rssBytes: 2000, processCount: 2 },          // missing pss
+		{ available: true, pssBytes: 1000, processCount: 2 },          // missing rss
+		{ available: true, pssBytes: 1000, rssBytes: 2000 },           // missing count
+		{ available: true, pssBytes: 1000, rssBytes: 2000, processCount: 0 },
+		{ available: false, pssBytes: 1000 },                          // contradictory
+		{ available: false, processCount: 1 }
+	])('rejects contradictory resources %j', (resources) => {
+		expect(() =>
+			decodeRuntimeList({ ...good, runtimes: [{ ...goodRuntime, resources }] })
+		).toThrow(DecodeError);
+	});
+
+	it('rejects measuredRuntimeCount > runtimeCount', () => {
+		expect(() =>
+			decodeRuntimeList({
+				...good,
+				totals: { ...good.totals, measuredRuntimeCount: 5 }
+			})
+		).toThrow(DecodeError);
+	});
+});

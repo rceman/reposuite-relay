@@ -86,19 +86,53 @@ func TestSampleTreePartialAndGone(t *testing.T) {
 	if _, ok := SampleTreeResources(root, 4242); ok {
 		t.Fatal("missing root must report unavailable")
 	}
-	// Malformed smaps_rollup → unavailable.
-	bad := filepath.Join(root, "555")
-	if err := os.MkdirAll(bad, 0o755); err != nil {
-		t.Fatal(err)
+}
+
+func TestSampleTreeMalformedRollup(t *testing.T) {
+	root := t.TempDir()
+	writeRollup := func(pid int, body string) {
+		t.Helper()
+		dir := filepath.Join(root, fmt.Sprint(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "smaps_rollup"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(bad, "smaps_rollup"), []byte("garbage"), 0o644); err != nil {
-		t.Fatal(err)
+
+	// Malformed/incomplete ROOT measurements are unavailable — a false
+	// zero reading is worse than an honest gap.
+	for name, body := range map[string]string{
+		"garbage":       "garbage",
+		"missing-pss":   "Rss:               4096 kB\n",
+		"missing-rss":   "Pss:               1024 kB\n",
+		"malformed-pss": "Pss:               abc kB\nRss:               4096 kB\n",
+		"malformed-rss": "Rss:               xyz kB\nPss:               1024 kB\n",
+		"negative-pss":  "Pss:               -5 kB\nRss:               4096 kB\n",
+		"wrong-unit":    "Pss:               1024\nRss:               4096\n",
+	} {
+		writeRollup(555, body)
+		if res, ok := SampleTreeResources(root, 555); ok {
+			t.Fatalf("%s must be unavailable, got %+v", name, res)
+		}
+		os.RemoveAll(filepath.Join(root, "555"))
 	}
-	res, ok = SampleTreeResources(root, 555)
-	if !ok {
-		t.Fatal("malformed-but-readable rollup should still sample")
+
+	// Legitimate zero values are a valid measured zero, not unavailable.
+	writeRollup(777, "Rss:               0 kB\nPss:               0 kB\n")
+	res, ok := SampleTreeResources(root, 777)
+	if !ok || res.PSSBytes != 0 || res.RSSBytes != 0 || res.ProcessCount != 1 {
+		t.Fatalf("valid zero: %+v ok=%v", res, ok)
 	}
-	if res.PSSBytes != 0 || res.RSSBytes != 0 {
-		t.Fatalf("malformed values must stay zero, got %+v", res)
+
+	// A malformed DESCENDANT is skipped — the root aggregate stays valid
+	// and ProcessCount counts only measured processes.
+	writeRollup(200, "garbage")
+	fakeProcTree(t, root, map[int][]int{888: {200}}, nil)
+	writeRollup(888, "Rss:               4096 kB\nPss:               1024 kB\n")
+	res, ok = SampleTreeResources(root, 888)
+	if !ok || res.ProcessCount != 1 || res.PSSBytes != 1024*1024 {
+		t.Fatalf("malformed descendant must be skipped: %+v ok=%v", res, ok)
 	}
 }

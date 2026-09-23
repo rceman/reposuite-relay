@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,5 +242,54 @@ func TestRuntimesSecretFree(t *testing.T) {
 		if strings.Contains(body, banned) {
 			t.Fatalf("leaked %q", banned)
 		}
+	}
+}
+
+// TestRuntimesAdminCookieAuth: an authenticated Web Admin cookie reads
+// /v1/runtimes with no CSRF header — GET is a safe method, so the
+// cookie-auth CSRF obligation does not apply.
+func TestRuntimesAdminCookieAuth(t *testing.T) {
+	p := testPaths(t)
+	d, err := Start(p, Options{SelfExe: testBinary()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d)
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	cookie := setupAdmin(t, d, c, "admin", "correct-horse-battery")
+
+	req, err := http.NewRequest(http.MethodGet, d.endpoint()+"/v1/runtimes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(&http.Cookie{
+		Name:  adminCookieName,
+		Value: cookie,
+	})
+	// Deliberately NO X-Relay-CSRF — safe methods must not need it.
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin-cookie GET /v1/runtimes = %d", resp.StatusCode)
+	}
+	var out api.RuntimeList
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Totals.RuntimeCount != 0 {
+		t.Fatalf("expected empty inventory: %+v", out.Totals)
 	}
 }
