@@ -112,6 +112,16 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd string) (*acp.Server, e
 	return srv, nil
 }
 
+// stopOrphanRuntime reaps a generation a failed bind left behind: a
+// runtime with zero bound sessions can only be the one this attach just
+// spawned — stopping it frees the provider-side resources it holds.
+// A shared generation with bound sessions is never touched.
+func (a *Adapter) stopOrphanRuntime() {
+	if rt, ok := a.deps.Supervisor.Get(RuntimeKey); ok && len(rt.Sessions()) == 0 {
+		_ = a.deps.Supervisor.StopIfIdle(RuntimeKey)
+	}
+}
+
 // OnRuntimeGone implements harness.Adapter: the runtime generation is gone, so
 // every bound session becomes COLD, in-flight work fails durably, and the
 // durable native identity is retained exactly (it is resumable).

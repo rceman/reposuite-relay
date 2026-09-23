@@ -152,17 +152,27 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 	if nativeID == "" {
 		newHandle, err := acp.OpenSession(callCtx, srv, cwd)
 		if err != nil {
+			a.stopOrphanRuntime()
 			return nil, fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
 		}
-		return a.finishAttach(callCtx, m, srv, newHandle, desired, false)
+		h, err := a.finishAttach(callCtx, m, srv, newHandle, desired, false)
+		if err != nil {
+			a.stopOrphanRuntime()
+		}
+		return h, err
 	}
 
 	loaded, err := acp.AttachSession(callCtx, srv, cwd, nativeID)
 	if err != nil {
 		// Fail closed: never substitute a fresh session for the exact one.
+		a.stopOrphanRuntime()
 		return nil, fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
 	}
-	return a.finishAttach(callCtx, m, srv, loaded, desired, true)
+	h, err := a.finishAttach(callCtx, m, srv, loaded, desired, true)
+	if err != nil {
+		a.stopOrphanRuntime()
+	}
+	return h, err
 }
 
 // completeTurn awaits the terminal turn result and publishes the canonical

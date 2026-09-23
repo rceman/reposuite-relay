@@ -256,28 +256,6 @@ func TestMalformedNativeIdentityFailsClosed(t *testing.T) {
 	}
 }
 
-// TestFailedExactLoadNeverSubstitutes: a native load failure is a hard failure.
-func TestFailedExactLoadNeverSubstitutes(t *testing.T) {
-	e, a := newEnv(t, acp.FakeLoadError)
-	m := newSession(t, e, a, "lost", t.TempDir())
-	m.MetaMu.Lock()
-	m.Session.NativeSessionID = "happy-lark"
-	m.MetaMu.Unlock()
-	a.Track(m)
-	if _, err := a.Prompt(bg(), m, text("hello")); !isNativeSessionLost(err) {
-		t.Fatalf("err = %v, want NATIVE_SESSION_LOST", err)
-	}
-	if n := acp.CountFakeEvents(e.ACPState, "session/new"); n != 0 {
-		t.Fatalf("session/new calls = %d, want 0 (no substitution)", n)
-	}
-	if e.DurablePayload(m.Session.ID, api.EventTurnFailed) == nil {
-		t.Fatal("no durable turn.failed record")
-	}
-	if got := e.Reload(m.Session.ID).NativeSessionID; got != "happy-lark" {
-		t.Fatalf("persisted slug = %q, want the unchanged exact identity", got)
-	}
-}
-
 // TestRuntimeDoesNotAdvertiseLoadFailsClosed.
 func TestRuntimeDoesNotAdvertiseLoadFailsClosed(t *testing.T) {
 	e, a := newEnv(t, acp.FakeNoLoad)

@@ -78,7 +78,12 @@ func (c *Client) SessionLoad(ctx context.Context, cwd, sessionID string) (LoadSe
 	if err != nil {
 		return res, err
 	}
-	if res.SessionID != sessionID {
+	if res.SessionID == "" {
+		// ACP does not require session/load to echo the identity — the
+		// request already named it (devin acp 3000.11.1 returns modes
+		// and configOptions only). Normalize to the requested id.
+		res.SessionID = sessionID
+	} else if res.SessionID != sessionID {
 		return res, fmt.Errorf("%s returned session %q, want the exact %q",
 			MethodSessionLoad, res.SessionID, sessionID)
 	}

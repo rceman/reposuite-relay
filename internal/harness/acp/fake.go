@@ -53,6 +53,10 @@ const (
 	FakeNoLoad = "no-load"
 	// FakeLoadError fails every session/load.
 	FakeLoadError = "load-error"
+	// FakeLoadNoEcho answers session/load with a result that omits
+	// sessionId — the real devin acp 3000.11.1 behavior (modes +
+	// configOptions only, no identity echo).
+	FakeLoadNoEcho = "load-no-echo"
 	// FakeDieOnPrompt exits while accepting a prompt.
 	FakeDieOnPrompt = "die-on-prompt"
 	// FakeDieOnPermission exits while an approval request is in flight.
@@ -247,6 +251,11 @@ func (a *fakeAgent) onSessionLoad(_ context.Context, _ int64, params json.RawMes
 		return nil, fmt.Errorf("session %s has no resumable turn", p.SessionID)
 	}
 	a.events.record("session/load", rec.ID)
+	if a.cfg.Mode == FakeLoadNoEcho {
+		// Provider does not echo the identity back — the request named
+		// it; the client normalizes to the requested id.
+		return LoadSessionResult{ConfigOptions: a.configOptions(rec)}, nil
+	}
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(rec),
 		SessionID:     rec.ID,

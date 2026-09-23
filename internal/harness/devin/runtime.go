@@ -113,6 +113,18 @@ func (a *Adapter) ensureRuntime(ctx context.Context, cwd, model string) (*acp.Se
 	return srv, key, nil
 }
 
+// stopOrphanRuntime reaps a generation a failed bind left behind: a
+// runtime with zero bound sessions can only be the one this attach just
+// spawned — stopping it frees the provider-side resources it holds
+// (Devin ACP holds a per-process session lock; an orphaned server
+// poisons every later session/load with session_locked). A shared
+// generation with bound sessions is never touched.
+func (a *Adapter) stopOrphanRuntime(key string) {
+	if rt, ok := a.deps.Supervisor.Get(key); ok && len(rt.Sessions()) == 0 {
+		_ = a.deps.Supervisor.StopIfIdle(key)
+	}
+}
+
 // bind attaches a session to a live runtime generation.
 func (a *Adapter) bind(sessionID, runtimeKey string, srv *acp.Server, handle *acp.Session) error {
 	if err := a.deps.Supervisor.Bind(runtimeKey, sessionID); err != nil {

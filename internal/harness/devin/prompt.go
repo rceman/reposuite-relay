@@ -151,25 +151,37 @@ func (a *Adapter) attach(ctx context.Context, m *session.Managed, st *sessState)
 		// with its dead generation — it was never resumable.)
 		newHandle, err := acp.OpenSession(callCtx, srv, cwd)
 		if err != nil {
+			a.stopOrphanRuntime(runtimeKey)
 			return nil, fmt.Errorf("%w: session/new: %v", harness.ErrRuntimeUnavailable, err)
 		}
 		if err := a.applyPermissionMode(callCtx, m, newHandle); err != nil {
 			newHandle.Close()
+			a.stopOrphanRuntime(runtimeKey)
 			return nil, err
 		}
-		return a.finishAttach(m, runtimeKey, srv, newHandle, "", false)
+		h, err := a.finishAttach(m, runtimeKey, srv, newHandle, "", false)
+		if err != nil {
+			a.stopOrphanRuntime(runtimeKey)
+		}
+		return h, err
 	}
 
 	loaded, err := acp.AttachSession(callCtx, srv, cwd, nativeID)
 	if err != nil {
 		// Fail closed: never substitute a fresh session for the exact one.
+		a.stopOrphanRuntime(runtimeKey)
 		return nil, fmt.Errorf("%w: session/load %s: %v", harness.ErrNativeSessionLost, nativeID, err)
 	}
 	if err := a.applyPermissionMode(callCtx, m, loaded); err != nil {
 		loaded.Close()
+		a.stopOrphanRuntime(runtimeKey)
 		return nil, err
 	}
-	return a.finishAttach(m, runtimeKey, srv, loaded, nativeID, true)
+	h, err := a.finishAttach(m, runtimeKey, srv, loaded, nativeID, true)
+	if err != nil {
+		a.stopOrphanRuntime(runtimeKey)
+	}
+	return h, err
 }
 
 // finishAttach completes a bind transaction: bind the session to the
