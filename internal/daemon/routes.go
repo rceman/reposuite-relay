@@ -59,6 +59,12 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/v1/daemon" && r.Method == http.MethodGet:
 		d.handleDaemonInfo(w, r)
+	case p == "/v1/runtimes":
+		if r.Method != http.MethodGet {
+			methodOrNotFound(w, r, http.MethodGet)
+			return
+		}
+		d.handleRuntimes(w, r)
 	case p == "/v1/daemon/shutdown" && r.Method == http.MethodPost:
 		d.handleShutdown(w, r)
 	case p == "/v1/projects" && r.Method == http.MethodGet:
