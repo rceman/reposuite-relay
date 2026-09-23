@@ -9,6 +9,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
+	"github.com/rceman/reposuite-relay/internal/presentation"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
@@ -71,6 +72,9 @@ type Options struct {
 	// AdminVerify overrides password verification — test seam only for
 	// counting structural Verify calls.
 	AdminVerify func(password, encoded string) bool
+	// PresentationHooks injects deterministic catalog commit-path faults
+	// — test seam only; production commits with real primitives.
+	PresentationHooks *presentation.Hooks
 }
 
 func (o Options) withDefaults() Options {

@@ -105,6 +105,14 @@ func (p Paths) MachineToken() string { return filepath.Join(p.ConfigDir(), "api.
 // password and no browser session material.
 func (p Paths) AdminCredentials() string { return filepath.Join(p.ConfigDir(), "admin.json") }
 
+// PresentationConfig is the persistent Relay-local presentation domain:
+// human-facing display/grouping metadata (currently the Project catalog).
+// It is durable configuration — never process state, so it lives under
+// config/, not run/ — and it never carries session lifecycle authority.
+func (p Paths) PresentationConfig() string {
+	return filepath.Join(p.ConfigDir(), "presentation.json")
+}
+
 // RunDir holds runtime artifacts such as the daemon socket.
 func (p Paths) RunDir() string { return filepath.Join(p.RelayRoot(), "run") }
 

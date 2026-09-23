@@ -86,6 +86,12 @@ func (d *Daemon) sessionInfo(m *session.Managed) api.SessionInfo {
 	if a, ok := d.adapterFor(s.Harness); ok {
 		info.Metrics = a.Metrics(s.ID)
 	}
+	// Derived presentation projection: longest matching project root over
+	// the session cwd — read-time only, never persisted on the session.
+	if p, ok := d.pres.Match(s.Cwd); ok {
+		info.ProjectID = p.ID
+		info.ProjectName = p.Name
+	}
 	return info
 }
 

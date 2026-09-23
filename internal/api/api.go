@@ -75,6 +75,11 @@ const (
 	// ErrUnsupportedOperation means the operation is not supported by this
 	// harness — a capability mismatch, never an internal failure.
 	ErrUnsupportedOperation = "UNSUPPORTED_OPERATION"
+	// ErrProjectNotFound names an unknown Relay-local project ID.
+	ErrProjectNotFound = "PROJECT_NOT_FOUND"
+	// ErrProjectRootConflict means the canonical project root is already
+	// owned by another project.
+	ErrProjectRootConflict = "PROJECT_ROOT_CONFLICT"
 )
 
 // Canonical size bounds. These are part of the wire contract and are used
@@ -142,6 +147,12 @@ type SessionInfo struct {
 	// harness reported any. It is never persisted and never wakes a
 	// runtime to produce.
 	Metrics *harness.SessionMetrics `json:"metrics,omitempty"`
+	// ProjectID/ProjectName are DERIVED presentation fields computed at
+	// read time from the local project catalog and the session cwd —
+	// never persisted on the RelaySession. Either both are present or
+	// neither (an unmatched session is Ungrouped).
+	ProjectID   string `json:"projectId,omitempty"`
+	ProjectName string `json:"projectName,omitempty"`
 }
 
 // Canonical durable event types. These are persisted in the session

@@ -21,6 +21,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/config"
 	"github.com/rceman/reposuite-relay/internal/events"
 	"github.com/rceman/reposuite-relay/internal/paths"
+	"github.com/rceman/reposuite-relay/internal/presentation"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
 	"github.com/rceman/reposuite-relay/internal/store"
@@ -53,9 +54,10 @@ type Daemon struct {
 	ln       net.Listener
 	srv      *http.Server
 
-	web    *webAuth   // browser-auth state; creds nil until admin setup
-	webMu  sync.Mutex // serializes the create-once admin credential commit
-	static *webStatic // embedded SvelteKit Web Admin build
+	web    *webAuth              // browser-auth state; creds nil until admin setup
+	webMu  sync.Mutex            // serializes the create-once admin credential commit
+	static *webStatic            // embedded SvelteKit Web Admin build
+	pres   *presentation.Manager // Relay-local project/grouping catalog
 
 	mu       sync.Mutex
 	shutting bool
@@ -156,6 +158,15 @@ func Start(p paths.Paths, opts Options) (*Daemon, error) {
 		d.releaseLock()
 		return nil, err
 	}
+	// Relay-local presentation authority: a missing catalog is an empty
+	// one; a malformed or insecure presentation.json fails startup closed
+	// — before any listener or descriptor names this generation.
+	pres, err := presentation.NewManager(p.PresentationConfig(), d.opts.PresentationHooks)
+	if err != nil {
+		d.releaseLock()
+		return nil, fmt.Errorf("presentation config: %w", err)
+	}
+	d.pres = pres
 	// The stable control-plane endpoint is resolved under singleton
 	// authority: first start binds a free loopback port and commits it to
 	// config/relay.json atomically; later starts bind the configured port

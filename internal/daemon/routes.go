@@ -52,6 +52,12 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 		d.handleDaemonInfo(w, r)
 	case p == "/v1/daemon/shutdown" && r.Method == http.MethodPost:
 		d.handleShutdown(w, r)
+	case p == "/v1/projects" && r.Method == http.MethodGet:
+		d.handleListProjects(w, r)
+	case p == "/v1/projects" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleCreateProject)(w, r, "")
+	case strings.HasPrefix(p, "/v1/projects/"):
+		d.routeProject(w, r, strings.TrimPrefix(p, "/v1/projects/"))
 	case p == "/v1/sessions" && r.Method == http.MethodGet:
 		d.handleList(w, r)
 	case p == "/v1/sessions/fixture" && r.Method == http.MethodPost:
