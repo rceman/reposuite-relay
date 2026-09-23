@@ -117,6 +117,10 @@ IMPLEMENTED:
 - Runtime wake from COLD and the native session control surface
   (`serve codex`, `prompt`, `session status`, `config`, `input`,
   `cancel`, `stop`) over the loopback HTTP API and CLI.
+- `GET /v1/runtimes` + the global Web Admin footer: observer-only live
+  runtime inventory (supervisor snapshot, `/proc` process-tree PSS/RSS,
+  bound sessions, Relay-observed activity). AUTOMATIC_RUNTIME_SLEEP is
+  DISABLED — observability never drives lifecycle.
 
 NOT YET IMPLEMENTED:
 

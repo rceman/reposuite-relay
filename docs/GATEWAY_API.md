@@ -118,6 +118,47 @@ Includes COLD sessions. `SessionInfo` fields: `key`, `sessionId`,
 `createdAt`, `generationStartedAt`, `metrics` (last-known, never
 persisted).
 
+### `GET /v1/runtimes`
+
+Global live harness-runtime inventory — observer-only. Never wakes a
+COLD session, never spawns or attaches a harness, never mutates durable
+state. `GET` only; `Cache-Control: no-store`.
+
+```json
+{"daemon":{...},"sampledAt":"<rfc3339>",
+ "runtimes":[{"runtimeId":"<ephemeral>","harness":"codex","shared":true,
+   "pid":1234,"startedAt":"<rfc3339>","uptimeSeconds":3812,
+   "state":"warm","sessionCount":3,"activeSessionCount":1,
+   "waitingInputCount":0,"mutationCount":0,
+   "sessions":[{"key":"api-refactor","sessionId":"<hex32>",
+                "activity":"active","mutating":false}],
+   "resources":{"available":true,"pssBytes":176160768,
+                "rssBytes":263192576,"processCount":2}}],
+ "totals":{"runtimeCount":1,"sessionCount":3,"activeSessionCount":1,
+   "waitingInputCount":0,"measuredRuntimeCount":1,
+   "pssBytes":176160768,"rssBytes":263192576}}
+```
+
+Semantics:
+
+- `resources` is a best-effort process-tree sample (Linux `/proc`
+  children + `smaps_rollup`, root = the Supervisor-owned runtime PID).
+  `available:false` means unmeasured (process gone, unsupported
+  platform) — not "zero". Totals expose `measuredRuntimeCount` so
+  clients can mark partial PSS/RSS sums.
+- `activity`/`mutating` are **Relay-observed** state only — they say
+  nothing about external child processes or background work. Never
+  treat `idle` as proof that nothing useful is running.
+- A `starting` runtime appears with `pid:0` and unavailable resources;
+  the next poll converges.
+- Resource samples are revalidated against runtime generation: numbers
+  measured on a replaced generation are discarded, never attributed to
+  the new one.
+- Exposes Relay runtime ID, Relay session key/id, PID, uptime, memory —
+  all within the authenticated local trust domain. Never exposes
+  `nativeSessionId`, credentials, provider command lines, env, or
+  tokens.
+
 ### `GET /v1/sessions/{key}`
 
 ```json
@@ -251,6 +292,10 @@ masked). Runtime-only fields are omitted when stopped.
   Web Admin is same-origin on `/`.
 - **No auto-start via status:** `reposuite-relay status` reads config +
   descriptor only; managed commands may spawn the daemon lazily.
+- **No automatic idle shutdown:** `AUTOMATIC_RUNTIME_SLEEP` is
+  DISABLED. Observed `idle` activity, old timestamps, or low resource
+  pressure never trigger eviction; runtimes go COLD only through
+  existing explicit/lifecycle paths.
 
 ## What this API is NOT (yet)
 

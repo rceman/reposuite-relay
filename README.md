@@ -130,6 +130,14 @@ go through the runtime's own advertised config options; approvals are
 answered by policy (never converted into requested input, which is
 `UNSUPPORTED_OPERATION` for ACP harnesses).
 
+The Web Admin shows a global runtime footer on every page: live harness
+runtime count, per-provider PSS, bound-session/activity counts, and a
+detailed inspector (PID, uptime, PSS/RSS/process count, bound sessions)
+via `GET /v1/runtimes`. It is observer-only — **automatic idle runtime
+shutdown is DISABLED**; an observed `idle` activity never evicts a
+runtime, because `idle` is Relay-observed state and says nothing about
+external tools or background work.
+
 **Not yet implemented:** Codex approval requests and `turn/steer`,
 rate-limit surfaces, ACP requested-input, the GPT Tunnel integration,
 cross-platform singleton locking. A TUI is not planned — the management
