@@ -254,6 +254,28 @@ func (h *Hooks) syncDir(dir string) error {
 	return syncDir(dir)
 }
 
+// marshalCatalog produces the exact canonical durable bytes: validated
+// catalog → MarshalIndent → trailing newline. The serialized file must
+// obey the same MaxFile bound Load enforces — a successful commit must
+// never persist a catalog the next startup would refuse to load. This
+// check happens BEFORE the temp file exists, so an oversized catalog
+// is a pure pre-commit failure.
+func marshalCatalog(c Catalog) ([]byte, error) {
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("presentation config: %w", err)
+	}
+	raw, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("presentation config: %w", err)
+	}
+	raw = append(raw, '\n')
+	if len(raw) > MaxFile {
+		return nil, fmt.Errorf("presentation config: catalog serializes to %d bytes, exceeds %d-byte bound",
+			len(raw), MaxFile)
+	}
+	return raw, nil
+}
+
 // Commit persists the catalog atomically: same-directory temp (0600),
 // full JSON write, temp fsync, close, atomic rename over the canonical
 // path, directory fsync.
@@ -269,8 +291,12 @@ func Commit(path string, c Catalog) error {
 // CommitWith is Commit with an explicit fault-injection seam — tests
 // only; production callers use Commit.
 func CommitWith(path string, c Catalog, hooks *Hooks) error {
-	if err := c.Validate(); err != nil {
-		return fmt.Errorf("presentation config: %w", err)
+	// Bound the exact committed bytes before any filesystem work: a
+	// catalog that would exceed MaxFile fails pre-commit — no temp file,
+	// no rename, canonical content and snapshots untouched.
+	raw, err := marshalCatalog(c)
+	if err != nil {
+		return err
 	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".presentation.json.tmp-*")
@@ -286,11 +312,7 @@ func CommitWith(path string, c Catalog, hooks *Hooks) error {
 	if err := tmp.Chmod(0o600); err != nil {
 		return fail(err)
 	}
-	raw, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return fail(err)
-	}
-	if _, err := hooks.writeTemp(tmp, append(raw, '\n')); err != nil {
+	if _, err := hooks.writeTemp(tmp, raw); err != nil {
 		return fail(err)
 	}
 	if err := hooks.syncTemp(tmp); err != nil {

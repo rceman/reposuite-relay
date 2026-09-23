@@ -355,7 +355,23 @@ describe('project decoders — strict wire contract', () => {
 		expect(out.name).toBe('プロジェクト Ω');
 	});
 
-	it.each(['', 'relative/path', 42, null])(
+	it('mirrors Go strings.TrimSpace, not ECMAScript trim()', () => {
+		// U+00A0 NBSP is White_Space in both — a canonical name never has
+		// it at the edges, so the wire value is malformed.
+		expect(() =>
+			decodeProjectInfo({ ...project, name: '\u00A0Relay\u00A0' })
+		).toThrow(DecodeError);
+		// U+FEFF is NOT White_Space in Go — the backend keeps it, so this
+		// IS a canonical name (FEFF is Cf format, not a control char).
+		// ECMAScript trim() would wrongly call it unnormalized.
+		expect(decodeProjectInfo({ ...project, name: '\uFEFFRelay' }).name).toBe('\uFEFFRelay');
+		expect(decodeProjectInfo({ ...project, name: 'Relay\uFEFF' }).name).toBe('Relay\uFEFF');
+		// U+0085 NEL is White_Space (trimmed at edges) AND a control char —
+		// interior it is rejected for the control reason, not whitespace.
+		expect(() => decodeProjectInfo({ ...project, name: 'x\u0085y' })).toThrow(DecodeError);
+	});
+
+	it.each(['', 'relative/path', 42, null, '/work/a\u0000b'])(
 		'rejects malformed root %j',
 		(root) => {
 			expect(() =>

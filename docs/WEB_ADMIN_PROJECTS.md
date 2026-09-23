@@ -29,12 +29,20 @@ Schema v1:
 - **Name** — 1..128 UTF-8 bytes after whitespace normalization; no
   Unicode control characters (`unicode.IsControl` — C0, DEL, and C1
   including NEL U+0085). Ordinary non-ASCII text is legal.
+  Normalization is `strings.TrimSpace` — the Go `unicode.IsSpace`
+  (White_Space) set, which does NOT include U+FEFF; the frontend
+  mirrors this exactly (never `String.trim()`, which is broader).
 - **Root** — a required absolute path in `filepath.Clean` canonical
-  form. It is a filesystem path, NOT display text: whitespace is part
-  of the path and is never trimmed ("/work/x" and "/work/x " are
-  distinct legal roots). The path is never stat'ed, created, or
-  inspected — an offline or unmounted project directory is legitimate.
-- **Bounds** — at most 256 projects; the file is bounded at 256 KiB.
+  form, never containing NUL. It is a filesystem path, NOT display
+  text: whitespace is part of the path and is never trimmed ("/work/x"
+  and "/work/x " are distinct legal roots). The path is never stat'ed,
+  created, or inspected — an offline or unmounted project directory is
+  legitimate.
+- **Bounds** — at most 256 projects; the file is bounded at 256 KiB —
+  on BOTH directions: `Load` refuses a larger file and the commit path
+  refuses to persist one (checked on the exact serialized bytes before
+  the temp file exists). A successful mutation can therefore never
+  produce a catalog the next daemon generation would reject for size.
 
 ## Load and commit semantics
 
@@ -109,10 +117,12 @@ surface — no API version bump.
   list with name / root / matching-session count, inline create-edit
   form (PATCH sends changed fields only), deliberate AlertDialog delete
   explaining sessions are untouched. Root input is sent verbatim —
-  the UX check is only `root.startsWith('/')` — and decoders enforce
-  the canonical wire contract (`prj_<32 lowercase hex>` ID, normalized
-  1..128-byte control-free name, non-empty absolute root, and the
-  `projectId`/`projectName` pair invariant on `SessionInfo`).
+  the UX check is only `root.startsWith('/')` on the exact string —
+  and decoders enforce the canonical wire contract (`prj_<32 lowercase
+  hex>` ID, normalized 1..128-byte control-free name, non-empty
+  NUL-free absolute root, and the `projectId`/`projectName` pair
+  invariant on `SessionInfo`). The form resets only when the mutation
+  AND its canonical reconciliation both succeeded.
 - **Sessions** (`/sessions`) groups rows by the projected `projectId`:
   project sections in canonical catalog order (empty sections omitted
   here), sessions stable-sorted by key, Ungrouped last.

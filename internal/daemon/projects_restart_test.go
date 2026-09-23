@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/rceman/reposuite-relay/internal/adminauth"
+	"github.com/rceman/reposuite-relay/internal/api"
+	"github.com/rceman/reposuite-relay/internal/presentation"
 )
 
 // TestProjectNeverTouchesSessionJSON: session.json is byte-identical
@@ -111,5 +113,64 @@ func TestPresentationMalformedFailsClosed(t *testing.T) {
 	raw, _ := os.ReadFile(p.PresentationConfig())
 	if !strings.Contains(string(raw), `"bogus"`) {
 		t.Fatal("malformed authority must not be silently rewritten")
+	}
+}
+
+// TestProjectOversizeAccumulationHTTP: individually valid mutations can
+// never accumulate a durable catalog larger than MaxFile — the crossing
+// mutation gets 400 INVALID_REQUEST, the canonical catalog keeps the
+// committed state, and the next daemon generation starts cleanly on it
+// (a committed catalog must never brick startup).
+func TestProjectOversizeAccumulationHTTP(t *testing.T) {
+	d, p, c, done := webDaemonBare(t)
+	endpoint := d.endpoint()
+	setupAdmin(t, d, c, "admin", "correct-horse-12")
+	csrf := webCSRF(t, d, c)
+
+	var n int
+	for {
+		root := fmt.Sprintf("/w/%s%d", strings.Repeat("x", 2000), n)
+		resp := cookieJSON(t, c, http.MethodPost, endpoint, "/v1/projects",
+			csrf, fmt.Sprintf(`{"name":"p%d","root":%q}`, n, root))
+		if resp.StatusCode == http.StatusBadRequest {
+			env := decodeErrBody(t, resp)
+			if env.Error.Code != api.ErrInvalidRequest {
+				t.Fatalf("oversize mutation: code %q", env.Error.Code)
+			}
+			break
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("project create %d: %d", n, resp.StatusCode)
+		}
+		resp.Body.Close()
+		n++
+		if n > presentation.MaxProjects {
+			t.Fatal("hit project-count bound before the file-size bound")
+		}
+	}
+	if n == 0 {
+		t.Fatal("no project fit under MaxFile — fixture broken")
+	}
+	resp := cookieJSON(t, c, http.MethodGet, endpoint, "/v1/projects", "", "")
+	list := decodeProjects(t, resp)
+	if len(list.Projects) != n {
+		t.Fatalf("canonical catalog = %d projects, want %d committed", len(list.Projects), n)
+	}
+
+	// The next daemon generation must load what this one committed —
+	// a successful commit can never create a startup-bricking file.
+	stopDaemonNow(t, d, done)
+	d2, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+	})
+	if err != nil {
+		t.Fatalf("restart on committed catalog failed: %v", err)
+	}
+	serveDaemon(t, d2)
+	resp = rawGet(t, d2.endpoint(), "/v1/projects", d2.Token())
+	list = decodeProjects(t, resp)
+	if len(list.Projects) != n {
+		t.Fatalf("post-restart catalog = %d projects, want %d", len(list.Projects), n)
 	}
 }

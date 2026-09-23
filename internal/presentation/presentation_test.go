@@ -156,3 +156,37 @@ func TestValidateNameUnicodeControls(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateNameWhitespaceParity locks the Go side of the
+// cross-language whitespace contract: strings.TrimSpace follows
+// unicode.IsSpace (White_Space property) — NOT ECMAScript's broader
+// trim set. The frontend mirrors this exactly; see
+// web/src/lib/projects settings + decode tests.
+func TestValidateNameWhitespaceParity(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // "" means rejected
+	}{
+		{"  Relay  ", "Relay"},         // ASCII space trims
+		{"\u00A0Relay\u00A0", "Relay"}, // NBSP trims
+		{"\u0085Relay", "Relay"},       // NEL trims at the edge
+		{"\uFEFFRelay", "\uFEFFRelay"}, // FEFF not space in Go — kept
+		{"Relay\uFEFF", "Relay\uFEFF"}, // trailing FEFF kept too
+		{"Re\u00A0lay", "Re\u00A0lay"}, // interior NBSP legal
+		{"x\u0085y", ""},               // interior NEL = control
+		{"x\ty", ""},                   // interior tab = control
+		// interior tab is a control char
+	}
+	for _, tc := range cases {
+		got, err := ValidateName(tc.in)
+		if tc.want == "" {
+			if err == nil {
+				t.Fatalf("name %q accepted as %q, want rejected", tc.in, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Fatalf("name %q = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+}

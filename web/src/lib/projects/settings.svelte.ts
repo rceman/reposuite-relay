@@ -34,8 +34,9 @@ export class ProjectsSettings {
 	 * Canonical reload: replaces catalog + session projection on success.
 	 * A reload failure records loadError and keeps the last-known state —
 	 * it does NOT clear mutationError and does not invent catalog state.
+	 * Returns whether the reload succeeded.
 	 */
-	async load(): Promise<void> {
+	async load(): Promise<boolean> {
 		try {
 			const [pl, sl] = await Promise.all([
 				this.reads.listProjects(),
@@ -44,8 +45,10 @@ export class ProjectsSettings {
 			this.projects = pl.projects;
 			this.sessions = sl.sessions;
 			this.loadError = null;
+			return true;
 		} catch (err) {
 			this.loadError = describe(err, 'Failed to load settings');
+			return false;
 		}
 	}
 
@@ -53,8 +56,10 @@ export class ProjectsSettings {
 	 * Run a mutation, then ALWAYS reconcile against canonical reads —
 	 * success or error. A post-commit failure (rename committed, dirsync
 	 * failed → 500) leaves the new catalog committed; the reload exposes
-	 * it while mutationError stays visible. Returns true on clean success
-	 * (callers may reset the form only then).
+	 * it while mutationError stays visible. Returns true only when BOTH
+	 * the mutation AND the canonical reload succeeded — a clean success
+	 * whose reconciliation failed leaves the view unresolved, so the
+	 * caller must not reset the form as if everything converged.
 	 */
 	async mutate(fn: () => Promise<unknown>): Promise<boolean> {
 		let ok = true;
@@ -65,7 +70,7 @@ export class ProjectsSettings {
 			ok = false;
 			this.mutationError = describe(err, 'Project mutation failed');
 		}
-		await this.load();
-		return ok;
+		const reconciled = await this.load();
+		return ok && reconciled;
 	}
 }

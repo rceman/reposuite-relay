@@ -88,6 +88,25 @@ describe('ProjectsSettings reconciliation', () => {
 		expect(ctl.loadError).toBeNull();
 	});
 
+	it('clean mutation + failed reload: not a converged success', async () => {
+		const failing: CanonicalReads = {
+			listProjects: async () => {
+				throw new RelayError('expired', { code: 'UNAUTHORIZED', status: 401 });
+			},
+			listSessions: async () => ({ daemon: daemon(), sessions: [] })
+		};
+		const ctl = new ProjectsSettings(failing);
+		ctl.projects = [project('prj_stale')];
+		// Mutation succeeded but canonical reconciliation failed — the
+		// caller must NOT treat this as clean success (no form reset) and
+		// the load error stays visible beside last-known state.
+		const ok = await ctl.mutate(async () => {});
+		expect(ok).toBe(false);
+		expect(ctl.mutationError).toBeNull();
+		expect(ctl.loadError).toBe('expired');
+		expect(ctl.projects.map((p) => p.id)).toEqual(['prj_stale']);
+	});
+
 	it('load failure during reconciliation preserves both errors', async () => {
 		const failing: CanonicalReads = {
 			listProjects: async () => {
@@ -133,5 +152,15 @@ describe('project form contract — exact root', () => {
 		const prev = project('prj_1', 'P', '/w');
 		expect(buildPatchBody(prev, 'P', '/w')).toBeNull();
 		expect(buildPatchBody(prev, 'New', '/w')).toEqual({ name: 'New' });
+	});
+
+	it('name normalization mirrors Go strings.TrimSpace', () => {
+		// ASCII + White_Space edges normalize.
+		expect(buildCreateBody('  Relay  ', '/w').name).toBe('Relay');
+		expect(buildCreateBody('\u00A0Relay\u00A0', '/w').name).toBe('Relay');
+		expect(buildCreateBody('\u0085Relay', '/w').name).toBe('Relay'); // NEL is space
+		// U+FEFF is NOT Go whitespace — it stays part of the name even
+		// though String.trim() would strip it.
+		expect(buildCreateBody('\uFEFFRelay', '/w').name).toBe('\uFEFFRelay');
 	});
 });
