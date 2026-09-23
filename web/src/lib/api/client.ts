@@ -10,6 +10,7 @@ import {
 	decodeMachineTokenStatus,
 	decodeInputResponse,
 	decodeProjectList,
+	decodeRuntimeList,
 	decodeProjectResponse,
 	decodePromptResponse,
 	decodeSessionList,
@@ -30,6 +31,7 @@ import type {
 	MachineTokenStatusResponse,
 	ProjectResponse,
 	PromptResponse,
+	RuntimeList,
 	SessionList,
 	SessionResponse,
 	TranscriptPage,
@@ -128,6 +130,13 @@ export function sessionPath(key: string, suffix = ''): string {
 export const api = {
 	/** GET /v1/sessions — observer read; never wakes a COLD session. */
 	listSessions: (): Promise<SessionList> => getJSON('/v1/sessions', decodeSessionList),
+
+	/**
+	 * GET /v1/runtimes — global live harness-runtime inventory.
+	 * Observer-only: never wakes a COLD session or spawns a harness.
+	 */
+	listRuntimes: (init?: { signal?: AbortSignal }): Promise<RuntimeList> =>
+		getJSON('/v1/runtimes', decodeRuntimeList, init),
 
 	/**
 	 * GET /v1/sessions/{key} — observer read; never wakes a COLD session.

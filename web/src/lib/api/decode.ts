@@ -20,6 +20,10 @@ import type {
 	SessionList,
 	SessionMetrics,
 	SessionResponse,
+	RuntimeBinding,
+	RuntimeInfo,
+	RuntimeList,
+	RuntimeResources,
 	TranscriptPage,
 	TranscriptRecord
 } from './types';
@@ -373,4 +377,85 @@ export function decodeRelayEvent(v: unknown): RelayEvent {
 	};
 	if (v.payload !== undefined) out.payload = v.payload;
 	return out;
+}
+
+// --- /v1/runtimes decoders -----------------------------------------------
+
+function optNonNeg(v: Record<string, unknown>, key: string): number | undefined {
+	const n = optNumber(v, key);
+	if (n !== undefined && (!Number.isSafeInteger(n) || n < 0)) throw new DecodeError(key);
+	return n;
+}
+
+function reqNonNeg(v: Record<string, unknown>, key: string): number {
+	const n = reqNumber(v, key);
+	if (!Number.isSafeInteger(n) || n < 0) throw new DecodeError(key);
+	return n;
+}
+
+function decodeRuntimeBinding(v: unknown): RuntimeBinding {
+	if (!isRecord(v)) throw new DecodeError('binding');
+	const activity = reqString(v, 'activity');
+	if (!['idle', 'active', 'waiting_input'].includes(activity)) {
+		throw new DecodeError('activity');
+	}
+	return {
+		key: reqString(v, 'key'),
+		sessionId: reqString(v, 'sessionId'),
+		activity,
+		mutating: reqBool(v, 'mutating')
+	};
+}
+
+function decodeRuntimeResources(v: unknown): RuntimeResources {
+	if (!isRecord(v)) throw new DecodeError('resources');
+	const out: RuntimeResources = { available: reqBool(v, 'available') };
+	for (const k of ['pssBytes', 'rssBytes', 'processCount'] as const) {
+		const n = optNonNeg(v, k);
+		if (n !== undefined) out[k] = n;
+	}
+	return out;
+}
+
+function decodeRuntimeInfo(v: unknown): RuntimeInfo {
+	if (!isRecord(v)) throw new DecodeError('runtime');
+	const raw = v.sessions;
+	if (!Array.isArray(raw)) throw new DecodeError('sessions');
+	return {
+		runtimeId: reqString(v, 'runtimeId'),
+		harness: reqString(v, 'harness'),
+		shared: reqBool(v, 'shared'),
+		pid: reqNonNeg(v, 'pid'),
+		startedAt: reqString(v, 'startedAt'),
+		uptimeSeconds: reqNonNeg(v, 'uptimeSeconds'),
+		state: reqString(v, 'state'),
+		sessionCount: reqNonNeg(v, 'sessionCount'),
+		activeSessionCount: reqNonNeg(v, 'activeSessionCount'),
+		waitingInputCount: reqNonNeg(v, 'waitingInputCount'),
+		mutationCount: reqNonNeg(v, 'mutationCount'),
+		sessions: raw.map(decodeRuntimeBinding),
+		resources: decodeRuntimeResources(v.resources)
+	};
+}
+
+export function decodeRuntimeList(v: unknown): RuntimeList {
+	if (!isRecord(v)) throw new DecodeError('runtimes');
+	const raw = v.runtimes;
+	if (!Array.isArray(raw)) throw new DecodeError('runtimes');
+	const t = v.totals;
+	if (!isRecord(t)) throw new DecodeError('totals');
+	return {
+		daemon: decodeDaemonInfo(v.daemon),
+		sampledAt: reqString(v, 'sampledAt'),
+		runtimes: raw.map(decodeRuntimeInfo),
+		totals: {
+			runtimeCount: reqNonNeg(t, 'runtimeCount'),
+			sessionCount: reqNonNeg(t, 'sessionCount'),
+			activeSessionCount: reqNonNeg(t, 'activeSessionCount'),
+			waitingInputCount: reqNonNeg(t, 'waitingInputCount'),
+			measuredRuntimeCount: reqNonNeg(t, 'measuredRuntimeCount'),
+			pssBytes: reqNonNeg(t, 'pssBytes'),
+			rssBytes: reqNonNeg(t, 'rssBytes')
+		}
+	};
 }

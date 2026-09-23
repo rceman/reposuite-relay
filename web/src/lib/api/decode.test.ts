@@ -10,6 +10,7 @@ import {
 	decodeProjectList,
 	decodeProjectResponse,
 	decodePromptResponse,
+	decodeRuntimeList,
 	decodeRelayEvent,
 	decodeSessionInfo,
 	decodeSessionList,
@@ -517,4 +518,91 @@ describe('decodeMachineTokenRotate', () => {
 			).toThrow(DecodeError);
 		}
 	);
+});
+
+describe('decodeRuntimeList', () => {
+	const goodRuntime = {
+		runtimeId: 'a1b2c3',
+		harness: 'codex',
+		shared: true,
+		pid: 1234,
+		startedAt: '2026-01-01T00:00:00Z',
+		uptimeSeconds: 42,
+		state: 'warm',
+		sessionCount: 1,
+		activeSessionCount: 1,
+		waitingInputCount: 0,
+		mutationCount: 0,
+		sessions: [
+			{ key: 'api-refactor', sessionId: 's1', activity: 'active', mutating: false }
+		],
+		resources: { available: true, pssBytes: 1000, rssBytes: 2000, processCount: 2 }
+	};
+	const good = {
+		daemon: {
+			instanceId: 'x', pid: 1, apiVersion: 1, uptimeSeconds: 1,
+			sessionCount: 1, activeSessions: 1, coldSessions: 0
+		},
+		sampledAt: '2026-01-01T00:00:00Z',
+		runtimes: [goodRuntime],
+		totals: {
+			runtimeCount: 1, sessionCount: 1, activeSessionCount: 1,
+			waitingInputCount: 0, measuredRuntimeCount: 1,
+			pssBytes: 1000, rssBytes: 2000
+		}
+	};
+
+	it('decodes a full inventory', () => {
+		const out = decodeRuntimeList(good);
+		expect(out.runtimes[0]?.harness).toBe('codex');
+		expect(out.runtimes[0]?.resources.pssBytes).toBe(1000);
+		expect(out.totals.measuredRuntimeCount).toBe(1);
+	});
+
+	it('accepts an empty inventory and unavailable resources', () => {
+		const out = decodeRuntimeList({ ...good, runtimes: [
+			{ ...goodRuntime, pid: 0, resources: { available: false } }
+		] });
+		expect(out.runtimes[0]?.resources.available).toBe(false);
+		expect(out.runtimes[0]?.resources.pssBytes).toBeUndefined();
+	});
+
+	it.each([['runtimes', 'x'], ['totals', []], ['sampledAt', 5]])(
+		'rejects malformed %s',
+		(key, val) => {
+			expect(() => decodeRuntimeList({ ...good, [key]: val })).toThrow(DecodeError);
+		}
+	);
+
+	it.each([['pid', -1], ['sessionCount', 1.5], ['uptimeSeconds', -0.5]])(
+		'rejects invalid %s',
+		(key, val) => {
+			expect(() =>
+				decodeRuntimeList({ ...good, runtimes: [{ ...goodRuntime, [key]: val }] })
+			).toThrow(DecodeError);
+		}
+	);
+
+	it('rejects malformed activity and non-array sessions', () => {
+		expect(() =>
+			decodeRuntimeList({
+				...good,
+				runtimes: [{ ...goodRuntime, sessions: [{ ...goodRuntime.sessions[0], activity: 'bogus' }] }]
+			})
+		).toThrow(DecodeError);
+		expect(() =>
+			decodeRuntimeList({ ...good, runtimes: [{ ...goodRuntime, sessions: 'x' }] })
+		).toThrow(DecodeError);
+	});
+
+	it('rejects negative resource bytes', () => {
+		expect(() =>
+			decodeRuntimeList({
+				...good,
+				runtimes: [
+					{ ...goodRuntime, resources: { available: true, pssBytes: -1, rssBytes: 0, processCount: 1 } }
+				]
+			})
+		).toThrow(DecodeError);
+	});
 });

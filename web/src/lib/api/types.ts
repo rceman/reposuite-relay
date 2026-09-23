@@ -308,3 +308,63 @@ export interface InputAbortedPayload {
 	inputId: string;
 	reason: string;
 }
+
+// --- /v1/runtimes — global live harness-runtime inventory ---------------
+// Observer-only endpoint: reading it never wakes a COLD session or
+// spawns a harness. Activity is Relay-observed state only — it says
+// nothing about external child processes or background work.
+
+/** One RelaySession bound to a runtime generation. */
+export interface RuntimeBinding {
+	key: string;
+	sessionId: string;
+	/** idle | active | waiting_input */
+	activity: string;
+	mutating: boolean;
+}
+
+/** Best-effort process-tree measurement; available=false is not zero. */
+export interface RuntimeResources {
+	available: boolean;
+	pssBytes?: number;
+	rssBytes?: number;
+	processCount?: number;
+}
+
+export interface RuntimeInfo {
+	runtimeId: string;
+	harness: string;
+	shared: boolean;
+	pid: number;
+	startedAt: string;
+	uptimeSeconds: number;
+	state: string;
+	sessionCount: number;
+	activeSessionCount: number;
+	waitingInputCount: number;
+	mutationCount: number;
+	sessions: RuntimeBinding[];
+	resources: RuntimeResources;
+}
+
+/**
+ * measuredRuntimeCount < runtimeCount means pssBytes/rssBytes cover only
+ * measured runtimes — never present the sum as the full inventory.
+ */
+export interface RuntimeTotals {
+	runtimeCount: number;
+	sessionCount: number;
+	activeSessionCount: number;
+	waitingInputCount: number;
+	measuredRuntimeCount: number;
+	pssBytes: number;
+	rssBytes: number;
+}
+
+/** GET /v1/runtimes payload. */
+export interface RuntimeList {
+	daemon: DaemonInfo;
+	sampledAt: string;
+	runtimes: RuntimeInfo[];
+	totals: RuntimeTotals;
+}

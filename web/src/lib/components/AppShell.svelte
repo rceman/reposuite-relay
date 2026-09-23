@@ -3,6 +3,7 @@
 	// daemon connection state, signed-in identity, refresh, sign out.
 	import { page } from '$app/state';
 	import { auth } from '$lib/auth/auth.svelte';
+	import RuntimeFooter from '$lib/components/RuntimeFooter.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
 	import {
@@ -97,4 +98,5 @@
 	<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
 		{@render children()}
 	</main>
+	<RuntimeFooter />
 </div>
