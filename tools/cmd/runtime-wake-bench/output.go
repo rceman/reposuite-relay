@@ -19,15 +19,16 @@ func writeCSV(path string, res Result) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 	if err := w.Write([]string{"scenario", "iteration", "processStartMs", "initializeMs",
-		"attachMs", "totalMs", "pssRootMiB", "pssTreeMiB", "rssRootMiB", "rssTreeMiB",
-		"shutdownMs", "err"}); err != nil {
+		"attachMs", "configureMs", "totalMs", "pssRootMiB", "pssTreeMiB", "rssRootMiB",
+		"rssTreeMiB", "shutdownMs", "err"}); err != nil {
 		return err
 	}
 	for name, samples := range res.Scenarios {
 		for _, s := range samples {
 			if err := w.Write([]string{name, fmt.Sprint(s.Iteration),
 				fmt.Sprintf("%.2f", s.ProcessStart), fmt.Sprintf("%.2f", s.Initialize),
-				fmt.Sprintf("%.2f", s.Attach), fmt.Sprintf("%.2f", s.Total),
+				fmt.Sprintf("%.2f", s.Attach), fmt.Sprintf("%.2f", s.Configure),
+				fmt.Sprintf("%.2f", s.Total),
 				fmt.Sprintf("%.2f", s.PSSRootMiB), fmt.Sprintf("%.2f", s.PSSTreeMiB),
 				fmt.Sprintf("%.2f", s.RSSRootMiB), fmt.Sprintf("%.2f", s.RSSTreeMiB),
 				fmt.Sprintf("%.2f", s.Shutdown), s.Err}); err != nil {
@@ -74,6 +75,7 @@ func printSummary(res Result) {
 			{"processStartMs", fieldsOf(samples, func(s Sample) float64 { return s.ProcessStart })},
 			{"initializeMs", fieldsOf(samples, func(s Sample) float64 { return s.Initialize })},
 			{"attachMs", fieldsOf(samples, func(s Sample) float64 { return s.Attach })},
+			{"configureMs", fieldsOf(samples, func(s Sample) float64 { return s.Configure })},
 			{"totalMs", fieldsOf(samples, func(s Sample) float64 { return s.Total })},
 			{"pssTreeMiB", fieldsOf(samples, func(s Sample) float64 { return s.PSSTreeMiB })},
 			{"rssTreeMiB", fieldsOf(samples, func(s Sample) float64 { return s.RSSTreeMiB })},

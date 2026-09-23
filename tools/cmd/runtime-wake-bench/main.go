@@ -13,12 +13,17 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/rceman/reposuite-relay/internal/harness/acp"
+	"github.com/rceman/reposuite-relay/internal/harness/codex"
 )
 
 type Config struct {
 	codex, devin, yes bool
 	samples, warmups  int
 	csv, jsonOut      string
+	codexResumeFile   string
+	devinLoadFile     string
 }
 
 type Sample struct {
@@ -27,6 +32,7 @@ type Sample struct {
 	ProcessStart float64 `json:"processStartMs"`
 	Initialize   float64 `json:"initializeMs"`
 	Attach       float64 `json:"attachMs"`
+	Configure    float64 `json:"configureMs"`
 	Total        float64 `json:"totalMs"`
 	PSSRootMiB   float64 `json:"pssRootMiB"`
 	PSSTreeMiB   float64 `json:"pssTreeMiB"`
@@ -59,12 +65,16 @@ func main() {
 	flag.BoolVar(&cfg.yes, "yes", false, "non-interactive confirmation")
 	flag.StringVar(&cfg.csv, "csv", "", "write per-sample CSV to path")
 	flag.StringVar(&cfg.jsonOut, "json", "", "write JSON results to path")
+	flag.StringVar(&cfg.codexResumeFile, "codex-resume-file", "",
+		"0600 JSON file {id,cwd} holding a proven Codex thread for exact-resume measurement")
+	flag.StringVar(&cfg.devinLoadFile, "devin-load-file", "",
+		"0600 JSON file {id,cwd} holding a proven Devin slug for exact-load measurement")
 	flag.Parse()
 	if all {
 		cfg.codex, cfg.devin = true, true
 	}
-	if !cfg.codex && !cfg.devin {
-		fmt.Fprintln(os.Stderr, "no provider selected (use --codex/--devin/--all)")
+	if !cfg.codex && !cfg.devin && cfg.codexResumeFile == "" && cfg.devinLoadFile == "" {
+		fmt.Fprintln(os.Stderr, "no provider selected (use --codex/--devin/--all or an identity file)")
 		os.Exit(2)
 	}
 	fmt.Println("REAL PROVIDER PROCESSES WILL BE STARTED")
@@ -114,6 +124,37 @@ func main() {
 			res.Skipped["DEVIN"] = "executable not found"
 		} else {
 			runDevin(&cfg, res.Scenarios, work, res.Skipped)
+		}
+	}
+	// Exact-reattach scenarios need a proven identity supplied by the
+	// caller (created out-of-band by one controlled setup turn).
+	if cfg.codexResumeFile != "" {
+		id, err := readIdentityFile(cfg.codexResumeFile)
+		if err != nil {
+			fatal(err)
+		}
+		cmd, err := codex.DefaultCommand()
+		if err != nil {
+			res.Skipped["CODEX_EXACT_RESUME"] = err.Error()
+		} else {
+			fmt.Printf("codex proven thread fingerprint=%s (raw ID not stored)\n", fingerprintOf(id.ID))
+			runScenario("CODEX_EXACT_RESUME", cfg.warmups, cfg.samples, res.Scenarios,
+				func(int, bool) Sample { return codexIteration(cmd, id.Cwd, id.ID) })
+		}
+	}
+	if cfg.devinLoadFile != "" {
+		id, err := readIdentityFile(cfg.devinLoadFile)
+		if err != nil {
+			fatal(err)
+		}
+		path, err := lookDevin()
+		if err != nil {
+			res.Skipped["DEVIN_EXACT_LOAD"] = err.Error()
+		} else {
+			cmd := acp.Command{Path: path, Args: []string{"acp"}}
+			fmt.Printf("devin proven slug fingerprint=%s (raw ID not stored)\n", fingerprintOf(id.ID))
+			runScenario("DEVIN_EXACT_LOAD", cfg.warmups, cfg.samples, res.Scenarios,
+				func(int, bool) Sample { return devinIteration(cmd, id.Cwd, id.ID) })
 		}
 	}
 	fmt.Printf("load after:  %s\n", loadAvg())

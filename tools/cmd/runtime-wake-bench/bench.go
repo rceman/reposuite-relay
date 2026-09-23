@@ -80,15 +80,21 @@ func codexIteration(cmd codex.Command, cwd, resumeID string) Sample {
 	s.Initialize = ms(t2.Sub(t1))
 	t3 := t2
 	if resumeID != "" {
-		if _, err := srv.ThreadResume(ctx, codex.ThreadResumeParams{
+		rres, err := srv.ThreadResume(ctx, codex.ThreadResumeParams{
 			ThreadID: resumeID, Cwd: cwd,
-		}); err != nil {
+		})
+		if err != nil {
 			s.Err = "thread/resume: " + err.Error()
 			stopAndTime(srv, &s)
 			return s
 		}
 		t3 = time.Now()
 		s.Attach = ms(t3.Sub(t2))
+		if rres.Thread.ID != resumeID {
+			s.Err = "thread/resume returned a different thread identity"
+			stopAndTime(srv, &s)
+			return s
+		}
 	}
 	s.Total = ms(t3.Sub(t0))
 
@@ -177,7 +183,10 @@ func runCodex(cfg *Config, out map[string][]Sample, work string, skipped map[str
 		func(int, bool) Sample { return codexIteration(cmd, cwd, threadID) })
 }
 
-func devinIteration(cmd acp.Command, cwd string) Sample {
+// devinIteration runs one devin acp lifecycle. loadID non-empty adds
+// the exact session/load stage plus Relay's attach-mode configuration
+// (bypass mode) — DEVIN_EXACT_LOAD. session/prompt is never invoked.
+func devinIteration(cmd acp.Command, cwd, loadID string) Sample {
 	var s Sample
 	t0 := time.Now()
 	srv, err := acp.StartServer(cmd, cwd)
@@ -205,25 +214,63 @@ func devinIteration(cmd acp.Command, cwd string) Sample {
 	}
 	t2 := time.Now()
 	s.Initialize = ms(t2.Sub(t1))
-	s.Total = ms(t2.Sub(t0))
+	t3 := t2
+	if loadID != "" {
+		h, err := acp.AttachSession(ctx, srv, cwd, loadID)
+		if err != nil {
+			s.Err = "session/load: " + err.Error()
+			stopAndTimeACP(srv, &s)
+			return s
+		}
+		t4 := time.Now()
+		s.Attach = ms(t4.Sub(t2))
+		// Mirror Relay's attach config: select the advertised bypass
+		// mode when it exists and is not already current.
+		if opt, ok := acp.FindOption(h.Options(), acp.CategoryMode, "mode"); ok {
+			if h.CurrentMode() != "bypass" && optionHas(opt, "bypass") {
+				if _, err := h.SetConfigValue(ctx, opt.ID, "bypass", false); err != nil {
+					s.Err = "set mode: " + err.Error()
+					stopAndTimeACP(srv, &s)
+					return s
+				}
+			}
+		}
+		t3 = time.Now()
+		s.Configure = ms(t3.Sub(t4))
+	}
+	s.Total = ms(t3.Sub(t0))
 
 	time.Sleep(time.Second)
 	mem := sampleTreeMemory(procRoot, srv.PID())
 	s.PSSRootMiB, s.PSSTreeMiB = mib(mem.RootPSSKiB), mib(mem.TreePSSKiB)
 	s.RSSRootMiB, s.RSSTreeMiB = mib(mem.RootRSSKiB), mib(mem.TreeRSSKiB)
 
-	t := time.Now()
-	_ = srv.Stop()
-	if !reapWait(srv.Wait(), 10*time.Second) {
-		s.Err = "teardown did not reap process tree"
-	}
-	s.Shutdown = ms(time.Since(t))
+	stopAndTimeACP(srv, &s)
 	for _, p := range treePIDs(procRoot, srv.PID()) {
 		if alive(p) && s.Err == "" {
 			s.Err = fmt.Sprintf("process %d survived teardown", p)
 		}
 	}
 	return s
+}
+
+func stopAndTimeACP(srv *acp.Server, s *Sample) {
+	t := time.Now()
+	_ = srv.Stop()
+	if !reapWait(srv.Wait(), 10*time.Second) {
+		s.Err = "teardown did not reap process tree"
+	}
+	s.Shutdown = ms(time.Since(t))
+}
+
+// optionHas reports whether an advertised config option offers value v.
+func optionHas(opt acp.ConfigOption, v string) bool {
+	for _, o := range opt.SelectOptions() {
+		if o.Value == v {
+			return true
+		}
+	}
+	return false
 }
 
 func runDevin(cfg *Config, out map[string][]Sample, work string, skipped map[string]string) {
@@ -236,7 +283,7 @@ func runDevin(cfg *Config, out map[string][]Sample, work string, skipped map[str
 	_ = os.MkdirAll(cwd, 0o700)
 	cmd := acp.Command{Path: path, Args: []string{"acp"}}
 	runScenario("DEVIN_INIT", cfg.warmups, cfg.samples, out,
-		func(int, bool) Sample { return devinIteration(cmd, cwd) })
+		func(int, bool) Sample { return devinIteration(cmd, cwd, "") })
 	skipped["DEVIN_SESSION_LOAD"] = "NOT_MEASURED_ZERO_MODEL_CONSTRAINT"
 	skipped["DEVIN_SESSION_NEW_ONE_OFF"] = "skipped: uncertain one-off semantics; primary metric is process+initialize"
 }

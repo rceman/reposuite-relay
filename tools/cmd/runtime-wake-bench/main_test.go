@@ -147,3 +147,37 @@ func TestFingerprintSanitization(t *testing.T) {
 		t.Fatal("fingerprint must be deterministic")
 	}
 }
+
+func TestIdentityFileSecurity(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "id.json")
+	if err := os.WriteFile(good, []byte(`{"id":"native-x","cwd":"/tmp/w"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := readIdentityFile(good)
+	if err != nil || id.ID != "native-x" || id.Cwd != "/tmp/w" {
+		t.Fatalf("read: %v %+v", err, id)
+	}
+	// Group/world-readable file must be refused.
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"id":"x","cwd":"/tmp"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readIdentityFile(bad); err == nil {
+		t.Fatal("0644 identity file must be refused")
+	}
+	// Missing fields must be refused.
+	for body, name := range map[string]string{
+		`{"id":"","cwd":"/tmp"}`: "empty id",
+		`{"id":"x"}`:             "empty cwd",
+		`not json`:               "malformed",
+	} {
+		p := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readIdentityFile(p); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+	}
+}
