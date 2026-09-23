@@ -60,8 +60,6 @@
 	// The revealed machine token lives only here — component memory,
 	// cleared on dismiss, navigation (onDestroy), and logout.
 	const tokenPanel = new MachineTokenPanel(api);
-	let showToken = $state(false);
-	let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
 
 	// One form serves create and edit: when editingId is set the submit
 	// PATCHes only the fields that changed; otherwise it POSTs.
@@ -82,29 +80,22 @@
 			void ctl.load();
 			void tokenPanel.status();
 		} else {
-			// Unauthenticated — drop any revealed credential immediately.
-			tokenPanel.clear();
+			// Unauthenticated — drop the entire reveal state.
+			tokenPanel.clearReveal();
 		}
 	});
 	// Navigation away destroys the component — clear secret state.
-	onDestroy(() => tokenPanel.clear());
+	onDestroy(() => tokenPanel.clearReveal());
 
-	async function copyToken() {
-		const tok = tokenPanel.token;
-		if (tok === null) return;
-		try {
-			await navigator.clipboard.writeText(tok);
-			copyState = 'copied';
-		} catch {
-			// Clipboard denied — the token stays available for manual copy.
-			copyState = 'failed';
-		}
-	}
-
-	function dismissToken() {
-		tokenPanel.clear();
-		copyState = 'idle';
-		showToken = false;
+	/**
+	 * rotateToken is the page's single rotation entry point: the panel
+	 * discards ALL previous reveal state (token, durability flag, mask,
+	 * copy feedback) BEFORE issuing the request — a stale credential
+	 * can never remain displayed through an ambiguous second rotation.
+	 * One click → exactly one API call, never retried.
+	 */
+	async function rotateToken() {
+		await tokenPanel.rotate();
 	}
 
 	function startEdit(p: ProjectInfo) {
@@ -335,7 +326,7 @@
 						<AlertDialogFooter>
 							<AlertDialogCancel>Cancel</AlertDialogCancel>
 							<AlertDialogAction
-								onclick={() => void tokenPanel.rotate()}
+								onclick={() => void rotateToken()}
 								disabled={tokenPanel.busy}
 							>
 								{tokenPanel.busy ? 'Rotating…' : 'Rotate token'}
@@ -375,32 +366,43 @@
 						<Input
 							id="machine-token-value"
 							class="font-mono text-xs"
-							type={showToken ? 'text' : 'password'}
+							type={tokenPanel.shown ? 'text' : 'password'}
 							value={tokenPanel.token}
 							readonly
 						/>
 						<Button
 							variant="outline"
 							size="icon-sm"
-							title={showToken ? 'Hide token' : 'Show token'}
-							onclick={() => (showToken = !showToken)}
+							title={tokenPanel.shown ? 'Hide token' : 'Show token'}
+							onclick={() => (tokenPanel.shown = !tokenPanel.shown)}
 						>
-							{#if showToken}
+							{#if tokenPanel.shown}
 								<IconEyeOff size={14} stroke={1.75} aria-hidden="true" />
 							{:else}
 								<IconEye size={14} stroke={1.75} aria-hidden="true" />
 							{/if}
 						</Button>
-						<Button variant="outline" size="icon-sm" title="Copy token" onclick={copyToken}>
-							{#if copyState === 'copied'}
+						<Button
+							variant="outline"
+							size="icon-sm"
+							title="Copy token"
+							onclick={() => void tokenPanel.copyToken()}
+						>
+							{#if tokenPanel.copyState === 'copied'}
 								<IconCheck size={14} stroke={1.75} aria-hidden="true" />
 							{:else}
 								<IconCopy size={14} stroke={1.75} aria-hidden="true" />
 							{/if}
 						</Button>
-						<Button variant="ghost" size="sm" onclick={dismissToken}>Dismiss</Button>
+						<Button
+							variant="ghost"
+							size="sm"
+							onclick={() => tokenPanel.clearReveal()}
+						>
+							Dismiss
+						</Button>
 					</div>
-					{#if copyState === 'failed'}
+					{#if tokenPanel.copyState === 'failed'}
 						<p class="mt-2 text-xs text-destructive" role="alert">
 							Copy failed — select and copy the token manually.
 						</p>

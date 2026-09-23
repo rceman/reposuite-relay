@@ -132,12 +132,82 @@ describe('MachineTokenPanel', () => {
 		expect(calls).toBe(1);
 	});
 
-	it('dismiss clears the credential', async () => {
+	it('dismiss clears the complete reveal state', async () => {
 		const { reads: r } = reads();
 		const p = new MachineTokenPanel(r);
 		await p.rotate();
-		p.clear(); // dismiss / navigation / logout path
+		p.shown = true;
+		p.copyState = 'copied';
+		p.clearReveal(); // dismiss / navigation / logout path
 		expect(p.token).toBeNull();
 		expect(p.durabilityConfirmed).toBe(true);
+		expect(p.shown).toBe(false);
+		expect(p.copyState).toBe('idle');
+	});
+
+	it('a second rotation clears the previous token BEFORE settling', async () => {
+		const A = 'a'.repeat(64);
+		let resolveB!: (v: MachineTokenRotateResponse) => void;
+		const gate = new Promise<MachineTokenRotateResponse>((res) => {
+			resolveB = res;
+		});
+		let calls = 0;
+		const { reads: r } = reads({
+			rotate: async () => {
+				calls++;
+				if (calls === 1) {
+					return { daemon: daemon(), token: A, durabilityConfirmed: true };
+				}
+				return gate;
+			}
+		});
+		const p = new MachineTokenPanel(r);
+		await p.rotate();
+		expect(p.token).toBe(A);
+		p.shown = true;
+		p.copyState = 'copied';
+
+		const pending = p.rotate(); // second rotation in flight
+		// The prior credential and ALL reveal state are already gone —
+		// before the ambiguous second request resolves.
+		expect(p.token).toBeNull();
+		expect(p.shown).toBe(false);
+		expect(p.copyState).toBe('idle');
+		resolveB({ daemon: daemon(), token: 'b'.repeat(64), durabilityConfirmed: true });
+		expect(await pending).toBe(true);
+		expect(p.token).toBe('b'.repeat(64));
+		expect(p.shown).toBe(false); // fresh credential arrives masked
+		expect(p.copyState).toBe('idle');
+	});
+
+	it('ambiguous second rotation leaves no stale credential', async () => {
+		const A = 'a'.repeat(64);
+		let calls = 0;
+		const { reads: r } = reads({
+			rotate: async () => {
+				calls++;
+				if (calls === 1) {
+					return { daemon: daemon(), token: A, durabilityConfirmed: true };
+				}
+				throw new Error('network down'); // transport ambiguity
+			}
+		});
+		const p = new MachineTokenPanel(r);
+		await p.rotate();
+		expect(p.token).toBe(A);
+		expect(await p.rotate()).toBe(false);
+		expect(p.token).toBeNull(); // never the superseded token
+		expect(p.error).toContain('unknown');
+		expect(calls).toBe(2); // one explicit action each, no retry
+	});
+
+	it('clipboard copy is explicit and failure keeps the token', async () => {
+		const { reads: r } = reads();
+		const p = new MachineTokenPanel(r);
+		await p.rotate();
+		// Node test env has no clipboard — failure path.
+		await p.copyToken();
+		expect(p.copyState).toBe('failed');
+		expect(p.token).toBe(TOK);
 	});
 });
