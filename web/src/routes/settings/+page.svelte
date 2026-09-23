@@ -1,14 +1,16 @@
 <script lang="ts">
 	// Settings → Projects: CRUD for the Relay-local presentation catalog.
-	// Project membership is derived from session cwd — editing a root or
-	// deleting a project re-groups sessions on the next read and never
-	// touches a RelaySession. No browser persistence: presentation.json
-	// on the daemon is the only authority.
+	// The server is the only authority — after EVERY mutation settle
+	// (success OR error) the canonical catalog and session projection are
+	// reloaded, because a post-commit 500 is not a rollback. Mutation and
+	// load errors are separate channels. The root field is sent exactly
+	// as typed: whitespace is part of a filesystem path.
 	import AuthGate from '$lib/components/AuthGate.svelte';
 	import { api } from '$lib/api/client';
-	import { RelayError } from '$lib/api/errors';
-	import type { ProjectInfo, SessionInfo } from '$lib/api/types';
+	import type { ProjectInfo } from '$lib/api/types';
 	import { sessionCountByProject } from '$lib/projects/group';
+	import { buildCreateBody, buildPatchBody, rootLooksAbsolute } from '$lib/projects/form';
+	import { ProjectsSettings } from '$lib/projects/settings.svelte';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -42,9 +44,7 @@
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
 	import { IconAlertTriangle, IconPencil, IconPlus, IconTrash } from '@tabler/icons-svelte';
 
-	let projects = $state<ProjectInfo[]>([]);
-	let sessions = $state<SessionInfo[]>([]);
-	let loadError = $state<string | null>(null);
+	const ctl = new ProjectsSettings(api);
 
 	// One form serves create and edit: when editingId is set the submit
 	// PATCHes only the fields that changed; otherwise it POSTs.
@@ -52,94 +52,72 @@
 	let name = $state('');
 	let root = $state('');
 	let busy = $state(false);
-	let formError = $state<string | null>(null);
-	let deleting = $state(false);
 
-	const counts = $derived(sessionCountByProject(sessions));
+	const counts = $derived(sessionCountByProject(ctl.sessions));
 	const nameOk = $derived(name.trim() !== '');
-	const rootOk = $derived(root.trim().startsWith('/'));
-	const editing = $derived(projects.find((p) => p.id === editingId));
-
-	async function load() {
-		try {
-			const [pl, sl] = await Promise.all([api.listProjects(), api.listSessions()]);
-			projects = pl.projects;
-			sessions = sl.sessions;
-			loadError = null;
-		} catch (err) {
-			loadError = err instanceof RelayError ? err.message : 'Failed to load settings';
-		}
-	}
+	// Exact input: a leading space makes this false rather than being
+	// silently trimmed into a different path.
+	const rootOk = $derived(rootLooksAbsolute(root));
+	const editing = $derived(ctl.projects.find((p) => p.id === editingId));
 
 	$effect(() => {
-		if (auth.authenticated) void load();
+		if (auth.authenticated) void ctl.load();
 	});
 
 	function startEdit(p: ProjectInfo) {
 		editingId = p.id;
 		name = p.name;
 		root = p.root;
-		formError = null;
+		ctl.mutationError = null;
 	}
 
 	function resetForm() {
 		editingId = null;
 		name = '';
 		root = '';
-		formError = null;
 	}
 
 	async function submit() {
 		if (busy || !nameOk || !rootOk) return;
 		busy = true;
-		formError = null;
 		try {
-			if (editingId === null) {
-				await api.createProject({ name: name.trim(), root: root.trim() });
-			} else {
-				// PATCH only the fields that changed — never an empty patch.
-				const prev = editing;
-				const body: { name?: string; root?: string } = {};
-				if (prev && name.trim() !== prev.name) body.name = name.trim();
-				if (prev && root.trim() !== prev.root) body.root = root.trim();
-				if (body.name !== undefined || body.root !== undefined) {
-					await api.patchProject(editingId, body);
+			const ok = await ctl.mutate(async () => {
+				if (editingId === null) {
+					// Root verbatim — whitespace is part of the path.
+					await api.createProject(buildCreateBody(name, root));
+				} else if (editing) {
+					const body = buildPatchBody(editing, name, root);
+					if (body !== null) await api.patchProject(editingId, body);
 				}
-			}
-			resetForm();
-			await load();
-		} catch (err) {
-			// Failed mutations never invent committed authority — the list
-			// only reflects a fresh server load.
-			formError = err instanceof RelayError ? err.message : 'Save failed';
+			});
+			// Only a clean success resets the form; a failed (possibly
+			// post-commit) mutation keeps the entered values and the error
+			// while the reconciled canonical list already reflects reality.
+			if (ok) resetForm();
 		} finally {
 			busy = false;
 		}
 	}
 
 	async function removeProject(id: string) {
-		if (deleting) return;
-		deleting = true;
-		loadError = null;
+		if (busy) return;
+		busy = true;
 		try {
-			await api.deleteProject(id);
-			await load();
-		} catch (err) {
-			loadError = err instanceof RelayError ? err.message : 'Delete failed';
+			await ctl.mutate(() => api.deleteProject(id));
 		} finally {
-			deleting = false;
+			busy = false;
 		}
 	}
 </script>
 
-<AuthGate onrefresh={load}>
+<AuthGate onrefresh={() => ctl.load()}>
 	<h1 class="mb-4 text-lg font-semibold">Settings</h1>
 
-	{#if loadError}
+	{#if ctl.loadError}
 		<Alert variant="destructive" class="mb-4">
 			<IconAlertTriangle size={16} aria-hidden="true" />
-			<AlertTitle>Settings</AlertTitle>
-			<AlertDescription>{loadError}</AlertDescription>
+			<AlertTitle>Load failed</AlertTitle>
+			<AlertDescription>{ctl.loadError}</AlertDescription>
 		</Alert>
 	{/if}
 
@@ -193,8 +171,8 @@
 					{/if}
 				</div>
 			</form>
-			{#if formError}
-				<p class="mt-2 text-xs text-destructive" role="alert">{formError}</p>
+			{#if ctl.mutationError}
+				<p class="mt-2 text-xs text-destructive" role="alert">{ctl.mutationError}</p>
 			{/if}
 		</CardContent>
 	</Card>
@@ -212,7 +190,7 @@
 					</TableRow>
 				</TableHeader>
 				<TableBody>
-					{#each projects as p (p.id)}
+					{#each ctl.projects as p (p.id)}
 						<TableRow>
 							<TableCell class="max-w-40 truncate font-medium" title={p.name}
 								>{p.name}</TableCell
@@ -251,9 +229,9 @@
 												<AlertDialogCancel>Cancel</AlertDialogCancel>
 												<AlertDialogAction
 													onclick={() => removeProject(p.id)}
-													disabled={deleting}
+													disabled={busy}
 												>
-													{deleting ? 'Deleting…' : 'Delete project'}
+													{busy ? 'Deleting…' : 'Delete project'}
 												</AlertDialogAction>
 											</AlertDialogFooter>
 										</AlertDialogContent>

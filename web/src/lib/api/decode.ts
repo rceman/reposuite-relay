@@ -148,15 +148,15 @@ export function decodeSessionInfo(v: unknown): SessionInfo {
 		const s = optString(v, k);
 		if (s !== undefined) out[k] = s;
 	}
-	// The derived project projection is a pair: both non-empty strings or
-	// both absent — a one-sided projection is malformed.
+	// The derived project projection is a pair: both valid or both
+	// absent — a one-sided or malformed projection is DecodeError.
 	const projectId = optString(v, 'projectId');
 	const projectName = optString(v, 'projectName');
 	if ((projectId === undefined) !== (projectName === undefined)) {
 		throw new DecodeError('projectId/projectName');
 	}
 	if (projectId !== undefined && projectName !== undefined) {
-		if (projectId === '' || projectName === '') {
+		if (!isProjectId(projectId) || !isProjectName(projectName)) {
 			throw new DecodeError('projectId/projectName');
 		}
 		out.projectId = projectId;
@@ -164,6 +164,40 @@ export function decodeSessionInfo(v: unknown): SessionInfo {
 	}
 	if (v.metrics !== undefined) out.metrics = decodeMetrics(v.metrics);
 	return out;
+}
+
+// --- project wire contract -------------------------------------------------
+// The decoder validates the canonical syntax only — it never mints,
+// repairs, or normalizes malformed server output.
+
+/** Canonical project ID: prj_ + 32 lowercase hex chars. */
+const PROJECT_ID_RE = /^prj_[0-9a-f]{32}$/;
+
+export function isProjectId(s: string): boolean {
+	return PROJECT_ID_RE.test(s);
+}
+
+/** Unicode control characters (Cc) — mirrors Go's unicode.IsControl. */
+const CONTROL_RE = /\p{Cc}/u;
+
+/**
+ * Canonical project name: already whitespace-normalized, 1..128 UTF-8
+ * bytes, no control characters. A name that needs normalization (e.g.
+ * surrounding whitespace) is malformed server output — never repaired.
+ */
+export function isProjectName(s: string): boolean {
+	if (s === '' || s !== s.trim()) return false;
+	if (new TextEncoder().encode(s).length > 128) return false;
+	return !CONTROL_RE.test(s);
+}
+
+/**
+ * Canonical project root: non-empty absolute path. The browser does NOT
+ * reimplement filepath.Clean — it only rejects clearly impossible wire
+ * data; the backend owns canonicalization.
+ */
+export function isProjectRoot(s: string): boolean {
+	return s !== '' && s.startsWith('/');
 }
 
 export function decodeSessionList(v: unknown): SessionList {
@@ -200,11 +234,13 @@ export function decodeDaemonResponse(v: unknown): DaemonResponse {
 
 export function decodeProjectInfo(v: unknown): ProjectInfo {
 	if (!isRecord(v)) throw new DecodeError('project');
-	return {
-		id: reqString(v, 'id'),
-		name: reqString(v, 'name'),
-		root: reqString(v, 'root')
-	};
+	const id = reqString(v, 'id');
+	const name = reqString(v, 'name');
+	const root = reqString(v, 'root');
+	if (!isProjectId(id)) throw new DecodeError('project.id');
+	if (!isProjectName(name)) throw new DecodeError('project.name');
+	if (!isProjectRoot(root)) throw new DecodeError('project.root');
+	return { id, name, root };
 }
 
 export function decodeProjectList(v: unknown): ProjectList {

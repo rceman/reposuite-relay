@@ -141,3 +141,18 @@ func TestCatalogTooManyProjects(t *testing.T) {
 		t.Fatal("catalog over the project bound accepted")
 	}
 }
+
+func TestValidateNameUnicodeControls(t *testing.T) {
+	// unicode.IsControl is the contract: C0, DEL, AND C1 (NEL U+0085).
+	for _, bad := range []string{"a\nb", "a\u007fb", "a\u0085b", "a\u0000b"} {
+		if _, err := ValidateName(bad); err == nil {
+			t.Fatalf("name %q accepted — control characters are rejected", bad)
+		}
+	}
+	// Ordinary non-ASCII letters/symbols are legal display names.
+	for _, good := range []string{"Réunion", "プロジェクト", "Ω system", "münchen"} {
+		if _, err := ValidateName(good); err != nil {
+			t.Fatalf("name %q rejected: %v — non-ASCII text is legal", good, err)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -65,7 +66,10 @@ func ValidateName(name string) (string, error) {
 		return "", errors.New("project name is not valid UTF-8")
 	}
 	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
+		// unicode.IsControl covers C0, DEL, AND the C1 range (U+0080–9F
+		// incl. NEL U+0085) — the documented "no control characters"
+		// contract, not just ASCII. Ordinary non-ASCII text stays legal.
+		if unicode.IsControl(r) {
 			return "", errors.New("project name contains control characters")
 		}
 	}

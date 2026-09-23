@@ -26,11 +26,14 @@ Schema v1:
 - **Identity** — `prj_` + 128 bits of `crypto/rand`, server-generated.
   Never derived from name, path, or foreign IDs; renames and root edits
   preserve it.
-- **Name** — 1..128 UTF-8 bytes after whitespace normalization; no NUL
-  or control characters.
+- **Name** — 1..128 UTF-8 bytes after whitespace normalization; no
+  Unicode control characters (`unicode.IsControl` — C0, DEL, and C1
+  including NEL U+0085). Ordinary non-ASCII text is legal.
 - **Root** — a required absolute path in `filepath.Clean` canonical
-  form. The path is never stat'ed, created, or inspected — an offline
-  or unmounted project directory is legitimate.
+  form. It is a filesystem path, NOT display text: whitespace is part
+  of the path and is never trimmed ("/work/x" and "/work/x " are
+  distinct legal roots). The path is never stat'ed, created, or
+  inspected — an offline or unmounted project directory is legitimate.
 - **Bounds** — at most 256 projects; the file is bounded at 256 KiB.
 
 ## Load and commit semantics
@@ -49,6 +52,14 @@ Schema v1:
   memory; a post-commit failure (directory fsync) surfaces as
   `*PostCommitError` and memory converges to the committed catalog —
   never disk-new/memory-old.
+- **API consequence:** a mutation that returns `500 INTERNAL` may be a
+  post-commit failure — the catalog may already contain the change.
+  Clients must reconcile with canonical `GET /v1/projects` +
+  `GET /v1/sessions` after every mutation settles, success OR error,
+  and must never infer rollback from a rejected promise or infer
+  authority from error text. The Web Admin keeps the mutation error
+  visible (a separate channel from load errors) while the reconciled
+  canonical state replaces the stale view.
 - Canonical output order is `name`, `root`, `id` — deterministic.
 
 ## Matching
@@ -97,7 +108,11 @@ surface — no API version bump.
 - **Settings → Projects** (`/settings`, `IconSettings` in AppShell):
   list with name / root / matching-session count, inline create-edit
   form (PATCH sends changed fields only), deliberate AlertDialog delete
-  explaining sessions are untouched.
+  explaining sessions are untouched. Root input is sent verbatim —
+  the UX check is only `root.startsWith('/')` — and decoders enforce
+  the canonical wire contract (`prj_<32 lowercase hex>` ID, normalized
+  1..128-byte control-free name, non-empty absolute root, and the
+  `projectId`/`projectName` pair invariant on `SessionInfo`).
 - **Sessions** (`/sessions`) groups rows by the projected `projectId`:
   project sections in canonical catalog order (empty sections omitted
   here), sessions stable-sorted by key, Ungrouped last.

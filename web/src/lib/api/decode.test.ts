@@ -4,6 +4,7 @@ import {
 	decodeAuthSession,
 	decodeCancelResponse,
 	decodeInputResponse,
+	decodeProjectInfo,
 	decodeProjectList,
 	decodeProjectResponse,
 	decodePromptResponse,
@@ -300,7 +301,7 @@ describe('decodeTranscriptPage / decodeRelayEvent — safe-integer cursors', () 
 	});
 });
 
-describe('project decoders', () => {
+describe('project decoders — strict wire contract', () => {
 	const daemon = {
 		instanceId: 'i',
 		pid: 1,
@@ -318,15 +319,54 @@ describe('project decoders', () => {
 		expect(decodeProjectList({ daemon, projects: null }).projects).toEqual([]);
 	});
 
-	it('rejects a malformed project entry', () => {
-		expect(() =>
-			decodeProjectList({ daemon, projects: [{ id: 1, name: 'x', root: '/r' }] })
-		).toThrow(DecodeError);
-	});
-
 	it('decodes a project response', () => {
 		const out = decodeProjectResponse({ daemon, project });
 		expect(out.project.id).toBe(project.id);
+	});
+
+	it.each([
+		['', 'empty id'],
+		['prj_x', 'short suffix'],
+		['project-1', 'wrong prefix'],
+		['prj_' + 'A'.repeat(32), 'uppercase hex'],
+		['prj_' + 'a'.repeat(31), '31 hex'],
+		['prj_' + 'a'.repeat(33), '33 hex'],
+		['prj_' + 'g'.repeat(32), 'non-hex']
+	])('rejects malformed id %j (%s)', (id) => {
+		expect(() =>
+			decodeProjectInfo({ ...project, id })
+		).toThrow(DecodeError);
+	});
+
+	it.each([
+		['', 'empty'],
+		['   ', 'whitespace only'],
+		[' Relay', 'non-normalized leading space'],
+		['Relay ', 'non-normalized trailing space'],
+		['Rel\nay', 'control char'],
+		['Rel\u0085ay', 'NEL control char'],
+		['x'.repeat(129), 'over 128 bytes']
+	])('rejects malformed name %j (%s)', (name) => {
+		expect(() => decodeProjectInfo({ ...project, name })).toThrow(DecodeError);
+	});
+
+	it('accepts ordinary non-ASCII names', () => {
+		const out = decodeProjectInfo({ ...project, name: 'プロジェクト Ω' });
+		expect(out.name).toBe('プロジェクト Ω');
+	});
+
+	it.each(['', 'relative/path', 42, null])(
+		'rejects malformed root %j',
+		(root) => {
+			expect(() =>
+				decodeProjectInfo({ ...project, root: root as unknown as string })
+			).toThrow(DecodeError);
+		}
+	);
+
+	it('accepts a root with a trailing space — it is a real path', () => {
+		const out = decodeProjectInfo({ ...project, root: '/work/relay ' });
+		expect(out.root).toBe('/work/relay ');
 	});
 });
 
@@ -345,6 +385,7 @@ describe('sessionInfo project projection pair', () => {
 		createdAt: '2026-01-01T00:00:00Z',
 		generationStartedAt: ''
 	};
+	const goodId = 'prj_' + 'b'.repeat(32);
 
 	it('accepts the pair absent', () => {
 		const out = decodeSessionInfo(session);
@@ -352,20 +393,29 @@ describe('sessionInfo project projection pair', () => {
 		expect(out.projectName).toBeUndefined();
 	});
 
-	it('accepts the pair present', () => {
-		const out = decodeSessionInfo({ ...session, projectId: 'prj_x', projectName: 'P' });
-		expect(out.projectId).toBe('prj_x');
+	it('accepts a canonical pair', () => {
+		const out = decodeSessionInfo({ ...session, projectId: goodId, projectName: 'P' });
+		expect(out.projectId).toBe(goodId);
 		expect(out.projectName).toBe('P');
 	});
 
 	it('rejects a one-sided projection', () => {
-		expect(() => decodeSessionInfo({ ...session, projectId: 'prj_x' })).toThrow(DecodeError);
+		expect(() => decodeSessionInfo({ ...session, projectId: goodId })).toThrow(DecodeError);
 		expect(() => decodeSessionInfo({ ...session, projectName: 'P' })).toThrow(DecodeError);
 	});
 
-	it('rejects an empty member of the pair', () => {
+	it('rejects a malformed project ID on the pair', () => {
+		expect(() => decodeSessionInfo({ ...session, projectId: 'prj_x', projectName: 'P' })).toThrow(
+			DecodeError
+		);
+	});
+
+	it('rejects an empty or control-char project name', () => {
 		expect(() =>
-			decodeSessionInfo({ ...session, projectId: '', projectName: 'P' })
+			decodeSessionInfo({ ...session, projectId: goodId, projectName: '' })
+		).toThrow(DecodeError);
+		expect(() =>
+			decodeSessionInfo({ ...session, projectId: goodId, projectName: 'a\tb' })
 		).toThrow(DecodeError);
 	});
 });

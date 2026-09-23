@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -189,4 +190,66 @@ func decodeSessions(t *testing.T, resp *http.Response) api.SessionList {
 		t.Fatalf("decode session list: %v", err)
 	}
 	return out
+}
+
+// TestProjectPostCommitHTTP: locks the actual API semantic the Web UI
+// must accommodate — a mutation whose rename committed but whose
+// directory fsync failed returns 500 INTERNAL while the canonical
+// catalog already contains the change. A rejected mutation is NOT a
+// rollback.
+func TestProjectPostCommitHTTP(t *testing.T) {
+	injected := errors.New("injected dirsync failure")
+	p := testPaths(t)
+	d, err := Start(p, Options{
+		SelfExe:  testBinary(),
+		AdminKDF: adminauth.TestParams,
+		PresentationHooks: &presentation.Hooks{
+			SyncDir: func(dir string) error { return injected },
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDaemon(t, d)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	endpoint := d.endpoint()
+	setupAdmin(t, d, c, "admin", "correct-horse-12")
+	csrf := webCSRF(t, d, c)
+
+	// Create: rename commits, dirsync fails → 500 INTERNAL, but the
+	// project IS in the canonical catalog.
+	resp := cookieJSON(t, c, http.MethodPost, endpoint, "/v1/projects",
+		csrf, `{"name":"Committed","root":"/work/committed"}`)
+	env := decodeErrBody(t, resp)
+	if resp.StatusCode != http.StatusInternalServerError || env.Error.Code != api.ErrInternal {
+		t.Fatalf("post-commit create: %d %v", resp.StatusCode, env.Error)
+	}
+	resp = cookieJSON(t, c, http.MethodGet, endpoint, "/v1/projects", "", "")
+	list := decodeProjects(t, resp)
+	if len(list.Projects) != 1 || list.Projects[0].Name != "Committed" {
+		t.Fatalf("committed catalog after 500 = %+v — the mutation DID commit", list.Projects)
+	}
+	// Delete the committed project: same post-commit semantics —
+	// 500 INTERNAL, and the catalog visibly no longer contains it.
+	resp = cookieJSON(t, c, http.MethodDelete, endpoint,
+		"/v1/projects/"+list.Projects[0].ID, csrf, "")
+	env = decodeErrBody(t, resp)
+	if resp.StatusCode != http.StatusInternalServerError || env.Error.Code != api.ErrInternal {
+		t.Fatalf("post-commit delete: %d %v", resp.StatusCode, env.Error)
+	}
+	resp = cookieJSON(t, c, http.MethodGet, endpoint, "/v1/projects", "", "")
+	list = decodeProjects(t, resp)
+	if len(list.Projects) != 0 {
+		t.Fatalf("catalog after post-commit delete = %+v, want empty", list.Projects)
+	}
 }
