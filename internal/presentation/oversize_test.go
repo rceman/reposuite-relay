@@ -28,15 +28,21 @@ func TestCommitOversizeBound(t *testing.T) {
 		}
 		return len(raw) + 1 // trailing newline is part of the durable file
 	}
-	probe := Catalog{SchemaVersion: SchemaVersion, Projects: []Project{{
-		ID: id, Name: "p", Root: "/w/",
-	}}}
+	probe := Catalog{
+		SchemaVersion: SchemaVersion,
+		Projects: []Project{{
+			ID: id, Name: "p", Root: "/w/",
+		}},
+	}
 	overhead := size(probe) - len("/w/")
 
 	// Land the canonical file just under MaxFile — assert real bytes.
-	fit := Catalog{SchemaVersion: SchemaVersion, Projects: []Project{{
-		ID: id, Name: "p", Root: "/w/" + strings.Repeat("x", MaxFile-overhead-200),
-	}}}
+	fit := Catalog{
+		SchemaVersion: SchemaVersion,
+		Projects: []Project{{
+			ID: id, Name: "p", Root: "/w/" + strings.Repeat("x", MaxFile-overhead-200),
+		}},
+	}
 	under := size(fit)
 	if under > MaxFile || under < MaxFile-1024 {
 		t.Fatalf("fixture miscalibrated: %d", under)

@@ -38,3 +38,27 @@ type ProjectResponse struct {
 	Daemon  DaemonInfo  `json:"daemon"`
 	Project ProjectInfo `json:"project"`
 }
+
+// --- machine-token management ----------------------------------------
+// Admin-only Settings surface. The status response carries metadata
+// only — the persistent machine token is never readable through any
+// ordinary API. The rotate response is the single channel that returns
+// a credential, and only the freshly generated one.
+
+// MachineTokenStatus is GET /v1/settings/machine-token — configured
+// presence only, no secret material, no file paths.
+type MachineTokenStatus struct {
+	Daemon     DaemonInfo `json:"daemon"`
+	Configured bool       `json:"configured"`
+}
+
+// MachineTokenRotateResponse is POST
+// /v1/settings/machine-token/rotate. Token is the newly committed
+// 64-hex credential. DurabilityConfirmed is false when the rename
+// committed but the directory fsync failed — the credential IS active;
+// only its durability is unconfirmed.
+type MachineTokenRotateResponse struct {
+	Daemon              DaemonInfo `json:"daemon"`
+	Token               string     `json:"token"`
+	DurabilityConfirmed bool       `json:"durabilityConfirmed"`
+}

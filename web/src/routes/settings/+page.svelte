@@ -42,9 +42,26 @@
 		AlertDialogTrigger
 	} from '$lib/components/ui/alert-dialog';
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
-	import { IconAlertTriangle, IconPencil, IconPlus, IconTrash } from '@tabler/icons-svelte';
+	import { MachineTokenPanel } from '$lib/settings/machine.svelte';
+	import { onDestroy } from 'svelte';
+	import {
+		IconAlertTriangle,
+		IconCheck,
+		IconCopy,
+		IconEye,
+		IconEyeOff,
+		IconKey,
+		IconPencil,
+		IconPlus,
+		IconTrash
+	} from '@tabler/icons-svelte';
 
 	const ctl = new ProjectsSettings(api);
+	// The revealed machine token lives only here — component memory,
+	// cleared on dismiss, navigation (onDestroy), and logout.
+	const tokenPanel = new MachineTokenPanel(api);
+	let showToken = $state(false);
+	let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
 
 	// One form serves create and edit: when editingId is set the submit
 	// PATCHes only the fields that changed; otherwise it POSTs.
@@ -61,8 +78,34 @@
 	const editing = $derived(ctl.projects.find((p) => p.id === editingId));
 
 	$effect(() => {
-		if (auth.authenticated) void ctl.load();
+		if (auth.authenticated) {
+			void ctl.load();
+			void tokenPanel.status();
+		} else {
+			// Unauthenticated — drop any revealed credential immediately.
+			tokenPanel.clear();
+		}
 	});
+	// Navigation away destroys the component — clear secret state.
+	onDestroy(() => tokenPanel.clear());
+
+	async function copyToken() {
+		const tok = tokenPanel.token;
+		if (tok === null) return;
+		try {
+			await navigator.clipboard.writeText(tok);
+			copyState = 'copied';
+		} catch {
+			// Clipboard denied — the token stays available for manual copy.
+			copyState = 'failed';
+		}
+	}
+
+	function dismissToken() {
+		tokenPanel.clear();
+		copyState = 'idle';
+		showToken = false;
+	}
 
 	function startEdit(p: ProjectInfo) {
 		editingId = p.id;
@@ -248,6 +291,122 @@
 					{/each}
 				</TableBody>
 			</Table>
+		</CardContent>
+	</Card>
+
+	<Card class="mt-6">
+		<CardHeader>
+			<CardTitle class="text-sm">Machine API access</CardTitle>
+			<CardDescription>
+				The machine token authenticates trusted machine integrations against the
+				/v1 API. Rotating invalidates the old token immediately for new requests —
+				browser and descriptor credentials are unaffected. The current token
+				cannot be revealed; rotate to obtain a new value.
+			</CardDescription>
+		</CardHeader>
+		<CardContent>
+			<div class="flex items-center gap-3">
+				<span class="text-sm text-muted-foreground">
+					Status: {tokenPanel.configured === null
+						? '—'
+						: tokenPanel.configured
+							? 'Configured'
+							: 'Not configured'}
+				</span>
+				<AlertDialog>
+					<AlertDialogTrigger>
+						{#snippet child({ props })}
+							<Button {...props} variant="outline" size="sm" disabled={tokenPanel.busy}>
+								<IconKey size={14} stroke={1.75} aria-hidden="true" />
+								Rotate token
+							</Button>
+						{/snippet}
+					</AlertDialogTrigger>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>Rotate machine API token?</AlertDialogTitle>
+							<AlertDialogDescription>
+								Existing machine clients using the old token will stop
+								authenticating immediately. Your browser session and this
+								daemon's descriptor credentials are unaffected. The new token is
+								shown once — copy it before dismissing.
+							</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel>Cancel</AlertDialogCancel>
+							<AlertDialogAction
+								onclick={() => void tokenPanel.rotate()}
+								disabled={tokenPanel.busy}
+							>
+								{tokenPanel.busy ? 'Rotating…' : 'Rotate token'}
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			</div>
+
+			{#if tokenPanel.error}
+				<Alert variant="destructive" class="mt-4">
+					<IconAlertTriangle size={16} aria-hidden="true" />
+					<AlertTitle>Rotation failed</AlertTitle>
+					<AlertDescription>{tokenPanel.error}</AlertDescription>
+				</Alert>
+			{/if}
+			{#if tokenPanel.statusError}
+				<p class="mt-3 text-xs text-muted-foreground" role="status">
+					{tokenPanel.statusError}
+				</p>
+			{/if}
+
+			{#if tokenPanel.token !== null}
+				{#if !tokenPanel.durabilityConfirmed}
+					<Alert class="mt-4">
+						<IconAlertTriangle size={16} aria-hidden="true" />
+						<AlertTitle>Token active — durability unconfirmed</AlertTitle>
+						<AlertDescription>
+							The new token is active, but directory durability could not be
+							confirmed. Copy it now; a system crash could require recovery.
+						</AlertDescription>
+					</Alert>
+				{/if}
+				<div class="mt-4 rounded-md border p-3">
+					<Label for="machine-token-value">New machine token — shown once</Label>
+					<div class="mt-2 flex items-center gap-2">
+						<Input
+							id="machine-token-value"
+							class="font-mono text-xs"
+							type={showToken ? 'text' : 'password'}
+							value={tokenPanel.token}
+							readonly
+						/>
+						<Button
+							variant="outline"
+							size="icon-sm"
+							title={showToken ? 'Hide token' : 'Show token'}
+							onclick={() => (showToken = !showToken)}
+						>
+							{#if showToken}
+								<IconEyeOff size={14} stroke={1.75} aria-hidden="true" />
+							{:else}
+								<IconEye size={14} stroke={1.75} aria-hidden="true" />
+							{/if}
+						</Button>
+						<Button variant="outline" size="icon-sm" title="Copy token" onclick={copyToken}>
+							{#if copyState === 'copied'}
+								<IconCheck size={14} stroke={1.75} aria-hidden="true" />
+							{:else}
+								<IconCopy size={14} stroke={1.75} aria-hidden="true" />
+							{/if}
+						</Button>
+						<Button variant="ghost" size="sm" onclick={dismissToken}>Dismiss</Button>
+					</div>
+					{#if copyState === 'failed'}
+						<p class="mt-2 text-xs text-destructive" role="alert">
+							Copy failed — select and copy the token manually.
+						</p>
+					{/if}
+				</div>
+			{/if}
 		</CardContent>
 	</Card>
 </AuthGate>

@@ -40,14 +40,20 @@ type Daemon struct {
 	paths paths.Paths
 	opts  Options
 
-	started      time.Time
-	registry     *session.Registry
-	store        *store.Sessions
-	broker       *events.Broker
-	supervisor   *runtime.Supervisor
-	adapters     map[string]adapterEntry
-	instanceID   string
-	token        string
+	started    time.Time
+	registry   *session.Registry
+	store      *store.Sessions
+	broker     *events.Broker
+	supervisor *runtime.Supervisor
+	adapters   map[string]adapterEntry
+	instanceID string
+	token      string
+	// machineMu serializes machine-bearer authentication against
+	// credential rotation: readers hold RLock for the constant-time
+	// compare; rotation holds the write lock across generate+commit+
+	// memory convergence, so a request either authenticates under the
+	// old credential or the committed new one — never a torn state.
+	machineMu    sync.RWMutex
 	machineToken string
 
 	lockFile *os.File

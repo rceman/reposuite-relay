@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/adminauth"
+	"github.com/rceman/reposuite-relay/internal/auth"
 	"github.com/rceman/reposuite-relay/internal/fixture"
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/harness/codex"
@@ -75,6 +76,9 @@ type Options struct {
 	// PresentationHooks injects deterministic catalog commit-path faults
 	// — test seam only; production commits with real primitives.
 	PresentationHooks *presentation.Hooks
+	// MachineTokenHooks injects deterministic credential commit-path
+	// faults for rotation — test seam only.
+	MachineTokenHooks *auth.Hooks
 }
 
 func (o Options) withDefaults() Options {

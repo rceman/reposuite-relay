@@ -23,6 +23,14 @@ The domains never share values: a browser session cookie is not a bearer
 token, bearer tokens carry no CSRF obligations, and neither bearer is ever
 exposed to the browser surface.
 
+**Machine-token management** (`/v1/settings/machine-token*`) is
+admin-cookie only — bearer domains get `403 ADMIN_REQUIRED`, anonymous
+requests `401`. GET returns `{configured}` metadata only; the current
+token has no read path. POST rotate returns the newly generated token
+exactly once (`Cache-Control: no-store`, body only — never URL/query/
+cookie) and invalidates the old token at request admission. See
+`docs/MACHINE_API_TOKEN.md`.
+
 ## Admin credential (`config/admin.json`)
 
 ```json

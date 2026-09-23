@@ -60,7 +60,14 @@ IMPLEMENTED:
   fail-closed client validation, owner-only removal.
 - **Persistent machine API token** (`internal/auth`):
   `config/api.token`, minted once under singleton ownership (256-bit,
-  0600), strictly validated, never in the descriptor/API/logs/status.
+  0600), strictly validated, never in the descriptor/logs/status. It is
+  never returned by ordinary/status APIs — the single read channel is
+  the explicit admin-cookie rotation POST, which returns only the newly
+  generated value. Admin-only rotation under
+  `/v1/settings/machine-token*` (`403 ADMIN_REQUIRED` for bearer
+  domains), atomic rename commit point, `durabilityConfirmed=false` on
+  post-commit dirsync failure, live `machineMu` convergence — see
+  `docs/MACHINE_API_TOKEN.md`.
 - **Triple-credential auth** on every `/v1` endpoint: descriptor bearer
   OR machine bearer OR admin browser cookie — constant-time compare,
   one uniform 401; unsafe cookie-authenticated requests also require

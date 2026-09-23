@@ -6,6 +6,8 @@ import {
 	DecodeError,
 	decodeCancelResponse,
 	decodeDaemonResponse,
+	decodeMachineTokenRotate,
+	decodeMachineTokenStatus,
 	decodeInputResponse,
 	decodeProjectList,
 	decodeProjectResponse,
@@ -24,6 +26,8 @@ import type {
 	InputBody,
 	InputResponse,
 	ProjectList,
+	MachineTokenRotateResponse,
+	MachineTokenStatusResponse,
 	ProjectResponse,
 	PromptResponse,
 	SessionList,
@@ -180,7 +184,28 @@ export const api = {
 
 	/** DELETE /v1/projects/{id} — removes grouping metadata only. */
 	deleteProject: (id: string): Promise<DaemonResponse> =>
-		sendJSON(`/v1/projects/${encodeURIComponent(id)}`, 'DELETE', undefined, decodeDaemonResponse)
+		sendJSON(`/v1/projects/${encodeURIComponent(id)}`, 'DELETE', undefined, decodeDaemonResponse),
+
+	/**
+	 * GET /v1/settings/machine-token — presence metadata only; the
+	 * persistent credential is never returned by any GET.
+	 */
+	getMachineTokenStatus: (): Promise<MachineTokenStatusResponse> =>
+		getJSON('/v1/settings/machine-token', decodeMachineTokenStatus),
+
+	/**
+	 * POST /v1/settings/machine-token/rotate — the explicit rotation.
+	 * Returns the NEW credential exactly once. NEVER retried: a lost
+	 * response is ambiguous (the rotation may have committed) and a
+	 * second rotate would invalidate the committed credential.
+	 */
+	rotateMachineToken: (): Promise<MachineTokenRotateResponse> =>
+		sendJSON(
+			'/v1/settings/machine-token/rotate',
+			'POST',
+			{},
+			decodeMachineTokenRotate
+		)
 };
 
 /**

@@ -30,7 +30,7 @@ Three credential domains exist. A request may present **one**:
 
 | Credential | File | Lifetime |
 |------------|------|----------|
-| Machine API bearer | `${REPOSUITE_HOME}/relay/config/api.token` | persistent (minted once, 0600) |
+| Machine API bearer | `${REPOSUITE_HOME}/relay/config/api.token` | persistent until explicit admin rotation (0600) |
 | Descriptor bearer | `${REPOSUITE_HOME}/relay/run/daemon.json` | per daemon generation (internal discovery) |
 | Admin browser session | `relay_admin` cookie | memory-only, dies with the daemon generation |
 
@@ -53,7 +53,15 @@ any other Host fails before routing (DNS-rebinding defense). See
 `docs/WEB_ADMIN_SECURITY.md` for the full browser security model.
 
 - The token is 256 bits, hex-encoded, owner-private (`0600`). It is never
-  returned by any API, never in `daemon.json`, never printed by `status`.
+  returned by ordinary/status APIs, never in `daemon.json`, never printed
+  by `status`. The single exception is `POST
+  /v1/settings/machine-token/rotate` — admin-cookie only, CSRF-bound —
+  which returns the newly generated value exactly once. See
+  `docs/MACHINE_API_TOKEN.md`.
+- The machine bearer is stable until an admin rotates it. Rotation takes
+  effect at request admission with NO grace period: integrations using
+  the superseded token get `401` immediately and must be reconfigured
+  with the new value. There is no multi-token support.
 - Credential strictness is fail-closed: `api.token` must be a regular file
   with mode exactly `0600` and a single bounded line — a malformed,
   oversized, symlinked, or owner-exposed credential fails startup and is

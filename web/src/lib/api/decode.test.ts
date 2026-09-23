@@ -5,6 +5,8 @@ import {
 	decodeCancelResponse,
 	decodeInputResponse,
 	decodeProjectInfo,
+	decodeMachineTokenRotate,
+	decodeMachineTokenStatus,
 	decodeProjectList,
 	decodeProjectResponse,
 	decodePromptResponse,
@@ -434,4 +436,85 @@ describe('sessionInfo project projection pair', () => {
 			decodeSessionInfo({ ...session, projectId: goodId, projectName: 'a\tb' })
 		).toThrow(DecodeError);
 	});
+});
+
+// --- machine-token DTOs -------------------------------------------------
+
+describe('decodeMachineTokenStatus', () => {
+	const status = { daemon: {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 0,
+		activeSessions: 0,
+		coldSessions: 0
+	}, configured: true };
+
+	it('accepts a metadata-only status', () => {
+		expect(decodeMachineTokenStatus(status).configured).toBe(true);
+		expect(decodeMachineTokenStatus({ ...status, configured: false }).configured).toBe(false);
+	});
+
+	it.each([null, 'x', {}, { daemon: {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 0,
+		activeSessions: 0,
+		coldSessions: 0
+	} }])(
+		'rejects malformed status %j',
+		(v) => {
+			expect(() => decodeMachineTokenStatus(v)).toThrow(DecodeError);
+		}
+	);
+});
+
+describe('decodeMachineTokenRotate', () => {
+	const TOK = 'a'.repeat(64);
+	const good = { daemon: {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 0,
+		activeSessions: 0,
+		coldSessions: 0
+	}, token: TOK, durabilityConfirmed: true };
+
+	it('accepts a committed rotation', () => {
+		const out = decodeMachineTokenRotate(good);
+		expect(out.token).toBe(TOK);
+		expect(out.durabilityConfirmed).toBe(true);
+		expect(decodeMachineTokenRotate({ ...good, durabilityConfirmed: false })
+			.durabilityConfirmed).toBe(false);
+	});
+
+	it.each([
+		'token-prefix',          // too short
+		'A'.repeat(64),          // uppercase rejected — lowercase hex only
+		'g'.repeat(64),          // non-hex
+		'a'.repeat(63),          // 63
+		'a'.repeat(65),          // 65
+		42,
+		null
+	])('rejects malformed token %j', (token) => {
+		expect(() =>
+			decodeMachineTokenRotate({ ...good, token: token as unknown as string })
+		).toThrow(DecodeError);
+	});
+
+	it.each(['yes', 1, null, undefined])(
+		'rejects malformed durabilityConfirmed %j',
+		(durabilityConfirmed) => {
+			expect(() =>
+				decodeMachineTokenRotate({
+					...good,
+					durabilityConfirmed: durabilityConfirmed as unknown as boolean
+				})
+			).toThrow(DecodeError);
+		}
+	);
 });

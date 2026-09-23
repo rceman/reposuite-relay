@@ -80,6 +80,10 @@ const (
 	// ErrProjectRootConflict means the canonical project root is already
 	// owned by another project.
 	ErrProjectRootConflict = "PROJECT_ROOT_CONFLICT"
+	// ErrAdminRequired means the route is restricted to the
+	// authenticated Web Admin browser session — bearer credential
+	// domains are refused.
+	ErrAdminRequired = "ADMIN_REQUIRED"
 )
 
 // Canonical size bounds. These are part of the wire contract and are used

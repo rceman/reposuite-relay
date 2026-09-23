@@ -103,6 +103,28 @@ export interface UpdateProjectBody {
 	root?: string;
 }
 
+/**
+ * GET /v1/settings/machine-token — presence metadata only. The
+ * persistent machine credential is never readable through the API.
+ */
+export interface MachineTokenStatusResponse {
+	daemon: DaemonInfo;
+	configured: boolean;
+}
+
+/**
+ * POST /v1/settings/machine-token/rotate — the only channel that
+ * returns a machine credential: the freshly generated one.
+ * durabilityConfirmed=false means the rename committed but the
+ * directory fsync failed — the token IS active; durability is
+ * unconfirmed.
+ */
+export interface MachineTokenRotateResponse {
+	daemon: DaemonInfo;
+	token: string;
+	durabilityConfirmed: boolean;
+}
+
 /** GET /v1/sessions payload. */
 export interface SessionList {
 	daemon: DaemonInfo;

@@ -47,6 +47,15 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Machine-token management is admin-cookie only: bearer credential
+	// domains can never read, rotate, or reveal the persistent machine
+	// credential. (Cookie CSRF obligations for the POST already ran
+	// above; anonymous requests are already 401.)
+	if strings.HasPrefix(p, "/v1/settings/machine-token") && kind != authAdminCookie {
+		writeErr(w, http.StatusForbidden, api.ErrAdminRequired,
+			"machine token management requires an admin browser session")
+		return
+	}
 	switch {
 	case p == "/v1/daemon" && r.Method == http.MethodGet:
 		d.handleDaemonInfo(w, r)
@@ -68,6 +77,10 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 		d.lifecycle(d.handleCreateHarness)(w, r, session.HarnessDevin)
 	case p == "/v1/sessions/opencode" && r.Method == http.MethodPost:
 		d.lifecycle(d.handleCreateHarness)(w, r, session.HarnessOpenCode)
+	case p == "/v1/settings/machine-token" && r.Method == http.MethodGet:
+		d.handleMachineTokenStatus(w, r)
+	case p == "/v1/settings/machine-token/rotate" && r.Method == http.MethodPost:
+		d.lifecycle(d.handleRotateMachineToken)(w, r, "")
 	case strings.HasPrefix(p, "/v1/sessions/"):
 		d.routeSession(w, r, strings.TrimPrefix(p, "/v1/sessions/"))
 	default:

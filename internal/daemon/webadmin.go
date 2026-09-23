@@ -150,7 +150,10 @@ func (d *Daemon) authenticate(r *http.Request) (authKind, *adminauth.Session) {
 		if subtle.ConstantTimeCompare(got, []byte(d.token)) == 1 {
 			return authDescriptorBearer, nil
 		}
-		if subtle.ConstantTimeCompare(got, []byte(d.machineToken)) == 1 {
+		d.machineMu.RLock()
+		machine := d.machineToken
+		d.machineMu.RUnlock()
+		if subtle.ConstantTimeCompare(got, []byte(machine)) == 1 {
 			return authMachineBearer, nil
 		}
 	}
