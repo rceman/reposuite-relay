@@ -2,6 +2,7 @@ package presentation
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,5 +222,64 @@ func TestUpdateAndDelete(t *testing.T) {
 		return p.ID != b.ID // falls through to the less-specific /work/b
 	}() {
 		t.Fatal("deleted project's sessions must fall through to /work/b")
+	}
+}
+
+// TestConcurrentMatchDuringMutations: snapshot readers race writers —
+// Match must never see a torn catalog while commits swap it.
+func TestConcurrentMatchDuringMutations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "presentation.json")
+	mgr, err := NewManager(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := mgr.Create("base", "/work/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg, rwg sync.WaitGroup
+	// Readers: continuous pure projection against the live snapshot.
+	for i := 0; i < 4; i++ {
+		rwg.Add(1)
+		go func() {
+			defer rwg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if p, ok := mgr.Match("/work/base/sub"); ok && p.ID != base.ID {
+						t.Errorf("torn projection: %q", p.ID)
+						return
+					}
+				}
+			}
+		}()
+	}
+	// Writers: create + delete cycles racing the readers.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 8; n++ {
+				root := fmt.Sprintf("/work/base/w%d-%d", i, n)
+				p, err := mgr.Create("w", root)
+				if err != nil {
+					continue // a racing delete may re-check a stale root
+				}
+				_ = mgr.Delete(p.ID)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(stop)
+	rwg.Wait()
+	// The catalog converged to just the base project.
+	if got := mgr.Snapshot(); len(got.Projects) != 1 || got.Projects[0].ID != base.ID {
+		t.Fatalf("final catalog = %+v", got.Projects)
+	}
+	if got := catFile(t, path); len(got.Projects) != 1 {
+		t.Fatalf("final file = %+v", got.Projects)
 	}
 }
