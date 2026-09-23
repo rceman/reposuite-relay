@@ -6,7 +6,7 @@
 	import StatusBadge from '$lib/components/StatusBadge.svelte';
 	import { api } from '$lib/api/client';
 	import { RelayError } from '$lib/api/errors';
-	import type { SessionList } from '$lib/api/types';
+	import type { ProjectInfo, SessionList } from '$lib/api/types';
 	import { activityStatus, providerName, runtimeStatus } from '$lib/domain/status';
 	import { formatUptime } from '$lib/utils/format';
 	import {
@@ -20,11 +20,14 @@
 	import { auth } from '$lib/auth/auth.svelte';
 
 	let data = $state<SessionList | null>(null);
+	let projects = $state<ProjectInfo[]>([]);
 	let error = $state<string | null>(null);
 
 	async function load() {
 		try {
-			data = await api.listSessions();
+			const [sl, pl] = await Promise.all([api.listSessions(), api.listProjects()]);
+			data = sl;
+			projects = pl.projects;
 			error = null;
 		} catch (err) {
 			error = err instanceof RelayError ? err.message : 'Failed to load sessions';
@@ -38,6 +41,18 @@
 	});
 
 	const recent = $derived((data?.sessions ?? []).slice(0, 5));
+	// Per-project session/active counts from the backend projection.
+	const projectCounts = $derived.by(() => {
+		const m = new Map<string, { total: number; active: number }>();
+		for (const s of data?.sessions ?? []) {
+			if (s.projectId === undefined) continue;
+			const c = m.get(s.projectId) ?? { total: 0, active: 0 };
+			c.total++;
+			if (s.runtimeState !== 'cold') c.active++;
+			m.set(s.projectId, c);
+		}
+		return m;
+	});
 </script>
 
 <AuthGate onrefresh={load}>
@@ -71,7 +86,34 @@
 				<CardHeader class="pb-2"><CardTitle class="text-xs font-medium text-muted-foreground">API</CardTitle></CardHeader>
 				<CardContent><p class="text-2xl font-semibold tabular-nums">v{data.daemon.apiVersion}</p></CardContent>
 			</Card>
+			<Card>
+				<CardHeader class="pb-2"><CardTitle class="text-xs font-medium text-muted-foreground">Projects</CardTitle></CardHeader>
+				<CardContent><p class="text-2xl font-semibold tabular-nums">{projects.length}</p></CardContent>
+			</Card>
 		</div>
+
+		{#if projects.length > 0}
+			<Card class="mb-6">
+				<CardHeader><CardTitle class="text-sm">Projects</CardTitle></CardHeader>
+				<CardContent>
+					<ul class="divide-y">
+						{#each projects as p (p.id)}
+							{@const c = projectCounts.get(p.id)}
+							<li class="flex items-center gap-3 py-2 text-sm">
+								<span class="w-48 truncate font-medium" title={p.name}>{p.name}</span>
+								<span class="min-w-0 truncate font-mono text-xs text-muted-foreground"
+									>{p.root}</span
+								>
+								<span class="ml-auto text-xs text-muted-foreground tabular-nums">
+									{c?.total ?? 0} sessions · {c?.active ?? 0} active ·
+									{(c?.total ?? 0) - (c?.active ?? 0)} cold
+								</span>
+							</li>
+						{/each}
+					</ul>
+				</CardContent>
+			</Card>
+		{/if}
 
 		<Card>
 			<CardHeader><CardTitle class="text-sm">Recent sessions</CardTitle></CardHeader>
@@ -84,6 +126,10 @@
 							<li class="flex items-center gap-3 py-2 text-sm">
 								<span class="w-40 truncate font-mono text-xs" title={s.key}>{s.key}</span>
 								<span class="w-20 text-muted-foreground">{providerName(s.harness)}</span>
+								<span
+									class="w-32 truncate text-xs text-muted-foreground"
+									title={s.projectName ?? ''}>{s.projectName ?? 'Ungrouped'}</span
+								>
 								<StatusBadge status={runtimeStatus(s)} />
 								<StatusBadge status={activityStatus(s)} />
 								<span

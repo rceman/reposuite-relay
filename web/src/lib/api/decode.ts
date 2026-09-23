@@ -9,6 +9,9 @@ import type {
 	DaemonResponse,
 	ErrorBody,
 	InputResponse,
+	ProjectInfo,
+	ProjectList,
+	ProjectResponse,
 	PromptResponse,
 	RelayEvent,
 	SessionInfo,
@@ -145,6 +148,20 @@ export function decodeSessionInfo(v: unknown): SessionInfo {
 		const s = optString(v, k);
 		if (s !== undefined) out[k] = s;
 	}
+	// The derived project projection is a pair: both non-empty strings or
+	// both absent — a one-sided projection is malformed.
+	const projectId = optString(v, 'projectId');
+	const projectName = optString(v, 'projectName');
+	if ((projectId === undefined) !== (projectName === undefined)) {
+		throw new DecodeError('projectId/projectName');
+	}
+	if (projectId !== undefined && projectName !== undefined) {
+		if (projectId === '' || projectName === '') {
+			throw new DecodeError('projectId/projectName');
+		}
+		out.projectId = projectId;
+		out.projectName = projectName;
+	}
 	if (v.metrics !== undefined) out.metrics = decodeMetrics(v.metrics);
 	return out;
 }
@@ -179,6 +196,30 @@ export function decodeSessionResponse(v: unknown): SessionResponse {
 export function decodeDaemonResponse(v: unknown): DaemonResponse {
 	if (!isRecord(v)) throw new DecodeError('daemonResponse');
 	return { daemon: decodeDaemonInfo(v.daemon) };
+}
+
+export function decodeProjectInfo(v: unknown): ProjectInfo {
+	if (!isRecord(v)) throw new DecodeError('project');
+	return {
+		id: reqString(v, 'id'),
+		name: reqString(v, 'name'),
+		root: reqString(v, 'root')
+	};
+}
+
+export function decodeProjectList(v: unknown): ProjectList {
+	if (!isRecord(v)) throw new DecodeError('projectList');
+	const raw = v.projects;
+	if (raw !== null && !Array.isArray(raw)) throw new DecodeError('projects');
+	return {
+		daemon: decodeDaemonInfo(v.daemon),
+		projects: (raw ?? []).map(decodeProjectInfo)
+	};
+}
+
+export function decodeProjectResponse(v: unknown): ProjectResponse {
+	if (!isRecord(v)) throw new DecodeError('projectResponse');
+	return { daemon: decodeDaemonInfo(v.daemon), project: decodeProjectInfo(v.project) };
 }
 
 export function decodePromptResponse(v: unknown): PromptResponse {

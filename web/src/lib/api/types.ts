@@ -63,6 +63,44 @@ export interface SessionInfo {
 	createdAt: string;
 	generationStartedAt: string;
 	metrics?: SessionMetrics;
+	/**
+	 * Derived presentation projection — computed at read time from the
+	 * local project catalog and the session cwd. Either both are present
+	 * or neither; never persisted on the session.
+	 */
+	projectId?: string;
+	projectName?: string;
+}
+
+/** One Relay-local project — grouping metadata only. */
+export interface ProjectInfo {
+	id: string;
+	name: string;
+	root: string;
+}
+
+/** GET /v1/projects — the catalog in canonical order (name, root, id). */
+export interface ProjectList {
+	daemon: DaemonInfo;
+	projects: ProjectInfo[];
+}
+
+/** POST/PATCH project responses. */
+export interface ProjectResponse {
+	daemon: DaemonInfo;
+	project: ProjectInfo;
+}
+
+/** POST /v1/projects body. */
+export interface CreateProjectBody {
+	name: string;
+	root: string;
+}
+
+/** PATCH /v1/projects/{id} body — changed fields only. */
+export interface UpdateProjectBody {
+	name?: string;
+	root?: string;
 }
 
 /** GET /v1/sessions payload. */

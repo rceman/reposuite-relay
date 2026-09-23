@@ -7,6 +7,8 @@ import {
 	decodeCancelResponse,
 	decodeDaemonResponse,
 	decodeInputResponse,
+	decodeProjectList,
+	decodeProjectResponse,
 	decodePromptResponse,
 	decodeSessionList,
 	decodeSessionResponse,
@@ -17,13 +19,17 @@ import type {
 	CancelResponse,
 	ConfigBody,
 	CreateSessionBody,
+	CreateProjectBody,
 	DaemonResponse,
 	InputBody,
 	InputResponse,
+	ProjectList,
+	ProjectResponse,
 	PromptResponse,
 	SessionList,
 	SessionResponse,
-	TranscriptPage
+	TranscriptPage,
+	UpdateProjectBody
 } from './types';
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -154,7 +160,27 @@ export const api = {
 
 	/** DELETE /v1/sessions/{key} — durable deletion, not just a stop. */
 	deleteSession: (key: string): Promise<DaemonResponse> =>
-		sendJSON(sessionPath(key), 'DELETE', undefined, decodeDaemonResponse)
+		sendJSON(sessionPath(key), 'DELETE', undefined, decodeDaemonResponse),
+
+	/** GET /v1/projects — the local presentation catalog. */
+	listProjects: (): Promise<ProjectList> => getJSON('/v1/projects', decodeProjectList),
+
+	/** POST /v1/projects — create a Relay-local grouping project. */
+	createProject: (body: CreateProjectBody): Promise<ProjectResponse> =>
+		sendJSON('/v1/projects', 'POST', body, decodeProjectResponse),
+
+	/** PATCH /v1/projects/{id} — changed fields only. */
+	patchProject: (id: string, body: UpdateProjectBody): Promise<ProjectResponse> =>
+		sendJSON(
+			`/v1/projects/${encodeURIComponent(id)}`,
+			'PATCH',
+			body,
+			decodeProjectResponse
+		),
+
+	/** DELETE /v1/projects/{id} — removes grouping metadata only. */
+	deleteProject: (id: string): Promise<DaemonResponse> =>
+		sendJSON(`/v1/projects/${encodeURIComponent(id)}`, 'DELETE', undefined, decodeDaemonResponse)
 };
 
 /**

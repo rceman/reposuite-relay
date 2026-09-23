@@ -13,6 +13,9 @@
 	const fields = $derived(
 		[
 			{ label: 'Provider', value: providerName(session.harness) },
+			// Derived grouping projection — observational only; project
+			// editing lives under /settings.
+			{ label: 'Project', value: session.projectName ?? 'Ungrouped' },
 			{ label: 'Desired model', value: session.model || '—' },
 			{ label: 'Desired mode', value: session.mode || '—' },
 			{ label: 'Generation', value: String(session.generation) },

@@ -17,6 +17,9 @@
 		SelectTrigger
 	} from '$lib/components/ui/select';
 	import { IconArrowLeft } from '@tabler/icons-svelte';
+	import type { ProjectInfo } from '$lib/api/types';
+	import { projectRootFor } from '$lib/projects/group';
+	import { auth } from '$lib/auth/auth.svelte';
 
 	const PROVIDERS = [
 		{ value: 'codex', label: 'Codex' },
@@ -32,6 +35,26 @@
 	let mode = $state('');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	let projects = $state<ProjectInfo[]>([]);
+	let projectId = $state<string>('');
+
+	// The project catalog is a convenience only — it presets cwd. The
+	// request still carries cwd alone; grouping stays derived.
+	$effect(() => {
+		if (auth.authenticated) {
+			api.listProjects()
+				.then((pl) => (projects = pl.projects))
+				.catch(() => {});
+		}
+	});
+
+	function onProjectChange(id: string) {
+		projectId = id;
+		// Selecting a project presets cwd once — a later hand edit is
+		// never forced back to the root.
+		const r = projectRootFor(id, projects);
+		if (r !== undefined) cwd = r;
+	}
 
 	const keyOk = $derived(KEY_RE.test(key));
 	const cwdOk = $derived(cwd.startsWith('/') && cwd.length > 1);
@@ -106,6 +129,25 @@
 							</p>
 						{/if}
 					</div>
+					{#if projects.length > 0}
+						<div>
+							<Label for="new-project">Project <span class="text-muted-foreground">(optional)</span></Label>
+							<Select type="single" bind:value={projectId} onValueChange={onProjectChange}>
+								<SelectTrigger id="new-project" class="mt-1 w-full">
+									{projects.find((p) => p.id === projectId)?.name ?? 'Select a project…'}
+								</SelectTrigger>
+								<SelectContent>
+									{#each projects as p (p.id)}
+										<SelectItem value={p.id} label={p.name}>{p.name}</SelectItem>
+									{/each}
+								</SelectContent>
+							</Select>
+							<p class="mt-1 text-xs text-muted-foreground">
+								Picking a project presets the working directory to its root. Grouping is
+								derived from the directory itself — you can still edit it below.
+							</p>
+						</div>
+					{/if}
 					<div>
 						<Label for="new-cwd">Working directory</Label>
 						<Input

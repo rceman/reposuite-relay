@@ -10,7 +10,8 @@
 		IconLogout,
 		IconRefresh,
 		IconRobot,
-		IconServer
+		IconServer,
+		IconSettings
 	} from '@tabler/icons-svelte';
 	import type { Snippet } from 'svelte';
 
@@ -38,7 +39,8 @@
 
 	const nav = [
 		{ href: '/', label: 'Overview', icon: IconLayoutDashboard },
-		{ href: '/sessions', label: 'Sessions', icon: IconRobot }
+		{ href: '/sessions', label: 'Sessions', icon: IconRobot },
+		{ href: '/settings', label: 'Settings', icon: IconSettings }
 	];
 </script>
 

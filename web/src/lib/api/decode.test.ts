@@ -4,8 +4,11 @@ import {
 	decodeAuthSession,
 	decodeCancelResponse,
 	decodeInputResponse,
+	decodeProjectList,
+	decodeProjectResponse,
 	decodePromptResponse,
 	decodeRelayEvent,
+	decodeSessionInfo,
 	decodeSessionList,
 	decodeSessionResponse,
 	decodeTranscriptPage
@@ -293,6 +296,76 @@ describe('decodeTranscriptPage / decodeRelayEvent — safe-integer cursors', () 
 				at: '2026-01-01T00:00:00Z',
 				durable: false
 			})
+		).toThrow(DecodeError);
+	});
+});
+
+describe('project decoders', () => {
+	const daemon = {
+		instanceId: 'i',
+		pid: 1,
+		apiVersion: 2,
+		uptimeSeconds: 1,
+		sessionCount: 0,
+		activeSessions: 0,
+		coldSessions: 0
+	};
+	const project = { id: 'prj_' + 'a'.repeat(32), name: 'Relay', root: '/work/relay' };
+
+	it('decodes a project list, normalizing null to empty', () => {
+		const out = decodeProjectList({ daemon, projects: [project] });
+		expect(out.projects).toEqual([project]);
+		expect(decodeProjectList({ daemon, projects: null }).projects).toEqual([]);
+	});
+
+	it('rejects a malformed project entry', () => {
+		expect(() =>
+			decodeProjectList({ daemon, projects: [{ id: 1, name: 'x', root: '/r' }] })
+		).toThrow(DecodeError);
+	});
+
+	it('decodes a project response', () => {
+		const out = decodeProjectResponse({ daemon, project });
+		expect(out.project.id).toBe(project.id);
+	});
+});
+
+describe('sessionInfo project projection pair', () => {
+	const session = {
+		key: 'k',
+		sessionId: 's1',
+		runtimeId: '',
+		runtimeState: 'cold',
+		harness: 'codex',
+		cwd: '/x',
+		state: 'idle',
+		activity: 'idle',
+		generation: 0,
+		pid: 0,
+		createdAt: '2026-01-01T00:00:00Z',
+		generationStartedAt: ''
+	};
+
+	it('accepts the pair absent', () => {
+		const out = decodeSessionInfo(session);
+		expect(out.projectId).toBeUndefined();
+		expect(out.projectName).toBeUndefined();
+	});
+
+	it('accepts the pair present', () => {
+		const out = decodeSessionInfo({ ...session, projectId: 'prj_x', projectName: 'P' });
+		expect(out.projectId).toBe('prj_x');
+		expect(out.projectName).toBe('P');
+	});
+
+	it('rejects a one-sided projection', () => {
+		expect(() => decodeSessionInfo({ ...session, projectId: 'prj_x' })).toThrow(DecodeError);
+		expect(() => decodeSessionInfo({ ...session, projectName: 'P' })).toThrow(DecodeError);
+	});
+
+	it('rejects an empty member of the pair', () => {
+		expect(() =>
+			decodeSessionInfo({ ...session, projectId: '', projectName: 'P' })
 		).toThrow(DecodeError);
 	});
 });

@@ -1,33 +1,28 @@
 <script lang="ts">
-	// Sessions: the durable RelaySession registry, read-only. Every state
-	// is rendered as icon + text — never color alone.
+	// Sessions: the durable RelaySession registry grouped by local Project.
+	// Membership is the backend's projectId projection — this page never
+	// re-derives path matching. Ungrouped is a legitimate final section.
 	import AuthGate from '$lib/components/AuthGate.svelte';
-	import StatusBadge from '$lib/components/StatusBadge.svelte';
+	import SessionTable from '$lib/components/session/SessionTable.svelte';
 	import { api } from '$lib/api/client';
 	import { RelayError } from '$lib/api/errors';
-	import type { SessionList } from '$lib/api/types';
-	import { activityStatus, providerName, runtimeStatus } from '$lib/domain/status';
-	import { formatTime } from '$lib/utils/format';
+	import type { ProjectInfo, SessionList } from '$lib/api/types';
+	import { groupSessions } from '$lib/projects/group';
 	import { auth } from '$lib/auth/auth.svelte';
-	import {
-		Table,
-		TableBody,
-		TableCell,
-		TableHead,
-		TableHeader,
-		TableRow
-	} from '$lib/components/ui/table';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
 	import { Button } from '$lib/components/ui/button';
 	import { IconAlertTriangle, IconPlus } from '@tabler/icons-svelte';
 
 	let data = $state<SessionList | null>(null);
+	let projects = $state<ProjectInfo[]>([]);
 	let error = $state<string | null>(null);
 
 	async function load() {
 		try {
-			data = await api.listSessions();
+			const [sl, pl] = await Promise.all([api.listSessions(), api.listProjects()]);
+			data = sl;
+			projects = pl.projects;
 			error = null;
 		} catch (err) {
 			error = err instanceof RelayError ? err.message : 'Failed to load sessions';
@@ -37,6 +32,11 @@
 	$effect(() => {
 		if (auth.authenticated) void load();
 	});
+
+	const grouped = $derived(groupSessions(projects, data?.sessions ?? []));
+	// On /sessions, project sections with zero sessions are omitted to
+	// reduce noise — Settings still lists every configured project.
+	const visible = $derived(grouped.sections.filter((s) => s.sessions.length > 0));
 </script>
 
 <AuthGate onrefresh={load}>
@@ -56,53 +56,40 @@
 		</Button>
 	</div>
 
-	<Card>
-		<CardContent class="p-0">
-			<Table>
-				<TableHeader>
-					<TableRow>
-						<TableHead>Key</TableHead>
-						<TableHead>Provider</TableHead>
-						<TableHead>Activity</TableHead>
-						<TableHead>Runtime</TableHead>
-						<TableHead class="text-right">Gen</TableHead>
-						<TableHead>Model</TableHead>
-						<TableHead>Created</TableHead>
-						<TableHead class="hidden md:table-cell">Working directory</TableHead>
-					</TableRow>
-				</TableHeader>
-				<TableBody>
-					{#each data?.sessions ?? [] as s (s.sessionId)}
-						<TableRow>
-							<TableCell class="max-w-40 truncate font-mono text-xs" title={s.key}>
-								<a href="/sessions/{s.key}" class="underline-offset-2 hover:underline"
-									>{s.key}</a
-								>
-							</TableCell>
-							<TableCell>{providerName(s.harness)}</TableCell>
-							<TableCell><StatusBadge status={activityStatus(s)} /></TableCell>
-							<TableCell><StatusBadge status={runtimeStatus(s)} /></TableCell>
-							<TableCell class="text-right tabular-nums">{s.generation}</TableCell>
-							<TableCell class="max-w-32 truncate" title={s.model ?? ''}
-								>{s.model ?? '—'}</TableCell
-							>
-							<TableCell class="text-xs text-muted-foreground tabular-nums"
-								>{formatTime(s.createdAt)}</TableCell
-							>
-							<TableCell
-								class="hidden max-w-64 truncate text-xs text-muted-foreground md:table-cell"
-								title={s.cwd}>{s.cwd}</TableCell
-							>
-						</TableRow>
-					{:else}
-						<TableRow>
-							<TableCell colspan={8} class="py-8 text-center text-sm text-muted-foreground">
-								No sessions yet.
-							</TableCell>
-						</TableRow>
-					{/each}
-				</TableBody>
-			</Table>
-		</CardContent>
-	</Card>
+	{#each visible as section (section.project.id)}
+		<section class="mb-6">
+			<div class="mb-2 flex items-baseline gap-2">
+				<h2 class="text-sm font-semibold">{section.project.name}</h2>
+				<span class="max-w-64 truncate font-mono text-xs text-muted-foreground"
+					>{section.project.root}</span
+				>
+				<span class="text-xs text-muted-foreground tabular-nums"
+					>{section.sessions.length}
+					{section.sessions.length === 1 ? 'session' : 'sessions'}</span
+				>
+			</div>
+			<Card>
+				<CardContent class="p-0">
+					<SessionTable sessions={section.sessions} />
+				</CardContent>
+			</Card>
+		</section>
+	{/each}
+
+	<section>
+		{#if visible.length > 0 || grouped.ungrouped.length > 0}
+			<div class="mb-2 flex items-baseline gap-2">
+				<h2 class="text-sm font-semibold">Ungrouped</h2>
+				<span class="text-xs text-muted-foreground tabular-nums"
+					>{grouped.ungrouped.length}
+					{grouped.ungrouped.length === 1 ? 'session' : 'sessions'}</span
+				>
+			</div>
+		{/if}
+		<Card>
+			<CardContent class="p-0">
+				<SessionTable sessions={grouped.ungrouped} />
+			</CardContent>
+		</Card>
+	</section>
 </AuthGate>
