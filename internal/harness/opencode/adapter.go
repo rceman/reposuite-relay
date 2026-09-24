@@ -23,6 +23,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/telemetry"
 )
 
 // RuntimeKey is the single shared OpenCode ACP runtime key: one
@@ -45,6 +46,9 @@ type Deps struct {
 	Version string
 	// Now is a clock seam.
 	Now func() time.Time
+	// Telemetry is the optional RepoDex AgentEvent sink; nil-safe (nil or
+	// disabled = no telemetry, agent path unchanged).
+	Telemetry *telemetry.Service
 	// AttachGate is a test seam invoked once, inside the serialized
 	// attach section, before any native call — used to prove a second
 	// attach cannot run orphan cleanup while a first attach holds the
@@ -96,6 +100,10 @@ type sessState struct {
 	turnID string
 	// metrics is the last-known accounting.
 	metrics *harness.SessionMetrics
+	// tools tracks each live native tool call — updates do not repeat
+	// kind/locations, so completion and source mapping need the values
+	// remembered at tool_call time. Daemon-memory only.
+	tools map[string]acp.ToolMeta
 }
 
 // NewAdapter builds the adapter with defaults applied.

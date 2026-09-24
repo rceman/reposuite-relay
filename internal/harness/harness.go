@@ -123,6 +123,10 @@ type SessionUpdate struct {
 	Mode            *string
 	State           *string
 	BumpGeneration  bool
+	// TelemetrySeqWatermark durably reserves RepoDex telemetry sequence
+	// space (internal/telemetry); used only by the seq allocator, never by
+	// harness adapters directly.
+	TelemetrySeqWatermark *uint64
 }
 
 // ValidNativeID reports whether a durable native session identity is

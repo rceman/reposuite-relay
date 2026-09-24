@@ -11,6 +11,7 @@ import {
 	decodeInputResponse,
 	decodeProjectList,
 	decodeRuntimeList,
+	decodeTelemetryHealth,
 	decodeProjectResponse,
 	decodePromptResponse,
 	decodeSessionList,
@@ -32,6 +33,7 @@ import type {
 	ProjectResponse,
 	PromptResponse,
 	RuntimeList,
+	TelemetryHealth,
 	SessionList,
 	SessionResponse,
 	TranscriptPage,
@@ -137,6 +139,13 @@ export const api = {
 	 */
 	listRuntimes: (init?: { signal?: AbortSignal }): Promise<RuntimeList> =>
 		getJSON('/v1/runtimes', decodeRuntimeList, init),
+
+	/**
+	 * GET /v1/telemetry/repodex — observer-only RepoDex telemetry health.
+	 * Never wakes a session or starts RepoDex; carries no credentials.
+	 */
+	telemetryHealth: (init?: { signal?: AbortSignal }): Promise<TelemetryHealth> =>
+		getJSON('/v1/telemetry/repodex', decodeTelemetryHealth, init),
 
 	/**
 	 * GET /v1/sessions/{key} — observer read; never wakes a COLD session.

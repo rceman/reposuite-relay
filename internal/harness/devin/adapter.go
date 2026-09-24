@@ -31,6 +31,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/telemetry"
 )
 
 // RuntimeKeyPrefix namespaces Devin runtime generations. The key is suffixed
@@ -92,6 +93,9 @@ type Deps struct {
 	Version string
 	// Now is a clock seam.
 	Now func() time.Time
+	// Telemetry is the optional RepoDex AgentEvent sink; nil-safe (nil or
+	// disabled = no telemetry, agent path unchanged).
+	Telemetry *telemetry.Service
 	// AttachGate is a test seam invoked once, inside the serialized
 	// attach section, before any native call — used to prove a second
 	// attach cannot run orphan cleanup while a first attach holds the
@@ -119,31 +123,6 @@ type Adapter struct {
 	// wg counts adapter-owned goroutines: transport readers and spawned
 	// turn-completion workers.
 	wg sync.WaitGroup
-}
-
-// sessState is the adapter's per-session state; nothing here is durable.
-type sessState struct {
-	m *session.Managed
-	// srv/handle is the runtime generation hosting the session; nil means
-	// COLD.
-	srv    *acp.Server
-	handle *acp.Session
-	// liveRuntimeKey is the runtime key of the generation that currently
-	// owns handle. Ownership is NEVER reconstructed from the desired model:
-	// a handle whose generation was partitioned for another process model
-	// must not serve this session.
-	liveRuntimeKey string
-	// nativeID is the exact native slug in force. Until the first completed
-	// turn it is PROVISIONAL: in memory only, never durable, because a
-	// zero-turn Devin session cannot be resumed.
-	nativeID string
-	// materialized is true once a completed turn proved the slug resumable.
-	materialized bool
-	// turn is the in-flight turn (nil when idle), turnID is its Relay ID.
-	turn   *acp.Turn
-	turnID string
-	// metrics is the last-known accounting.
-	metrics *harness.SessionMetrics
 }
 
 // NewAdapter builds the adapter with defaults applied.

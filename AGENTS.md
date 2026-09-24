@@ -87,6 +87,23 @@ IMPLEMENTED:
   (`docs/WEB_ADMIN_PROJECTS.md`). The committed `web/build/`
   release artifact is served by `go:embed` — no Node at production
   runtime.
+- **RepoDex telemetry** (`internal/telemetry`, `repodex` section of
+  `relay.json`, disabled by default): canonical AgentEvent v1 emission
+  from harness-observed events only — `session_started` (lazy, seq 0,
+  restart-idempotent), `session_completed` (session delete only),
+  tool_call lifecycle, `source_observed` (only when content was actually
+  delivered — never filenames/listings/prose), `agent_message`,
+  `final_answer`, turn-scoped `model_call_completed` usage with
+  `usage_estimated`. Per-session durable sequence via
+  `TelemetrySeqWatermark`, separate from the canonical transcript seq.
+  Async bounded queue → bare-array `/v1/events/batch` → durable-ack
+  accounting; bounded retry + descriptor rediscovery (dynamic port) +
+  durable outage spool under `telemetry-spool/`. Discovery reads
+  `service.runtime.json` + `service.token` (0600), validates
+  `GET /v1/status`; Relay never starts or installs RepoDex.
+  `GET /v1/telemetry/repodex` exposes observer-only health (no
+  credentials). TELEMETRY ONLY: no `/v1/query` client, no agent-facing
+  RepoDex helpers — Gateway owns query authority.
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
   uptime, session counts, API auth, admin auth) that never auto-starts.
 - NDJSON canonical event-stream foundation (`internal/events`):

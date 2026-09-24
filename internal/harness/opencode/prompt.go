@@ -9,6 +9,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness/acp"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/telemetry"
 )
 
 // Prompt accepts a user prompt and submits it as a native turn:
@@ -208,6 +209,8 @@ func (a *Adapter) completeTurn(m *session.Managed, handle *acp.Session, turn *ac
 			TurnID: turnID,
 			Text:   text,
 		})
+		// final_answer: the runtime-visible completed output, verbatim.
+		a.deps.Telemetry.FinalAnswer(m, text)
 	case stopReason == acp.StopCancelled:
 		_ = a.publishDurable(m, api.EventTurnInterrupted, api.TurnEventPayload{TurnID: turnID})
 	case stopReason == "":
@@ -231,6 +234,19 @@ func (a *Adapter) completeTurn(m *session.Managed, handle *acp.Session, turn *ac
 
 	if metrics := acp.MergeMetrics(a.Metrics(m.Session.ID), acp.UsageMetrics(usage)); metrics != nil {
 		a.publishMetrics(m, "turn", metrics)
+	}
+	// Turn-scoped usage telemetry: provider-authoritative values copied
+	// exactly; a turn is not a proven single model call so the canonical
+	// event carries usage_estimated.
+	if usage != nil {
+		a.deps.Telemetry.ModelUsage(m, telemetry.Usage{
+			CallID:   "turn:" + turnID,
+			Status:   stopReason,
+			Input:    usage.InputTokens,
+			Output:   usage.OutputTokens,
+			CachedIn: acp.FirstToken(usage.CachedReadTokens, usage.CachedWriteTokens),
+			Reason:   usage.ThoughtTokens,
+		})
 	}
 	a.deps.Supervisor.SetActivity(m.Session.ID, runtime.ActivityIdle)
 	_ = a.setSessionState(m, session.StateIdle)

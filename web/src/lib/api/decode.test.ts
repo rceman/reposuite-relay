@@ -11,6 +11,7 @@ import {
 	decodeProjectResponse,
 	decodePromptResponse,
 	decodeRuntimeList,
+	decodeTelemetryHealth,
 	decodeRelayEvent,
 	decodeSessionInfo,
 	decodeSessionList,
@@ -679,5 +680,45 @@ describe('decodeRuntimeList hardening', () => {
 				totals: { ...good.totals, measuredRuntimeCount: 5 }
 			})
 		).toThrow(DecodeError);
+	});
+});
+
+describe('decodeTelemetryHealth', () => {
+	const good = {
+		daemon: { instanceId: 'i', pid: 1, apiVersion: 2, uptimeSeconds: 1, sessionCount: 0, activeSessions: 0, coldSessions: 0 },
+		telemetry: {
+			enabled: true, state: 'connected', instanceId: 'repodex-1',
+			endpoint: '127.0.0.1:9999', queueDepth: 0, spoolBytes: 0,
+			observed: 5, canonicalized: 6, acknowledged: 6, duplicates: 0,
+			rejected: 0, lost: 0, retries: 0, rediscoveries: 1,
+			lastAckAt: '2026-01-01T00:00:01Z'
+		}
+	};
+	it('decodes a healthy snapshot', () => {
+		const out = decodeTelemetryHealth(good);
+		expect(out.telemetry.state).toBe('connected');
+		expect(out.telemetry.acknowledged).toBe(6);
+	});
+	it('rejects unknown state', () => {
+		expect(() => decodeTelemetryHealth({
+			...good, telemetry: { ...good.telemetry, state: 'weird' }
+		})).toThrow();
+	});
+	it('rejects negative counters', () => {
+		expect(() => decodeTelemetryHealth({
+			...good, telemetry: { ...good.telemetry, lost: -1 }
+		})).toThrow();
+	});
+	it('accepts disabled shape without optional fields', () => {
+		const out = decodeTelemetryHealth({
+			daemon: good.daemon,
+			telemetry: {
+				enabled: false, state: 'disabled', queueDepth: 0, spoolBytes: 0,
+				observed: 0, canonicalized: 0, acknowledged: 0, duplicates: 0,
+				rejected: 0, lost: 0, retries: 0, rediscoveries: 0
+			}
+		});
+		expect(out.telemetry.enabled).toBe(false);
+		expect(out.telemetry.instanceId).toBeUndefined();
 	});
 });

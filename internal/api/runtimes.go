@@ -1,5 +1,7 @@
 package api
 
+import "github.com/rceman/reposuite-relay/internal/telemetry"
+
 // GET /v1/runtimes — the global live harness-runtime inventory.
 // Observer-only: reading it never wakes a COLD session, spawns a
 // harness, attaches a native session, or mutates durable state.
@@ -62,4 +64,12 @@ type RuntimeList struct {
 	SampledAt string        `json:"sampledAt"`
 	Runtimes  []RuntimeInfo `json:"runtimes"`
 	Totals    RuntimeTotals `json:"totals"`
+}
+
+// TelemetryHealth is the response of GET /v1/telemetry/repodex — the
+// observer-only RepoDex telemetry pipeline snapshot. It carries no
+// credential material (no service.token, no bearer).
+type TelemetryHealth struct {
+	Daemon    DaemonInfo         `json:"daemon"`
+	Telemetry telemetry.Snapshot `json:"telemetry"`
 }

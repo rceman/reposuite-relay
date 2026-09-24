@@ -150,9 +150,12 @@ type SessionUpdateNotification struct {
 // Update is the flattened session/update union. Relay reads only the
 // variants it maps to canonical events; an unknown variant is ignored.
 type Update struct {
-	SessionUpdate string        `json:"sessionUpdate"`
-	Content       *ContentBlock `json:"content,omitempty"`
-	MessageID     string        `json:"messageId,omitempty"`
+	SessionUpdate string `json:"sessionUpdate"`
+	// Content is a variant-dependent wire field: an object for message
+	// chunks, an array for tool calls. Kept raw and decoded per variant —
+	// decoding it eagerly as ContentBlock would drop whole tool updates.
+	Content   json.RawMessage `json:"content,omitempty"`
+	MessageID string          `json:"messageId,omitempty"`
 	// usage_update: the native context window accounting.
 	Cost *float64 `json:"cost,omitempty"`
 	Size *int64   `json:"size,omitempty"`
@@ -164,12 +167,51 @@ type Update struct {
 	ConfigOptions []ConfigOption `json:"configOptions,omitempty"`
 	// current_mode_update.
 	CurrentModeID string `json:"currentModeId,omitempty"`
+	// tool_call / tool_call_update (ACP tool lifecycle variants).
+	ToolCallID string         `json:"toolCallId,omitempty"`
+	Kind       string         `json:"kind,omitempty"`
+	Status     string         `json:"status,omitempty"`
+	Locations  []ToolLocation `json:"locations,omitempty"`
+}
+
+// ToolLocation is an ACP tool-call location ({path, line?}).
+type ToolLocation struct {
+	Path string `json:"path"`
+	Line *int64 `json:"line,omitempty"`
+}
+
+// ToolContent is one ACP tool-call content entry: {type:"content",
+// content:ContentBlock} | {type:"diff", path, oldText, newText} |
+// {type:"terminal", terminalId} | future variants Relay does not read.
+type ToolContent struct {
+	Type       string        `json:"type"`
+	Content    *ContentBlock `json:"content,omitempty"`
+	Path       string        `json:"path,omitempty"`
+	OldText    *string       `json:"oldText,omitempty"`
+	NewText    *string       `json:"newText,omitempty"`
+	TerminalID string        `json:"terminalId,omitempty"`
 }
 
 // Text returns the update's text content, when it carries any.
 func (u Update) Text() string {
-	if u.Content == nil {
+	if len(u.Content) == 0 {
 		return ""
 	}
-	return u.Content.Text
+	var b ContentBlock
+	if err := json.Unmarshal(u.Content, &b); err != nil {
+		return "" // non-object content (e.g. tool_call arrays)
+	}
+	return b.Text
+}
+
+// ToolContents returns the update's tool content array, when it carries one.
+func (u Update) ToolContents() []ToolContent {
+	if len(u.Content) == 0 {
+		return nil
+	}
+	var out []ToolContent
+	if err := json.Unmarshal(u.Content, &out); err != nil {
+		return nil
+	}
+	return out
 }

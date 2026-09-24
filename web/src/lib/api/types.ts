@@ -368,3 +368,28 @@ export interface RuntimeList {
 	runtimes: RuntimeInfo[];
 	totals: RuntimeTotals;
 }
+
+/** RepoDex telemetry health snapshot — GET /v1/telemetry/repodex. */
+export interface TelemetrySnapshot {
+	enabled: boolean;
+	state: 'disabled' | 'disconnected' | 'connected' | 'degraded' | 'incompatible';
+	instanceId?: string;
+	endpoint?: string;
+	queueDepth: number;
+	spoolBytes: number;
+	observed: number;
+	canonicalized: number;
+	acknowledged: number;
+	duplicates: number;
+	rejected: number;
+	lost: number;
+	retries: number;
+	rediscoveries: number;
+	lastAckAt?: string;
+}
+
+/** GET /v1/telemetry/repodex payload. */
+export interface TelemetryHealth {
+	daemon: DaemonInfo;
+	telemetry: TelemetrySnapshot;
+}

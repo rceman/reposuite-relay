@@ -127,53 +127,56 @@ func (s *Sessions) SetHooks(h *Hooks) {
 // fields that are durable. No runtime fields exist in this struct, so a
 // runtime can never be persisted by accident.
 type meta struct {
-	Version          int       `json:"version"`
-	SessionID        string    `json:"sessionId"`
-	Key              string    `json:"key"`
-	Harness          string    `json:"harness"`
-	Cwd              string    `json:"cwd"`
-	NativeSessionID  string    `json:"nativeSessionId,omitempty"`
-	State            string    `json:"state"`
-	Model            string    `json:"model,omitempty"`
-	Mode             string    `json:"mode,omitempty"`
-	Generation       int       `json:"generation"`
-	SeqHighWatermark uint64    `json:"seqHighWatermark,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	Version               int       `json:"version"`
+	SessionID             string    `json:"sessionId"`
+	Key                   string    `json:"key"`
+	Harness               string    `json:"harness"`
+	Cwd                   string    `json:"cwd"`
+	NativeSessionID       string    `json:"nativeSessionId,omitempty"`
+	State                 string    `json:"state"`
+	Model                 string    `json:"model,omitempty"`
+	Mode                  string    `json:"mode,omitempty"`
+	Generation            int       `json:"generation"`
+	SeqHighWatermark      uint64    `json:"seqHighWatermark,omitempty"`
+	TelemetrySeqWatermark uint64    `json:"telemetrySeqWatermark,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 func toMeta(rs *session.RelaySession) meta {
 	return meta{
-		Version:          MetaVersion,
-		SessionID:        rs.ID,
-		Key:              rs.Key,
-		Harness:          rs.Harness,
-		Cwd:              rs.Cwd,
-		NativeSessionID:  rs.NativeSessionID,
-		State:            rs.State,
-		Model:            rs.Model,
-		Mode:             rs.Mode,
-		Generation:       rs.Generation,
-		SeqHighWatermark: rs.SeqHighWatermark,
-		CreatedAt:        rs.CreatedAt.UTC(),
-		UpdatedAt:        rs.UpdatedAt.UTC(),
+		Version:               MetaVersion,
+		SessionID:             rs.ID,
+		Key:                   rs.Key,
+		Harness:               rs.Harness,
+		Cwd:                   rs.Cwd,
+		NativeSessionID:       rs.NativeSessionID,
+		State:                 rs.State,
+		Model:                 rs.Model,
+		Mode:                  rs.Mode,
+		Generation:            rs.Generation,
+		SeqHighWatermark:      rs.SeqHighWatermark,
+		TelemetrySeqWatermark: rs.TelemetrySeqWatermark,
+		CreatedAt:             rs.CreatedAt.UTC(),
+		UpdatedAt:             rs.UpdatedAt.UTC(),
 	}
 }
 
 func (m meta) toSession() *session.RelaySession {
 	return &session.RelaySession{
-		ID:               m.SessionID,
-		Key:              m.Key,
-		Harness:          m.Harness,
-		Cwd:              m.Cwd,
-		NativeSessionID:  m.NativeSessionID,
-		State:            m.State,
-		Model:            m.Model,
-		Mode:             m.Mode,
-		Generation:       m.Generation,
-		SeqHighWatermark: m.SeqHighWatermark,
-		CreatedAt:        m.CreatedAt,
-		UpdatedAt:        m.UpdatedAt,
+		ID:                    m.SessionID,
+		Key:                   m.Key,
+		Harness:               m.Harness,
+		Cwd:                   m.Cwd,
+		NativeSessionID:       m.NativeSessionID,
+		State:                 m.State,
+		Model:                 m.Model,
+		Mode:                  m.Mode,
+		Generation:            m.Generation,
+		SeqHighWatermark:      m.SeqHighWatermark,
+		TelemetrySeqWatermark: m.TelemetrySeqWatermark,
+		CreatedAt:             m.CreatedAt,
+		UpdatedAt:             m.UpdatedAt,
 	}
 }
 

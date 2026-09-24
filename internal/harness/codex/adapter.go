@@ -13,6 +13,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/telemetry"
 )
 
 // RuntimeKey is the single shared Codex app-server runtime key: one
@@ -38,6 +39,9 @@ type Deps struct {
 	RandRuntimeID func() (string, error)
 	// Version is reported in the initialize clientInfo.
 	Version string
+	// Telemetry is the optional RepoDex AgentEvent sink; nil-safe (nil or
+	// disabled = no telemetry, agent path unchanged).
+	Telemetry *telemetry.Service
 	// Now is a clock seam.
 	Now func() time.Time
 }
@@ -86,6 +90,21 @@ type activeTurn struct {
 	firstTurn      bool // this turn proves materialization
 	agentText      string
 	agentItemID    string
+	// tools tracks native tool items observed this turn: started items
+	// awaiting completion and completed items, for telemetry identity
+	// pairing and the turn-end sweep.
+	tools map[string]*toolObs
+	// lastUsage is the most recent thread/tokenUsage/updated `last`
+	// breakdown for this turn — authoritative per-turn accounting.
+	lastUsage    TokenUsageBreakdown
+	hasLastUsage bool
+}
+
+// toolObs is one observed native tool item within a turn.
+type toolObs struct {
+	name      string
+	category  string
+	completed bool
 }
 
 // inputPhase is the durable-resolution lifecycle of one requested input.

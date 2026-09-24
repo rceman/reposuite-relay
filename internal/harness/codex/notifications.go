@@ -6,6 +6,7 @@ import (
 	"github.com/rceman/reposuite-relay/internal/harness"
 	"github.com/rceman/reposuite-relay/internal/runtime"
 	"github.com/rceman/reposuite-relay/internal/session"
+	"github.com/rceman/reposuite-relay/internal/telemetry"
 )
 
 // --- notifications --------------------------------------------------
@@ -15,6 +16,8 @@ func (a *Adapter) handleNotification(method string, params json.RawMessage) {
 		a.onTurnStarted(params)
 	case NotifyAgentMessage:
 		a.onAgentMessageDelta(params)
+	case NotifyItemStarted:
+		a.onItemStarted(params)
 	case NotifyItemCompleted:
 		a.onItemCompleted(params)
 	case NotifyTurnCompleted:
@@ -84,26 +87,6 @@ func (a *Adapter) onAgentMessageDelta(params json.RawMessage) {
 	})
 }
 
-func (a *Adapter) onItemCompleted(params json.RawMessage) {
-	var p ItemCompletedNotification
-	if err := json.Unmarshal(params, &p); err != nil {
-		return
-	}
-	if p.Item.Type != "agentMessage" {
-		return
-	}
-	_, st := a.sessionByThread(p.ThreadID)
-	if st == nil {
-		return
-	}
-	a.mu.Lock()
-	if st.current != nil {
-		st.current.agentText = p.Item.Text
-		st.current.agentItemID = p.Item.ID
-	}
-	a.mu.Unlock()
-}
-
 func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	var p TurnCompletedNotification
 	if err := json.Unmarshal(params, &p); err != nil {
@@ -119,8 +102,13 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 	a.mu.Lock()
 	cur := st.current
 	text, itemID := "", ""
+	var usage TokenUsageBreakdown
+	var hasUsage bool
+	var pendingTools map[string]*toolObs
 	if cur != nil {
 		text, itemID = cur.agentText, cur.agentItemID
+		usage, hasUsage = cur.lastUsage, cur.hasLastUsage
+		pendingTools = cur.tools
 	}
 	firstTurn := cur != nil && cur.firstTurn
 	nativeID := st.nativeID
@@ -165,6 +153,8 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 			ItemID: itemID,
 			Text:   text,
 		})
+		// final_answer: the runtime-visible completed output, verbatim.
+		a.deps.Telemetry.FinalAnswer(m, text)
 	case "interrupted":
 		_ = a.publishDurable(m, api.EventTurnInterrupted, api.TurnEventPayload{TurnID: p.Turn.ID})
 	case "failed":
@@ -183,6 +173,50 @@ func (a *Adapter) onTurnCompleted(params json.RawMessage) {
 			TurnID: p.Turn.ID,
 			Error:  "turn ended with status " + p.Turn.Status,
 		})
+	}
+
+	// Turn-scoped telemetry: usage is provider-authoritative but a Relay
+	// turn is not a proven single model call — emitted with
+	// usage_estimated per the canonical contract.
+	if hasUsage {
+		a.deps.Telemetry.ModelUsage(m, telemetry.Usage{
+			CallID:   "turn:" + p.Turn.ID,
+			Status:   p.Turn.Status,
+			Duration: p.Turn.DurationMs,
+			Input:    &usage.InputTokens,
+			Output:   &usage.OutputTokens,
+			CachedIn: &usage.CachedInputTokens,
+			Reason:   &usage.ReasoningOutputTokens,
+		})
+	}
+	// Tool sweep: items still marked started when the turn ended are
+	// completed with the turn's terminal status — never left dangling.
+	for id, t := range pendingTools {
+		if !t.completed {
+			a.deps.Telemetry.ToolCallCompleted(m, telemetry.ToolEnd{
+				CallID: id, ToolName: t.name, Category: t.category,
+				OK:     p.Turn.Status == "completed",
+				Status: p.Turn.Status,
+			})
+		}
+	}
+	// Fallback: completed items only visible in the terminal turn object.
+	for _, it := range p.Turn.Items {
+		if _, seen := pendingTools[it.ID]; seen {
+			continue
+		}
+		name, cat, ok := toolIdentity(it)
+		if !ok {
+			continue
+		}
+		a.deps.Telemetry.ToolCallCompleted(m, telemetry.ToolEnd{
+			CallID: it.ID, ToolName: name, Category: cat,
+			OK: toolOK(it), Status: it.Status,
+			DurationMs: it.DurationMs, Output: toolOutput(it),
+		})
+		for _, so := range a.sourcesOf(m.Snapshot().Cwd, it) {
+			a.deps.Telemetry.SourceObserved(m, so)
+		}
 	}
 
 	// Terminal record published: the turn is no longer in flight.
@@ -213,7 +247,26 @@ func (a *Adapter) onTokenUsage(params json.RawMessage) {
 	last, total := p.TokenUsage.Last, p.TokenUsage.Total
 	st.metrics.Last, st.metrics.Total = &last, &total
 	metrics := *st.metrics
+	stash := st.current != nil &&
+		(st.current.turnID == "" || st.current.turnID == p.TurnID)
+	if stash {
+		// In-flight turn: the authoritative per-turn breakdown is emitted
+		// at turn end. `last` is provider-accounted — copied exactly.
+		st.current.lastUsage = last
+		st.current.hasLastUsage = true
+	}
 	a.mu.Unlock()
+	if !stash && p.TurnID != "" {
+		// Post-turn usage (the notification may follow turn/completed):
+		// emit at the objective turn boundary directly.
+		a.deps.Telemetry.ModelUsage(m, telemetry.Usage{
+			CallID:   "turn:" + p.TurnID,
+			Input:    &last.InputTokens,
+			Output:   &last.OutputTokens,
+			CachedIn: &last.CachedInputTokens,
+			Reason:   &last.ReasoningOutputTokens,
+		})
+	}
 	_ = a.publishTransient(m, api.EventMetricsUpdated, metricsPayload{
 		Kind:           "tokenUsage",
 		Metrics:        metrics,

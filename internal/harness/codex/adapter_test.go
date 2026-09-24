@@ -99,6 +99,10 @@ func (e *env) materialize(m *session.Managed, upd harness.SessionUpdate) error {
 	if upd.BumpGeneration {
 		rs.Generation++
 	}
+	if upd.TelemetrySeqWatermark != nil &&
+		*upd.TelemetrySeqWatermark > rs.TelemetrySeqWatermark {
+		rs.TelemetrySeqWatermark = *upd.TelemetrySeqWatermark
+	}
 	rs.UpdatedAt = time.Now().UTC()
 	return e.store.Save(rs)
 }

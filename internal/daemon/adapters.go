@@ -19,6 +19,7 @@ func (d *Daemon) registerAdapters() {
 		Materialize:   d.materialize,
 		RandRuntimeID: d.opts.RandRuntimeID,
 		Version:       version.Version,
+		Telemetry:     d.telemetry,
 	}), func() error {
 		_, err := d.opts.CodexCommand()
 		return err
@@ -30,6 +31,7 @@ func (d *Daemon) registerAdapters() {
 		Materialize:   d.materialize,
 		RandRuntimeID: d.opts.RandRuntimeID,
 		Version:       version.Version,
+		Telemetry:     d.telemetry,
 	}), func() error {
 		_, err := d.opts.DevinCommand("")
 		return err
@@ -41,6 +43,7 @@ func (d *Daemon) registerAdapters() {
 		Materialize:   d.materialize,
 		RandRuntimeID: d.opts.RandRuntimeID,
 		Version:       version.Version,
+		Telemetry:     d.telemetry,
 	}), func() error {
 		_, err := d.opts.OpenCodeCommand()
 		return err

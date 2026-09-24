@@ -69,6 +69,12 @@ const (
 	UpdateCurrentMode = "current_mode_update"
 	// UpdateSessionInfo carries native session metadata changes.
 	UpdateSessionInfo = "session_info_update"
+	// UpdateToolCall is a new tool invocation ({toolCallId, title, kind,
+	// status, content?, locations?}).
+	UpdateToolCall = "tool_call"
+	// UpdateToolCallUpdate mutates a tool call ({toolCallId, status,
+	// content?, locations?}).
+	UpdateToolCallUpdate = "tool_call_update"
 )
 
 // Prompt stop reasons (the ACP stop-reason enum).

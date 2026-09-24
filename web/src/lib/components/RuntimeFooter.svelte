@@ -7,7 +7,7 @@
 	// Hover previews are supplemental — the Sheet holds every detail.
 	import { onDestroy, onMount } from 'svelte';
 	import { api } from '$lib/api/client';
-	import type { RuntimeList } from '$lib/api/types';
+	import type { RuntimeList, TelemetryHealth } from '$lib/api/types';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Sheet from '$lib/components/ui/sheet';
 	import { Separator } from '$lib/components/ui/separator';
@@ -28,6 +28,7 @@
 	const POLL_MS = 5000;
 
 	let data = $state<RuntimeList | null>(null);
+	let tel = $state<TelemetryHealth | null>(null); // RepoDex telemetry health
 	let stale = $state(false); // last refresh failed after a good sample
 	let loading = $state(true); // no successful sample yet
 	let failed = $state(false); // never sampled successfully
@@ -42,9 +43,13 @@
 		const ctrl = new AbortController();
 		inFlight = ctrl;
 		try {
-			const out = await api.listRuntimes({ signal: ctrl.signal });
+			const [out, th] = await Promise.all([
+				api.listRuntimes({ signal: ctrl.signal }),
+				api.telemetryHealth({ signal: ctrl.signal })
+			]);
 			if (ctrl.signal.aborted) return;
 			data = out;
+			tel = th;
 			stale = false;
 			failed = false;
 		} catch {
@@ -83,6 +88,22 @@
 	});
 
 	const groups = $derived(data === null ? [] : groupByProvider(data));
+
+	function telemetryLabel(t: TelemetryHealth): string {
+		const s = t.telemetry;
+		switch (s.state) {
+			case 'connected':
+				return `Connected · queue ${s.queueDepth} · lost ${s.lost}`;
+			case 'degraded':
+				return `Degraded · queue ${s.queueDepth} · lost ${s.lost}`;
+			case 'incompatible':
+				return 'Incompatible';
+			case 'disconnected':
+				return 'Disconnected';
+			default:
+				return 'Disabled';
+		}
+	}
 
 	function openSheet(provider?: string) {
 		focusProvider = provider ?? null;
@@ -220,6 +241,41 @@
 					</Tooltip.Root>
 				{/each}
 			</div>
+			{#if tel !== null && tel.telemetry.enabled}
+				<Separator orientation="vertical" class="hidden h-4 md:block" />
+				<div class="hidden items-center md:flex">
+					<Tooltip.Root delayDuration={300}>
+						<Tooltip.Trigger>
+							<button
+								type="button"
+								class="hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
+								onclick={() => openSheet()}
+								aria-label="RepoDex telemetry: {telemetryLabel(tel)} — open details"
+							>
+								RepoDex
+								<span class={tel.telemetry.state === 'connected' ? 'text-foreground' : 'italic'}>
+									· {telemetryLabel(tel)}
+								</span>
+							</button>
+						</Tooltip.Trigger>
+						<Tooltip.Content side="top" class="bg-popover text-popover-foreground border p-3 text-left normal-case w-64">
+							<div class="text-xs">
+								<div class="mb-1 font-medium">RepoDex telemetry</div>
+								<div class="space-y-0.5 text-muted-foreground">
+									<div>state {tel.telemetry.state}</div>
+									<div>
+										queue {tel.telemetry.queueDepth} · ack {tel.telemetry.acknowledged}
+										· lost {tel.telemetry.lost}
+									</div>
+									{#if tel.telemetry.instanceId}
+										<div>instance {tel.telemetry.instanceId}</div>
+									{/if}
+								</div>
+							</div>
+						</Tooltip.Content>
+					</Tooltip.Root>
+				</div>
+			{/if}
 		{/if}
 	</div>
 </footer>
@@ -265,6 +321,47 @@
 					</div>
 				{/if}
 			{/each}
+			{#if tel !== null && tel.telemetry.enabled}
+				<div class="border-t py-3">
+					<div class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+						RepoDex telemetry
+					</div>
+					<div class="rounded-md border p-3 text-xs">
+						<dl class="grid grid-cols-2 gap-x-4 gap-y-1">
+							<dt class="text-muted-foreground">state</dt>
+							<dd class="text-right">{telemetryLabel(tel)}</dd>
+							{#if tel.telemetry.instanceId}
+								<dt class="text-muted-foreground">instance</dt>
+								<dd class="text-right font-mono">{tel.telemetry.instanceId}</dd>
+							{/if}
+							{#if tel.telemetry.endpoint}
+								<dt class="text-muted-foreground">endpoint</dt>
+								<dd class="text-right font-mono">{tel.telemetry.endpoint}</dd>
+							{/if}
+							<dt class="text-muted-foreground">queue depth</dt>
+							<dd class="text-right">{tel.telemetry.queueDepth}</dd>
+							<dt class="text-muted-foreground">spool bytes</dt>
+							<dd class="text-right">{formatBytes(tel.telemetry.spoolBytes)}</dd>
+							<dt class="text-muted-foreground">acknowledged</dt>
+							<dd class="text-right">{tel.telemetry.acknowledged}</dd>
+							<dt class="text-muted-foreground">duplicates</dt>
+							<dd class="text-right">{tel.telemetry.duplicates}</dd>
+							<dt class="text-muted-foreground">rejected</dt>
+							<dd class="text-right">{tel.telemetry.rejected}</dd>
+							<dt class="text-muted-foreground">lost</dt>
+							<dd class="text-right">{tel.telemetry.lost}</dd>
+							<dt class="text-muted-foreground">retries / rediscoveries</dt>
+							<dd class="text-right">
+								{tel.telemetry.retries} / {tel.telemetry.rediscoveries}
+							</dd>
+							{#if tel.telemetry.lastAckAt}
+								<dt class="text-muted-foreground">last ACK</dt>
+								<dd class="text-right">{tel.telemetry.lastAckAt}</dd>
+							{/if}
+						</dl>
+					</div>
+				</div>
+			{/if}
 			<div class="h-4"></div>
 		</ScrollArea>
 	</Sheet.Content>

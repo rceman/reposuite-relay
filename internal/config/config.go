@@ -33,6 +33,22 @@ type Config struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	ListenHost    string `json:"listenHost"`
 	ListenPort    int    `json:"listenPort"`
+	// RepoDex is the optional AgentEvent telemetry sink configuration.
+	// Absent/disabled means Relay runs with zero RepoDex dependency.
+	RepoDex RepoDexConfig `json:"repodex,omitempty"`
+}
+
+// RepoDexConfig is the nested telemetry-sink section. Field names follow
+// the existing camelCase convention; omitted values take telemetry
+// defaults (see internal/telemetry).
+type RepoDexConfig struct {
+	Enabled         bool   `json:"enabled"`
+	StateDir        string `json:"stateDir,omitempty"`
+	BatchMaxEvents  int    `json:"batchMaxEvents,omitempty"`
+	BatchMaxBytes   int    `json:"batchMaxBytes,omitempty"`
+	BatchMaxDelayMs int    `json:"batchMaxDelayMs,omitempty"`
+	QueueLimit      int    `json:"memoryQueueLimit,omitempty"`
+	SpoolLimitBytes int64  `json:"spoolLimitBytes,omitempty"`
 }
 
 // Address is the bind address for the configured endpoint.

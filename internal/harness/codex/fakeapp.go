@@ -243,6 +243,11 @@ func (f *fakeServer) finishTurn() {
 	f.items++
 	itemID := fmt.Sprintf("item_%016d", f.items)
 	reply := "echo: " + pt.text
+	// Deterministic tool-item fixtures: prompts prefixed "tool:<kind>"
+	// emit a native tool item lifecycle before the agent message.
+	if strings.HasPrefix(pt.text, "tool:") {
+		f.emitToolItems(pt)
+	}
 	if f.mode == "fail-turn" {
 		f.notify("turn/completed", map[string]any{
 			"threadId": pt.threadID,

@@ -95,3 +95,14 @@ func (d *Daemon) handleRuntimes(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// handleTelemetryHealth serves GET /v1/telemetry/repodex — a global,
+// observer-only RepoDex telemetry health snapshot. It never wakes a
+// session, starts RepoDex, touches a harness, or exposes credentials.
+func (d *Daemon) handleTelemetryHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, api.TelemetryHealth{
+		Daemon:    d.info(),
+		Telemetry: d.telemetry.Health(),
+	})
+}

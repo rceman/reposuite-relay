@@ -117,36 +117,15 @@ type RelaySession struct {
 	// emitted" — transient events consume seq without being persisted, so
 	// a restart must resume strictly after this watermark to guarantee no
 	// seq is ever reused.
-	SeqHighWatermark uint64    `json:"seqHighWatermark,omitempty"`
-	CreatedAt        time.Time // session creation
-	UpdatedAt        time.Time // last durable metadata change
-}
-
-// Managed is a durable RelaySession plus its daemon-side synchronization.
-// It deliberately owns NO process state: harness processes belong to the
-// RuntimeSupervisor (internal/runtime), which may host several sessions on
-// one shared runtime. A managed session with no supervisor binding is
-// COLD — zero harness resources.
-type Managed struct {
-	Session *RelaySession
-
-	// MetaMu serializes durable metadata mutation (session.json replace)
-	// for this session: seq-block reservation, model/mode, nativeSessionId,
-	// generation, state updates. Lock order: MetaMu may be taken under the
-	// events broker's per-session lock and under Registry.mu, and must
-	// never be held while taking either of them.
-	MetaMu sync.Mutex
-}
-
-// Snapshot returns a copy of the durable session metadata. Every read of a
-// field the daemon may mutate concurrently (state, generation, model,
-// mode, nativeSessionId, seq watermark) must go through Snapshot or hold
-// MetaMu: durable fields are mutated by the harness adapter from its own
-// goroutines, not only from HTTP handlers.
-func (m *Managed) Snapshot() RelaySession {
-	m.MetaMu.Lock()
-	defer m.MetaMu.Unlock()
-	return *m.Session
+	SeqHighWatermark uint64 `json:"seqHighWatermark,omitempty"`
+	// TelemetrySeqWatermark is the durable reserved sequence space for
+	// RepoDex AgentEvent telemetry: a separate per-session sequence domain
+	// (telemetry events are not canonical transcript events). Blocks of
+	// 256 are reserved durably before allocation; crash gaps are legal,
+	// reuse is not.
+	TelemetrySeqWatermark uint64    `json:"telemetrySeqWatermark,omitempty"`
+	CreatedAt             time.Time // session creation
+	UpdatedAt             time.Time // last durable metadata change
 }
 
 // Registry is the daemon-memory session authority: a mutex-guarded map

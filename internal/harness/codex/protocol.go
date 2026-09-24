@@ -34,6 +34,7 @@ const (
 	NotifyThreadStarted   = "thread/started"
 	NotifyTurnStarted     = "turn/started"
 	NotifyTurnCompleted   = "turn/completed"
+	NotifyItemStarted     = "item/started"
 	NotifyItemCompleted   = "item/completed"
 	NotifyAgentMessage    = "item/agentMessage/delta"
 	NotifyTokenUsage      = "thread/tokenUsage/updated"
@@ -166,11 +167,49 @@ type TurnInterruptParams struct {
 }
 
 // ThreadItem is the verified thread item subset (type discriminator plus
-// the fields Relay reads).
+// the fields Relay reads). The native item union is far richer; Relay
+// decodes only the variants it maps to canonical/telemetry events and
+// ignores the rest rather than guessing.
 type ThreadItem struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
 	Text string `json:"text,omitempty"`
+	// commandExecution item fields.
+	Command          string          `json:"command,omitempty"`
+	CommandActions   []CommandAction `json:"commandActions,omitempty"`
+	AggregatedOutput string          `json:"aggregatedOutput,omitempty"`
+	ExitCode         *int64          `json:"exitCode,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	DurationMs       *int64          `json:"durationMs,omitempty"`
+	// fileChange item fields.
+	Changes []FileUpdateChange `json:"changes,omitempty"`
+	// mcpToolCall / dynamicToolCall / webSearch / functionCallOutput fields.
+	Tool      string          `json:"tool,omitempty"`
+	Server    string          `json:"server,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Query     string          `json:"query,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Success   *bool           `json:"success,omitempty"`
+	ItemError json.RawMessage `json:"error,omitempty"`
+}
+
+// CommandAction is Codex's structured classification of what a command
+// actually did (verified union: read|listFiles|search|unknown). A "read"
+// action is objective source-delivery evidence — not a guessed `cat`.
+type CommandAction struct {
+	Type    string `json:"type"`
+	Command string `json:"command,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Path    string `json:"path,omitempty"`
+	Query   string `json:"query,omitempty"`
+}
+
+// FileUpdateChange is one fileChange entry: a path plus the exact diff
+// content present in the item.
+type FileUpdateChange struct {
+	Path string          `json:"path"`
+	Diff string          `json:"diff"`
+	Kind json.RawMessage `json:"kind,omitempty"`
 }
 
 // AgentMessageDeltaNotification is the verified delta notification.
@@ -185,6 +224,14 @@ type AgentMessageDeltaNotification struct {
 type TurnCompletedNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     Turn   `json:"turn"`
+}
+
+// ItemStartedNotification is the verified item-start notification.
+type ItemStartedNotification struct {
+	ThreadID    string     `json:"threadId"`
+	TurnID      string     `json:"turnId"`
+	Item        ThreadItem `json:"item"`
+	StartedAtMs int64      `json:"startedAtMs"`
 }
 
 // ItemCompletedNotification is the verified item completion notification.

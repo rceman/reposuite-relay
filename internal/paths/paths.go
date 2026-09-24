@@ -128,6 +128,12 @@ func (p Paths) DaemonLock() string { return filepath.Join(p.RunDir(), "relayd.lo
 // LogDir holds Relay logs.
 func (p Paths) LogDir() string { return filepath.Join(p.RelayRoot(), "logs") }
 
+// TelemetrySpool is the outage-fallback spool for canonical RepoDex
+// telemetry events — created lazily, owner-private, durable across restart.
+func (p Paths) TelemetrySpool() string {
+	return filepath.Join(p.RelayRoot(), "telemetry-spool")
+}
+
 // SessionsDir is the durable session store root: one canonical directory
 // per RelaySession ID. Per-session file layout is owned by internal/store.
 func (p Paths) SessionsDir() string { return filepath.Join(p.RelayRoot(), "sessions") }

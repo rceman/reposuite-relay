@@ -92,6 +92,9 @@ func (a *fakeAgent) runTurn(id int64, turn int, p PromptParams, text string) {
 		a.finish(id, p.SessionID, "refusal", nil)
 		return
 	}
+	if a.cfg.Mode == FakeTools {
+		a.emitToolCalls(p.SessionID)
+	}
 	reply := "echo: " + text
 	for _, part := range chunks(reply, 3) {
 		a.emit(p.SessionID, Update{
@@ -316,9 +319,10 @@ func promptText(p PromptParams) string {
 	return sb.String()
 }
 
-func content(text string) *ContentBlock {
+func content(text string) json.RawMessage {
 	block := TextBlock(text)
-	return &block
+	b, _ := json.Marshal(block)
+	return b
 }
 
 func chunks(s string, n int) []string {

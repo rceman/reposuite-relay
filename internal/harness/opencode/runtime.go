@@ -217,6 +217,60 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 		// never erase a value the runtime reported earlier.
 		a.publishMetrics(m, "context", acp.MergeMetrics(
 			a.Metrics(m.Session.ID), acp.ContextMetrics(update)))
+	case acp.UpdateToolCall:
+		// A new native tool call: started event + any already-terminal
+		// content (some providers emit a single complete update). The kind
+		// is tracked — updates do not repeat it.
+		if update.ToolCallID != "" && st != nil {
+			a.mu.Lock()
+			if st.tools == nil {
+				st.tools = map[string]acp.ToolMeta{}
+			}
+			var locPath string
+			if len(update.Locations) == 1 {
+				locPath = update.Locations[0].Path
+			}
+			st.tools[update.ToolCallID] = acp.ToolMeta{Kind: update.Kind, Path: locPath}
+			a.mu.Unlock()
+		}
+		if ts := acp.ToolStart(update); ts != nil {
+			a.deps.Telemetry.ToolCallStarted(m, *ts)
+		}
+		if te := acp.ToolEnd(update, update.Kind); te != nil {
+			a.deps.Telemetry.ToolCallCompleted(m, *te)
+		}
+		var initPath string
+		if len(update.Locations) == 1 {
+			initPath = update.Locations[0].Path
+		}
+		for _, so := range acp.ToolSources(update, m.Snapshot().Cwd, update.Kind, initPath) {
+			a.deps.Telemetry.SourceObserved(m, so)
+		}
+	case acp.UpdateToolCallUpdate:
+		// Terminal status ends the call; content delivered here is the
+		// source the agent actually received. The kind resolves from the
+		// call tracked at tool_call time — never guessed.
+		kind := update.Kind
+		var locPath string
+		if st != nil {
+			a.mu.Lock()
+			if tm, ok := st.tools[update.ToolCallID]; ok {
+				if kind == "" {
+					kind = tm.Kind
+				}
+				locPath = tm.Path
+			}
+			if acp.TerminalStatus(update.Status) {
+				delete(st.tools, update.ToolCallID)
+			}
+			a.mu.Unlock()
+		}
+		if te := acp.ToolEnd(update, kind); te != nil {
+			a.deps.Telemetry.ToolCallCompleted(m, *te)
+		}
+		for _, so := range acp.ToolSources(update, m.Snapshot().Cwd, kind, locPath) {
+			a.deps.Telemetry.SourceObserved(m, so)
+		}
 	case acp.UpdateConfigOption, acp.UpdateCurrentMode, acp.UpdateSessionInfo:
 		// Native metadata updates: the adapter's cached surface is refreshed
 		// by the ACP handle; Relay's durable model/mode only changes through

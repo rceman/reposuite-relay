@@ -65,6 +65,12 @@ func (d *Daemon) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.handleRuntimes(w, r)
+	case p == "/v1/telemetry/repodex":
+		if r.Method != http.MethodGet {
+			methodOrNotFound(w, r, http.MethodGet)
+			return
+		}
+		d.handleTelemetryHealth(w, r)
 	case p == "/v1/daemon/shutdown" && r.Method == http.MethodPost:
 		d.handleShutdown(w, r)
 	case p == "/v1/projects" && r.Method == http.MethodGet:

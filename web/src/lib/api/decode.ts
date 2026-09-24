@@ -24,6 +24,8 @@ import type {
 	RuntimeInfo,
 	RuntimeList,
 	RuntimeResources,
+	TelemetryHealth,
+	TelemetrySnapshot,
 	TranscriptPage,
 	TranscriptRecord
 } from './types';
@@ -484,4 +486,39 @@ export function decodeRuntimeList(v: unknown): RuntimeList {
 			rssBytes: reqNonNeg(t, 'rssBytes')
 		}
 	};
+}
+
+/** decodeTelemetryHealth validates GET /v1/telemetry/repodex. */
+export function decodeTelemetryHealth(v: unknown): TelemetryHealth {
+	if (!isRecord(v)) throw new DecodeError('telemetry');
+	const t = v.telemetry;
+	if (!isRecord(t)) throw new DecodeError('telemetry');
+	const state = t.state;
+	if (typeof state !== 'string' ||
+		!['disabled', 'disconnected', 'connected', 'degraded', 'incompatible'].includes(state)) {
+		throw new DecodeError('telemetry.state');
+	}
+	const snap: TelemetrySnapshot = {
+			enabled: t.enabled === true,
+			state: state as TelemetrySnapshot['state'],
+
+			queueDepth: reqNonNeg(t, 'queueDepth'),
+			spoolBytes: reqNonNeg(t, 'spoolBytes'),
+			observed: reqNonNeg(t, 'observed'),
+			canonicalized: reqNonNeg(t, 'canonicalized'),
+			acknowledged: reqNonNeg(t, 'acknowledged'),
+			duplicates: reqNonNeg(t, 'duplicates'),
+			rejected: reqNonNeg(t, 'rejected'),
+			lost: reqNonNeg(t, 'lost'),
+			retries: reqNonNeg(t, 'retries'),
+			rediscoveries: reqNonNeg(t, 'rediscoveries'),
+		};
+		{ const _la = 0; }
+		const instanceId = optString(t, 'instanceId');
+		if (instanceId !== undefined) snap.instanceId = instanceId;
+		const endpoint = optString(t, 'endpoint');
+		if (endpoint !== undefined) snap.endpoint = endpoint;
+		const lastAckAt = optString(t, 'lastAckAt');
+		if (lastAckAt !== undefined) snap.lastAckAt = lastAckAt;
+		return { daemon: decodeDaemonInfo(v.daemon), telemetry: snap };
 }

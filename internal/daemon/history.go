@@ -45,6 +45,11 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 		writeErr(w, http.StatusInternalServerError, api.ErrInternal, "stop runtime: "+err.Error())
 		return
 	}
+	// Terminal RelaySession lifecycle: the only session_completed point —
+	// runtime sleep/death and turn completion are not session completion.
+	// Emitted before durable delete so the event still carries session
+	// identity; delivery is async and never blocks the deletion.
+	d.telemetry.SessionCompleted(m, "session_deleted")
 	if err := d.store.Delete(m.Session.ID); err != nil {
 		var ce *store.CleanupError
 		var ue *store.UncertainError
@@ -55,6 +60,7 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 			fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
 			d.registry.CommitStop(key)
 			d.broker.Remove(m.Session.ID)
+			d.telemetry.ForgetSession(m.Session.ID)
 			writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
 			return
 		case errors.As(err, &ue):
@@ -62,6 +68,7 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 			// apply the outcome, then fail closed and halt.
 			d.registry.CommitStop(key)
 			d.broker.Remove(m.Session.ID)
+			d.telemetry.ForgetSession(m.Session.ID)
 			go d.initiate()
 			writeErr(w, http.StatusInternalServerError, api.ErrInternal,
 				"store commit uncertain; daemon halting: "+err.Error())
@@ -74,6 +81,7 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request, key string) 
 	}
 	d.registry.CommitStop(key)
 	d.broker.Remove(m.Session.ID)
+	d.telemetry.ForgetSession(m.Session.ID)
 	writeJSON(w, http.StatusOK, api.DaemonResponse{Daemon: d.info()})
 }
 

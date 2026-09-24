@@ -236,6 +236,13 @@ func (d *Daemon) materialize(m *session.Managed, upd harness.SessionUpdate) erro
 		rs.Generation++
 		changed = true
 	}
+	// Telemetry sequence reservation is monotone-only: a lower watermark
+	// is never written backward.
+	if upd.TelemetrySeqWatermark != nil &&
+		*upd.TelemetrySeqWatermark > rs.TelemetrySeqWatermark {
+		rs.TelemetrySeqWatermark = *upd.TelemetrySeqWatermark
+		changed = true
+	}
 	if !changed {
 		return nil // no durable write for a no-op projection
 	}
