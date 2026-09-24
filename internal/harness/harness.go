@@ -127,6 +127,9 @@ type SessionUpdate struct {
 	// space (internal/telemetry); used only by the seq allocator, never by
 	// harness adapters directly.
 	TelemetrySeqWatermark *uint64
+	// TelemetryStartedEvent freezes the canonical seq0 bytes — written
+	// once, never overwritten (internal/telemetry only).
+	TelemetryStartedEvent string
 }
 
 // ValidNativeID reports whether a durable native session identity is

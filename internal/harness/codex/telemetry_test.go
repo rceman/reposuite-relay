@@ -83,6 +83,12 @@ func (e *env) telemetryEnv(t *testing.T) (*telemetry.Service, *captureDoer) {
 			ReserveSeq: func(m *session.Managed, mark uint64) error {
 				return e.materialize(m, harness.SessionUpdate{TelemetrySeqWatermark: &mark})
 			},
+			FreezeStart: func(m *session.Managed, mark uint64, raw []byte) error {
+				return e.materialize(m, harness.SessionUpdate{
+					TelemetrySeqWatermark: &mark,
+					TelemetryStartedEvent: string(raw),
+				})
+			},
 			HTTPClient: cap,
 			Sleep:      func(time.Duration) {},
 		})

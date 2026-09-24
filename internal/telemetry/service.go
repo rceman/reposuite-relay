@@ -23,6 +23,11 @@ type Deps struct {
 	// ReserveSeq durably raises a session's telemetry sequence watermark
 	// under the session's MetaMu (daemon materialize path).
 	ReserveSeq func(m *session.Managed, mark uint64) error
+	// FreezeStart commits the FIRST reservation block AND the frozen
+	// canonical seq0 bytes in one durable write — allocation and the
+	// exact event bytes become durable together, closing the crash window
+	// between reservation and delivery.
+	FreezeStart func(m *session.Managed, mark uint64, raw []byte) error
 	// ProjectID resolves the current Relay presentation grouping for a
 	// session cwd ("" when ungrouped). Presentation authority only — never
 	// Task authority.
@@ -175,20 +180,31 @@ func (s *Service) emit(m *session.Managed, typ string, data any) {
 		return
 	}
 	st := s.sess(m)
-	// seq 0 is reserved for session_started: emitted ONCE per durable
-	// session, lazily at its first telemetry observation — a watermark
-	// above zero proves seq 0 was already allocated in an earlier daemon
-	// generation. It is never re-emitted: RepoDex dedups identical bytes
-	// but treats a re-emission whose timestamp/source drifted as a
-	// permanent CONFLICT, so regenerating it would wedge health to
-	// degraded on every restart. Undelivered copies survive via the spool.
+	// seq 0 is reserved for session_started. Its canonical bytes are
+	// FROZEN into durable session metadata at first participation
+	// (FreezeStart) — the watermark proves allocation, the frozen bytes
+	// make the exact event replayable after a crash that lost the
+	// in-memory copy. Every daemon generation re-enqueues the frozen
+	// bytes verbatim: RepoDex dedups a byte-identical resubmission as a
+	// harmless Duplicate, while a crash that never delivered seq0 is
+	// recovered on the next generation's first observation.
 	if !st.startedEmitted {
 		st.startedEmitted = true
 		if st.hwm == 0 {
 			rs := m.Snapshot()
-			// First-ever allocation: reserve a block covering seq 0 and
-			// consume it, so dynamic telemetry starts at seq 1.
-			if err := s.deps.ReserveSeq(m, seqBlockSize); err != nil {
+			// First-ever allocation: freeze the canonical seq0 bytes and
+			// reserve the initial block in ONE durable commit, so seq 0
+			// can never be allocated-but-unreproducible. Content uses only
+			// immutable facts; timestamp is the session creation time.
+			q := s.build(m, st, SeqSessionStarted,
+				TypeSessionStarted, SessionStartedData{Repository: rs.Cwd})
+			if q.raw == nil {
+				s.mu.Unlock()
+				s.hc.canonErr.Add(1)
+				s.hc.lost.Add(1)
+				return
+			}
+			if err := s.deps.FreezeStart(m, seqBlockSize, q.raw); err != nil {
 				s.mu.Unlock()
 				s.hc.canonErr.Add(1)
 				s.hc.lost.Add(1)
@@ -196,11 +212,20 @@ func (s *Service) emit(m *session.Managed, typ string, data any) {
 			}
 			st.hwm = seqBlockSize
 			st.next = 1
-			// Timestamp is the immutable session creation time — the
-			// event's literal meaning — never the observation time.
-			s.enqueueLocked(s.build(m, st, SeqSessionStarted,
-				TypeSessionStarted, SessionStartedData{Repository: rs.Cwd}))
+			s.enqueueLocked(q)
+		} else if raw := m.Snapshot().TelemetryStartedEvent; raw != "" {
+			// Restart replay: the exact frozen canonical bytes — never
+			// reconstructed from mutable runtime state.
+			b := []byte(raw)
+			s.enqueueLocked(queued{
+				id:  eventIDOf(b),
+				raw: b,
+			})
 		}
+		// hwm>0 with no frozen event: the only such sessions were
+		// allocated before the freeze existed; their seq0 is gone —
+		// rebuild is intentionally skipped because reconstructing from
+		// mutable state could produce a permanent Conflict.
 	}
 	seq, err := s.allocLocked(m, st)
 	if err != nil {

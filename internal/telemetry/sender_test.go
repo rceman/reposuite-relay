@@ -224,13 +224,20 @@ func TestMixedBatchAccounting(t *testing.T) {
 		t.Fatalf("rejected event not lost/degraded: %+v", h)
 	}
 	// The rejected event was dropped (not retried); later events deliver.
+	// Wait on the final_answer event itself — counter thresholds can be
+	// reached by the tool batch alone when sends interleave.
 	s.FinalAnswer(m, "after")
 	waitFor(t, "post-reject delivery", func() bool {
-		return s.Health().Acknowledged >= 3
+		doer.mu.Lock()
+		defer doer.mu.Unlock()
+		for _, b := range doer.bodies {
+			if strings.Contains(string(b), `"final_answer"`) {
+				return true
+			}
+		}
+		return false
 	})
-	if s.Health().QueueDepth != 0 {
-		t.Fatal("queue wedged on rejected event")
-	}
+	waitFor(t, "queue drained", func() bool { return s.Health().QueueDepth == 0 })
 }
 
 // A non-auth 4xx is a definitive rejection: the batch is dropped as lost,

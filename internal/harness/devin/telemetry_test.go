@@ -79,6 +79,12 @@ func telemetrySink(t *testing.T, e interface {
 			ReserveSeq: func(m *session.Managed, mark uint64) error {
 				return e.Materialize(m, harness.SessionUpdate{TelemetrySeqWatermark: &mark})
 			},
+			FreezeStart: func(m *session.Managed, mark uint64, raw []byte) error {
+				return e.Materialize(m, harness.SessionUpdate{
+					TelemetrySeqWatermark: &mark,
+					TelemetryStartedEvent: string(raw),
+				})
+			},
 			HTTPClient: cap,
 			Sleep:      func(time.Duration) {},
 		})

@@ -137,10 +137,15 @@ internal/daemon           GET /v1/telemetry/repodex auth matrix
   agentMessage duplicates `final_answer`; for ACP chunked deltas are not
   message boundaries. `final_answer` covers the completed output for all
   three harnesses — no provider-asymmetric message noise.
-- `session_started` is emitted once per durable session at seq 0 (never
-  re-emitted after restart — RepoDex treats a drifted re-emission as a
-  permanent conflict). A pre-telemetry session emits it retroactively but
-  deterministically (`CreatedAt` timestamp, immutable facts only).
+- `session_started` canonical bytes are frozen into durable session
+  metadata at first participation (`telemetryStartedEvent`, same commit
+  as the first sequence-block reservation) and replayed verbatim on every
+  daemon generation — a crash between allocation and RepoDex ACK cannot
+  lose it (RepoDex dedups the identical resubmission; a drifted
+  re-emission would be a permanent conflict, so the bytes are never
+  rebuilt). A pre-telemetry session freezes it retroactively but
+  deterministically (`CreatedAt` timestamp, immutable facts only —
+  no `native_session_id`/`project_id`/current version).
 - Codex `tokenUsage.last` is the provider's last-call breakdown; emitted
   turn-scoped with `usage_estimated=true` (a turn may span several calls —
   last-call values are an honest proxy undercount, never an estimate).

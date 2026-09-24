@@ -243,6 +243,12 @@ func (d *Daemon) materialize(m *session.Managed, upd harness.SessionUpdate) erro
 		rs.TelemetrySeqWatermark = *upd.TelemetrySeqWatermark
 		changed = true
 	}
+	// The seq0 freeze is write-once: an already-frozen canonical event
+	// must never be mutated under its allocated identity.
+	if upd.TelemetryStartedEvent != "" && rs.TelemetryStartedEvent == "" {
+		rs.TelemetryStartedEvent = upd.TelemetryStartedEvent
+		changed = true
+	}
 	if !changed {
 		return nil // no durable write for a no-op projection
 	}

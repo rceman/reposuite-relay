@@ -90,8 +90,10 @@ IMPLEMENTED:
 - **RepoDex telemetry** (`internal/telemetry`, `repodex` section of
   `relay.json`, disabled by default): canonical AgentEvent v1 emission
   from harness-observed events only — `session_started` (lazy, seq 0,
-  emitted once per durable session — never re-emitted; RepoDex conflicts
-  on drifted re-emission), `session_completed` (session delete only),
+  canonical bytes frozen durably at first participation via
+  `TelemetryStartedEvent` — replayed verbatim each daemon generation so a
+  crash between allocation and ACK cannot lose it; RepoDex dedups the
+  identical resubmission), `session_completed` (session delete only),
   tool_call lifecycle, `source_observed` (only when content was actually
   delivered — never filenames/listings/prose), `final_answer`, turn-scoped
   `model_call_completed` usage with `usage_estimated`. Per-session durable sequence via

@@ -56,6 +56,12 @@ func (d *Daemon) initTelemetry(p paths.Paths) {
 		ReserveSeq: func(m *session.Managed, mark uint64) error {
 			return d.materialize(m, harness.SessionUpdate{TelemetrySeqWatermark: &mark})
 		},
+		FreezeStart: func(m *session.Managed, mark uint64, raw []byte) error {
+			return d.materialize(m, harness.SessionUpdate{
+				TelemetrySeqWatermark: &mark,
+				TelemetryStartedEvent: string(raw),
+			})
+		},
 		ProjectID:      d.projectIDForCwd,
 		AdapterVersion: version.Version,
 	})

@@ -18,14 +18,20 @@ project_id  = presentation-catalog project id when the session cwd matches
 repository_id / repo_head / investigation_id = unset (no authority)
 ```
 
-`session_started` is emitted ONCE per durable session, lazily at its first
-telemetry observation, at sequence 0 with the durable `CreatedAt`
-timestamp. It is never re-emitted: RepoDex dedups on a whole-event
-semantic digest, so a re-emitted event with a drifted timestamp is a
-permanent CONFLICT (rejected), not a duplicate. Undelivered copies
-survive via the spool (canonical bytes preserved). After a restart the
-sequence resumes strictly after the durable watermark — the unspent tail
-of a reserved block is a legal gap, values are never reused.
+`session_started` is emitted lazily at the first telemetry observation of
+a session, at sequence 0 with the durable `CreatedAt` timestamp. Its
+canonical bytes are FROZEN into durable session metadata
+(`telemetryStartedEvent` in session.json) in the same commit that
+reserves the first sequence block — the watermark proves allocation, the
+frozen bytes make the event replayable forever. Every daemon generation
+re-enqueues the verbatim frozen bytes at the session's first
+observation: RepoDex dedups an identical resubmission as a harmless
+Duplicate, while a crash between allocation and ACK (in-memory queue
+lost, nothing spooled) is recovered on the next generation. The event
+carries only immutable facts — no `native_session_id`, no `project_id`,
+no mutable timestamps. After a restart the sequence resumes strictly
+after the durable watermark; the unspent tail of a reserved block is a
+legal gap, values are never reused.
 
 ## Codex (`internal/harness/codex`)
 

@@ -123,7 +123,13 @@ type RelaySession struct {
 	// (telemetry events are not canonical transcript events). Blocks of
 	// 256 are reserved durably before allocation; crash gaps are legal,
 	// reuse is not.
-	TelemetrySeqWatermark uint64    `json:"telemetrySeqWatermark,omitempty"`
+	TelemetrySeqWatermark uint64 `json:"telemetrySeqWatermark,omitempty"`
+	// TelemetryStartedEvent is the frozen canonical seq0 session_started
+	// event bytes — written ONCE at first telemetry participation and
+	// never mutated. The watermark proves seq 0 was allocated; this seed
+	// proves the exact canonical bytes are replayable after a crash that
+	// lost the in-memory copy (RepoDex dedups a verbatim replay).
+	TelemetryStartedEvent string    `json:"telemetryStartedEvent,omitempty"`
 	CreatedAt             time.Time // session creation
 	UpdatedAt             time.Time // last durable metadata change
 }

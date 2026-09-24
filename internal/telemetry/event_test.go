@@ -3,135 +3,11 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/rceman/reposuite-relay/internal/session"
 )
-
-func testManaged(id, harness, cwd string, watermark uint64) *session.Managed {
-	return &session.Managed{Session: &session.RelaySession{
-		ID: id, Key: "k-" + id, Harness: harness, Cwd: cwd,
-		State: "idle", TelemetrySeqWatermark: watermark,
-	}}
-}
-
-// fakeDoer records requests and replays scripted replies.
-type fakeDoer struct {
-	t       *testing.T
-	reqs    atomic.Int64
-	mu      sync.Mutex
-	bodies  [][]byte
-	fail    atomic.Bool
-	status  int
-	lastErr error
-	reply   *ingestReply
-	replyFn func() *ingestReply // per-call override; nil → default accept
-}
-
-func (f *fakeDoer) Do(r *Request) (*Reply, error) {
-	f.reqs.Add(1)
-	f.mu.Lock()
-	f.bodies = append(f.bodies, r.Body)
-	f.mu.Unlock()
-	if f.fail.Load() {
-		return nil, fmt.Errorf("connection refused")
-	}
-	if f.lastErr != nil {
-		return nil, f.lastErr
-	}
-	if strings.HasSuffix(r.URL, "/v1/status") {
-		// Discovery always answers 200 — f.status scripts the ingest
-		// endpoint only.
-		return &Reply{
-			Status: 200,
-			Body:   []byte(`{"schema":"` + statusSchema + `"}`),
-		}, nil
-	}
-	if f.status != 0 && f.status != 200 {
-		return &Reply{
-			Status: f.status,
-			Body:   []byte(`{}`),
-		}, nil
-	}
-	rep := f.reply
-	if f.replyFn != nil {
-		rep = f.replyFn()
-	}
-	if rep == nil {
-		var evs []json.RawMessage
-		_ = json.Unmarshal(r.Body, &evs)
-		rep = &ingestReply{
-			Schema:   ingestSchema,
-			Accepted: int64(len(evs)),
-		}
-	}
-	rep.Schema = ingestSchema
-	b, _ := json.Marshal(rep)
-	return &Reply{
-		Status: 200,
-		Body:   b,
-	}, nil
-}
-
-// writeDescriptor publishes a descriptor+token into a temp state dir.
-func writeDescriptor(t *testing.T, dir, host string, port uint16) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	d := descriptor{
-		Schema:          runtimeSchema,
-		PID:             1,
-		Host:            host,
-		Port:            port,
-		InstanceID:      "repodex-1",
-		StartedAt:       "2026-01-01T00:00:00Z",
-		RepoDexVersion:  "0.1.0",
-		ProtocolVersion: 1,
-	}
-	b, _ := json.Marshal(d)
-	if err := os.WriteFile(filepath.Join(dir, runtimeFile), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tok := strings.Repeat("ab", 32)
-	if err := os.WriteFile(filepath.Join(dir, tokenFile), []byte(tok), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func testDeps(t *testing.T, doer Doer, spoolDir string) Deps {
-	t.Helper()
-	marks := map[string]uint64{}
-	return Deps{
-		SpoolDir:       spoolDir,
-		AdapterVersion: "test",
-		ReserveSeq: func(m *session.Managed, mark uint64) error {
-			m.MetaMu.Lock()
-			defer m.MetaMu.Unlock()
-			if mark > marks[m.Session.ID] {
-				marks[m.Session.ID] = mark
-				m.Session.TelemetrySeqWatermark = mark
-			}
-			return nil
-		},
-		HTTPClient: doer,
-		Now:        func() time.Time { return time.Now().UTC() },
-		Sleep:      func(time.Duration) {},
-	}
-}
-
-func enabledCfg(t *testing.T, stateDir string) Config {
-	return Config{
-		Enabled:  true,
-		StateDir: stateDir,
-	}.withDefaults()
-}
 
 // --- envelope validation -------------------------------------------------
 
@@ -217,9 +93,9 @@ func TestSequencePerSessionAndRestart(t *testing.T) {
 		t.Fatalf("session2 seq contaminated: %+v", evs[3])
 	}
 
-	// Daemon restart: new service, watermark durable → session_started is
-	// NOT re-emitted (RepoDex dedups identical bytes but rejects drifted
-	// re-emission as a permanent conflict — seq0 was allocated once).
+	// Daemon restart: new service, watermark durable → the FROZEN seq0
+	// bytes are replayed verbatim (RepoDex dedups a byte-identical
+	// resubmission; a crash that lost the in-memory copy is recovered).
 	// The next dynamic seq resumes strictly after the watermark, never
 	// reusing; the reserved block's tail is a legal crash gap.
 	s2 := New(cfg, deps)
@@ -229,14 +105,19 @@ func TestSequencePerSessionAndRestart(t *testing.T) {
 		Category: CatShell,
 	})
 	s2.mu.Lock()
-	if len(s2.queue) != 1 {
-		t.Fatalf("restart emitted %d events, want exactly the new one", len(s2.queue))
+	if len(s2.queue) != 2 {
+		t.Fatalf("restart emitted %d events, want frozen seq0 + new one", len(s2.queue))
 	}
-	var re Event
-	_ = json.Unmarshal(s2.queue[0].raw, &re)
+	var seed, re Event
+	seedRaw := string(s2.queue[0].raw)
+	_ = json.Unmarshal(s2.queue[0].raw, &seed)
+	_ = json.Unmarshal(s2.queue[1].raw, &re)
 	s2.mu.Unlock()
-	if re.Type == TypeSessionStarted {
-		t.Fatal("session_started re-emitted after restart")
+	if seed.Type != TypeSessionStarted || seed.Sequence != 0 {
+		t.Fatalf("frozen seq0 not replayed: %+v", seed)
+	}
+	if seedRaw != m1.Session.TelemetryStartedEvent {
+		t.Fatal("seq0 replay not byte-identical to frozen seed")
 	}
 	if re.Sequence <= 256 {
 		t.Fatalf("seq reused after restart: %d", re.Sequence)
@@ -252,7 +133,7 @@ func TestSequencePerSessionAndRestart(t *testing.T) {
 	s2.FinalAnswer(m3, "hi")
 	s2.mu.Lock()
 	var s0 Event
-	_ = json.Unmarshal(s2.queue[1].raw, &s0)
+	_ = json.Unmarshal(s2.queue[2].raw, &s0)
 	s2.mu.Unlock()
 	if s0.Sequence != 0 || s0.Type != TypeSessionStarted ||
 		s0.Timestamp != "2026-01-01T00:00:00Z" {

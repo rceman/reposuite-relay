@@ -139,6 +139,7 @@ type meta struct {
 	Generation            int       `json:"generation"`
 	SeqHighWatermark      uint64    `json:"seqHighWatermark,omitempty"`
 	TelemetrySeqWatermark uint64    `json:"telemetrySeqWatermark,omitempty"`
+	TelemetryStartedEvent string    `json:"telemetryStartedEvent,omitempty"`
 	CreatedAt             time.Time `json:"createdAt"`
 	UpdatedAt             time.Time `json:"updatedAt"`
 }
@@ -157,6 +158,7 @@ func toMeta(rs *session.RelaySession) meta {
 		Generation:            rs.Generation,
 		SeqHighWatermark:      rs.SeqHighWatermark,
 		TelemetrySeqWatermark: rs.TelemetrySeqWatermark,
+		TelemetryStartedEvent: rs.TelemetryStartedEvent,
 		CreatedAt:             rs.CreatedAt.UTC(),
 		UpdatedAt:             rs.UpdatedAt.UTC(),
 	}
@@ -175,6 +177,7 @@ func (m meta) toSession() *session.RelaySession {
 		Generation:            m.Generation,
 		SeqHighWatermark:      m.SeqHighWatermark,
 		TelemetrySeqWatermark: m.TelemetrySeqWatermark,
+		TelemetryStartedEvent: m.TelemetryStartedEvent,
 		CreatedAt:             m.CreatedAt,
 		UpdatedAt:             m.UpdatedAt,
 	}

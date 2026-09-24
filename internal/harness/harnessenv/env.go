@@ -150,6 +150,9 @@ func (e *Env) Materialize(m *session.Managed, upd harness.SessionUpdate) error {
 		*upd.TelemetrySeqWatermark > rs.TelemetrySeqWatermark {
 		rs.TelemetrySeqWatermark = *upd.TelemetrySeqWatermark
 	}
+	if upd.TelemetryStartedEvent != "" && rs.TelemetryStartedEvent == "" {
+		rs.TelemetryStartedEvent = upd.TelemetryStartedEvent
+	}
 	rs.UpdatedAt = time.Now().UTC()
 	return e.Store.Save(rs)
 }

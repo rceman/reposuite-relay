@@ -52,6 +52,16 @@ reserves blocks of 256; a crash may leave gaps but never reuses values.
 This domain is fully separate from the canonical transcript sequence
 (`SeqHighWatermark`).
 
+seq 0 is special: allocation alone does not prove RepoDex ever received
+it. The canonical `session_started` bytes are therefore frozen into the
+durable session (`telemetryStartedEvent`, same commit as the first block
+reservation) and replayed verbatim on every daemon generation at the
+session's first observation. RepoDex dedups an identical resubmission as
+a harmless Duplicate; a crash that lost the in-memory copy before any
+ACK or spool write is recovered on the next generation. The frozen event
+contains only immutable facts — `CreatedAt` timestamp, no native session
+id, no project grouping — so replay can never conflict.
+
 ## Health
 
 `GET /v1/telemetry/repodex` (observer-only, all three credential domains)
