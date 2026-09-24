@@ -2,9 +2,11 @@ package telemetry
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -147,4 +149,129 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timeout: " + what)
+}
+
+// data must be a JSON object on the wire — the []byte/base64 regression
+// is guarded by inspecting the exact HTTP body, not a permissive decode.
+func TestDataIsJSONObjectOnWire(t *testing.T) {
+	dir := t.TempDir()
+	writeDescriptor(t, filepath.Join(dir, "rd"), "127.0.0.1", 9)
+	doer := &fakeDoer{t: t}
+	s := startService(t, enabledCfg(t, filepath.Join(dir, "rd")),
+		testDeps(t, doer, filepath.Join(dir, "spool")))
+	m := testManaged("33330000", "codex", "/r", 0)
+	s.ToolCallStarted(m, ToolStart{
+		CallID:   "c1",
+		ToolName: "read",
+		Category: CatFileRead,
+	})
+	waitFor(t, "delivered", func() bool { return s.Health().Acknowledged >= 2 })
+	doer.mu.Lock()
+	body := doer.bodies[len(doer.bodies)-1]
+	doer.mu.Unlock()
+	var evs []map[string]any
+	if err := json.Unmarshal(body, &evs); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		d, isObj := e["data"].(map[string]any)
+		if !isObj {
+			t.Fatalf("data not a JSON object (base64 regression): %T", e["data"])
+		}
+		if len(d) == 0 {
+			t.Fatal("data empty")
+		}
+	}
+}
+
+// Mixed batch [accepted, duplicate, permanent-invalid, accepted]:
+// RepoDex accounts every event; rejected are lost, the batch is dropped,
+// and later telemetry still flows (no wedge).
+func TestMixedBatchAccounting(t *testing.T) {
+	dir := t.TempDir()
+	writeDescriptor(t, filepath.Join(dir, "rd"), "127.0.0.1", 9)
+	var once atomic.Bool
+	doer := &fakeDoer{t: t}
+	doer.replyFn = func() *ingestReply {
+		if !once.Swap(true) {
+			// session_started + 3 events = 4 accounted: 2 accepted,
+			// 1 duplicate, 1 rejected.
+			return &ingestReply{
+				Accepted:   2,
+				Duplicates: 1,
+				Rejected:   1,
+				Errors:     []string{"33334444:3: bad field"},
+			}
+		}
+		return nil // default: accept all
+	}
+	s := startService(t, enabledCfg(t, filepath.Join(dir, "rd")),
+		testDeps(t, doer, filepath.Join(dir, "spool")))
+	m := testManaged("33334444", "codex", "/r", 0)
+	for i := 0; i < 3; i++ {
+		s.ToolCallStarted(m, ToolStart{
+			CallID:   fmt.Sprint(i),
+			ToolName: "x",
+			Category: CatShell,
+		})
+	}
+	waitFor(t, "mixed ack", func() bool {
+		h := s.Health()
+		return h.Acknowledged >= 2 && h.Duplicates >= 1 && h.Rejected >= 1
+	})
+	h := s.Health()
+	if h.Lost < 1 || h.State != StateDegraded.String() {
+		t.Fatalf("rejected event not lost/degraded: %+v", h)
+	}
+	// The rejected event was dropped (not retried); later events deliver.
+	s.FinalAnswer(m, "after")
+	waitFor(t, "post-reject delivery", func() bool {
+		return s.Health().Acknowledged >= 3
+	})
+	if s.Health().QueueDepth != 0 {
+		t.Fatal("queue wedged on rejected event")
+	}
+}
+
+// A non-auth 4xx is a definitive rejection: the batch is dropped as lost,
+// never retried forever.
+func TestPermanentRejectionNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	writeDescriptor(t, filepath.Join(dir, "rd"), "127.0.0.1", 9)
+	doer := &fakeDoer{
+		t:      t,
+		status: 400,
+	}
+	s := startService(t, enabledCfg(t, filepath.Join(dir, "rd")),
+		testDeps(t, doer, filepath.Join(dir, "spool")))
+	m := testManaged("55550000", "codex", "/r", 0)
+	s.FinalAnswer(m, "x")
+	waitFor(t, "dropped", func() bool { return s.Health().Lost >= 2 })
+	if s.Health().QueueDepth != 0 {
+		t.Fatal("permanent reject left events pending")
+	}
+	reqs := doer.reqs.Load()
+	time.Sleep(150 * time.Millisecond)
+	if got := doer.reqs.Load(); got > reqs+1 {
+		t.Fatalf("permanent rejection retried: %d -> %d", reqs, got)
+	}
+	if s.Health().State != StateDegraded.String() {
+		t.Fatalf("state: %s", s.Health().State)
+	}
+}
+
+// Emissions after Shutdown are counted losses — never silent drops.
+func TestPostCloseEmitCounted(t *testing.T) {
+	dir := t.TempDir()
+	writeDescriptor(t, filepath.Join(dir, "rd"), "127.0.0.1", 9)
+	doer := &fakeDoer{t: t}
+	s := New(enabledCfg(t, filepath.Join(dir, "rd")),
+		testDeps(t, doer, filepath.Join(dir, "spool")))
+	s.Start()
+	s.Shutdown()
+	m := testManaged("66660000", "codex", "/r", 0)
+	s.FinalAnswer(m, "late")
+	if s.Health().Lost != 1 {
+		t.Fatalf("post-close emit not counted lost: %d", s.Health().Lost)
+	}
 }

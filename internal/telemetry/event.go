@@ -33,7 +33,6 @@ const (
 	TypeToolCallStarted  = "tool_call_started"
 	TypeToolCallDone     = "tool_call_completed"
 	TypeSourceObserved   = "source_observed"
-	TypeAgentMessage     = "agent_message"
 	TypeFinalAnswer      = "final_answer"
 )
 
@@ -197,15 +196,6 @@ type SourceObservedData struct {
 	FileDigest      string `json:"file_content_digest,omitempty"`
 	ByteStart       *int64 `json:"byte_start,omitempty"`
 	ByteEnd         *int64 `json:"byte_end,omitempty"`
-}
-
-// AgentMessageData for agent_message — one completed native assistant
-// message item, verbatim.
-type AgentMessageData struct {
-	Role          string `json:"role"`
-	Content       string `json:"content,omitempty"`
-	ContentBytes  *int64 `json:"content_bytes,omitempty"`
-	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 // FinalAnswerData for final_answer — the runtime-visible completed agent

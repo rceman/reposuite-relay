@@ -93,6 +93,10 @@ func New(cfg Config, deps Deps) *Service {
 		sessions: map[string]*sessionState{},
 		wake:     make(chan struct{}, 1),
 		done:     make(chan struct{}),
+		// The spool handle is assigned at construction so Health() can
+		// never observe a nil/racing pointer; load() still runs on the
+		// sender goroutine (FS scan is sender-owned).
+		spool: openSpool(deps.SpoolDir, cfg.SpoolLimitBytes),
 	}
 }
 
@@ -166,36 +170,47 @@ func (s *Service) emit(m *session.Managed, typ string, data any) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		// A post-shutdown emission is a real drop — count it, never hide it.
+		s.hc.lost.Add(1)
 		return
 	}
 	st := s.sess(m)
-	// seq 0 is reserved for session_started: emitted lazily on the
-	// session's first telemetry observation. Content uses only immutable
-	// facts, so a daemon restart re-emits an identical event and RepoDex
-	// dedups it by event_id — deterministic and idempotent.
+	// seq 0 is reserved for session_started: emitted ONCE per durable
+	// session, lazily at its first telemetry observation — a watermark
+	// above zero proves seq 0 was already allocated in an earlier daemon
+	// generation. It is never re-emitted: RepoDex dedups identical bytes
+	// but treats a re-emission whose timestamp/source drifted as a
+	// permanent CONFLICT, so regenerating it would wedge health to
+	// degraded on every restart. Undelivered copies survive via the spool.
 	if !st.startedEmitted {
-		rs := m.Snapshot()
+		st.startedEmitted = true
 		if st.hwm == 0 {
+			rs := m.Snapshot()
 			// First-ever allocation: reserve a block covering seq 0 and
 			// consume it, so dynamic telemetry starts at seq 1.
 			if err := s.deps.ReserveSeq(m, seqBlockSize); err != nil {
 				s.mu.Unlock()
 				s.hc.canonErr.Add(1)
+				s.hc.lost.Add(1)
 				return
 			}
 			st.hwm = seqBlockSize
 			st.next = 1
+			// Timestamp is the immutable session creation time — the
+			// event's literal meaning — never the observation time.
+			s.enqueueLocked(s.build(m, st, SeqSessionStarted,
+				TypeSessionStarted, SessionStartedData{Repository: rs.Cwd}))
 		}
-		st.startedEmitted = true
-		// hwm>0 means seq 0 was already allocated historically — re-emit
-		// identical content; dedup makes it safe.
-		s.enqueueLocked(s.build(m, st, SeqSessionStarted,
-			TypeSessionStarted, SessionStartedData{Repository: rs.Cwd}))
 	}
 	seq, err := s.allocLocked(m, st)
 	if err != nil {
 		s.mu.Unlock()
+		// A durable reservation failure drops the event — count it.
 		s.hc.canonErr.Add(1)
+		s.hc.lost.Add(1)
+		s.mu.Lock()
+		s.setStateLocked(StateDegraded)
+		s.mu.Unlock()
 		return
 	}
 	s.enqueueLocked(s.build(m, st, seq, typ, rawData))
@@ -214,19 +229,29 @@ func (s *Service) build(m *session.Managed, st *sessionState, seq uint64,
 	default:
 		rawData, _ = json.Marshal(v)
 	}
+	ts := s.deps.Now()
+	if seq == SeqSessionStarted && !rs.CreatedAt.IsZero() {
+		// session_started carries the session's durable creation time —
+		// immutable, so the event is stable across anything that ever
+		// re-derives it.
+		ts = rs.CreatedAt
+	}
 	ev := Event{
 		Schema:    SchemaID,
 		EventID:   "", // set below
 		SessionID: rs.ID,
 		Sequence:  seq,
-		Timestamp: s.deps.Now().Format(time.RFC3339Nano),
+		Timestamp: ts.UTC().Format(time.RFC3339Nano),
 		Source:    st.source,
 		Type:      typ,
 		Data:      rawData,
 	}
 	// Provenance: only a PROVEN durable native identity is attached — never
-	// a guessed one.
-	if harness.ValidNativeID(rs.NativeSessionID) {
+	// a guessed one. seq 0 is excluded: session_started re-emits after a
+	// daemon restart under the SAME event_id, so its content must be
+	// immutable — native identity may legitimately appear between
+	// emissions (first-turn materialization) and must not mutate it.
+	if seq != SeqSessionStarted && harness.ValidNativeID(rs.NativeSessionID) {
 		ev.Source.NativeSessionID = rs.NativeSessionID
 	}
 	if seq != SeqSessionStarted && s.deps.ProjectID != nil {

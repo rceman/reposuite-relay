@@ -91,28 +91,37 @@ func toolOutput(it ThreadItem) []byte {
 // sourcesOf extracts SourceObserved observations for a completed item.
 // Only structured source-delivery evidence qualifies:
 //
-//   - commandExecution with exactly ONE `read` CommandAction: Codex itself
-//     classified the command as a read of that path, and aggregatedOutput
-//     is the delivered content. Multiple read actions make per-file
-//     attribution unprovable → no event (never a guessed split).
-//   - fileChange: each change's diff IS delivered patch content.
+//   - commandExecution with exactly ONE CommandAction of type `read`:
+//     Codex itself classified the command as a pure read of that path and
+//     aggregatedOutput is the delivered content → explicit_read.
+//     Multi-action commands mix outputs — attribution is unprovable, so
+//     they produce nothing (never a guessed split).
+//   - commandExecution with exactly ONE `search` action: the delivered
+//     output is source snippets → search_snippet. Path stays absent:
+//     the action's path is the search ROOT, not an observed file.
+//   - fileChange: each change's diff IS delivered patch content → diff.
 //
-// `listFiles`/`search` actions, bare paths, and prose mentions never
-// produce SourceObserved — filenames are not source content.
+// `listFiles`, bare paths, prose mentions, and unclassified shell output
+// never produce SourceObserved — filenames are not source content.
 func (a *Adapter) sourcesOf(cwd string, it ThreadItem) []telemetry.SourceObs {
 	var out []telemetry.SourceObs
 	switch it.Type {
 	case "commandExecution":
-		var reads []CommandAction
-		for _, act := range it.CommandActions {
-			if act.Type == "read" {
-				reads = append(reads, act)
-			}
+		if len(it.CommandActions) != 1 || it.AggregatedOutput == "" {
+			break
 		}
-		if len(reads) == 1 && it.AggregatedOutput != "" {
+		act := it.CommandActions[0]
+		switch act.Type {
+		case "read":
 			out = append(out, telemetry.SourceObs{
-				Path:    telemetry.RelPath(reads[0].Path, cwd),
+				Path:    telemetry.RelPath(act.Path, cwd),
 				Kind:    telemetry.ObsExplicitRead,
+				CallID:  it.ID,
+				Content: []byte(it.AggregatedOutput),
+			})
+		case "search":
+			out = append(out, telemetry.SourceObs{
+				Kind:    telemetry.ObsSearchSnippet,
 				CallID:  it.ID,
 				Content: []byte(it.AggregatedOutput),
 			})

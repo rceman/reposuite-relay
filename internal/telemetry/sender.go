@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"errors"
 	"time"
 )
 
@@ -74,7 +75,8 @@ func (s *Service) setStateLocked(st state) {
 
 func (s *Service) run() {
 	defer close(s.done)
-	s.spool = openSpool(s.deps.SpoolDir, s.cfg.SpoolLimitBytes)
+	// s.spool was assigned in New() (Health must never race a nil
+	// pointer); only the FS scan happens here on the sender goroutine.
 	_ = s.spool.load()
 	s.setStateLocked(StateDisconnected)
 
@@ -130,18 +132,28 @@ func (s *Service) wait(d time.Duration) {
 
 // connect discovers the RepoDex endpoint and validates /v1/status.
 // Returns nil while the service is absent/down/incompatible — telemetry
-// reports the condition, agents are unaffected.
+// reports the condition, agents are unaffected. A schema/contract
+// mismatch reports "incompatible"; absence/transport failure reports
+// "disconnected".
 func (s *Service) connect() *endpoint {
 	ep, err := discover(s.cfg.RepoDexStateDir())
 	if err != nil {
 		s.mu.Lock()
-		s.setStateLocked(StateDisconnected)
+		if errors.Is(err, errContract) {
+			s.setStateLocked(StateIncompatible)
+		} else {
+			s.setStateLocked(StateDisconnected)
+		}
 		s.mu.Unlock()
 		return nil
 	}
 	if err := statusOK(ep, s.doer()); err != nil {
 		s.mu.Lock()
-		s.setStateLocked(StateDisconnected)
+		if errors.Is(err, errContract) {
+			s.setStateLocked(StateIncompatible)
+		} else {
+			s.setStateLocked(StateDisconnected)
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -168,7 +180,19 @@ func (s *Service) doer() Doer {
 // Returns false when RepoDex is unreachable — the caller drops the
 // endpoint and rediscovers.
 func (s *Service) deliverOnce(ep *endpoint) bool {
-	if c, err := s.spool.peek(); err == nil && c != nil {
+	c, err := s.spool.peek()
+	if err != nil {
+		// Unreadable spool chunk (torn/corrupt): never wedged behind it —
+		// quarantine the file and count a visible loss rather than retry
+		// the same unreadable file forever.
+		s.spool.quarantine()
+		s.hc.lost.Add(1)
+		s.mu.Lock()
+		s.setStateLocked(StateDegraded)
+		s.mu.Unlock()
+		return true
+	}
+	if c != nil {
 		return s.sendBatchOnce(ep, c.raws, func(ok bool) {
 			if ok {
 				s.spool.drop(c)
@@ -191,22 +215,47 @@ func (s *Service) deliverOnce(ep *endpoint) bool {
 	})
 }
 
-// sendBatchOnce posts one batch and reconciles the ingest ACK. A 200
-// response fully accounts every event — accepted/duplicates are durable,
-// rejected are permanently invalid canonicalization bugs counted as lost.
-// Transport failure leaves the batch to onDone(false).
+// sendBatchOnce posts one batch and reconciles the ingest ACK. RepoDex
+// gives every event in a 200 batch exactly one verdict — accepted and
+// duplicates are durable, rejected are permanently invalid and counted
+// lost; the batch is fully accounted and dropped either way. A transport
+// failure leaves the batch to done(false) for spool/retry. A permanent
+// rejection (non-auth 4xx) or contract violation drops the batch as lost
+// — retrying verbatim can never succeed, and an unaccounted sum is a
+// contract bug that must not wedge the pipeline.
 func (s *Service) sendBatchOnce(ep *endpoint, raws [][]byte, done func(ok bool)) bool {
 	rep, err := sendBatch(ep, s.doer(), raws)
 	if err != nil {
 		s.mu.Lock()
-		s.setStateLocked(StateDisconnected)
+		switch {
+		case errors.Is(err, errPermanent) || errors.Is(err, errContract):
+			s.setStateLocked(StateDegraded)
+		default:
+			s.setStateLocked(StateDisconnected)
+		}
 		s.mu.Unlock()
+		if errors.Is(err, errPermanent) || errors.Is(err, errContract) {
+			s.hc.lost.Add(int64(len(raws)))
+			done(true) // drop — retrying a definitive reject wedges the pipe
+			return true
+		}
 		done(false)
 		return false
 	}
 	s.hc.acked.Add(rep.Accepted)
 	s.hc.duplicates.Add(rep.Duplicates)
 	s.hc.rejected.Add(rep.Rejected)
+	if unaccounted := int64(len(raws)) - rep.Accepted - rep.Duplicates - rep.Rejected; unaccounted != 0 {
+		// RepoDex guarantees one verdict per event; a mismatch is a
+		// contract violation — count the unaccounted tail lost and mark
+		// the pipeline degraded rather than retrying committed events.
+		if unaccounted > 0 {
+			s.hc.lost.Add(unaccounted)
+		}
+		s.mu.Lock()
+		s.setStateLocked(StateDegraded)
+		s.mu.Unlock()
+	}
 	if rep.Rejected > 0 {
 		s.hc.lost.Add(rep.Rejected)
 		s.mu.Lock()
@@ -241,7 +290,9 @@ func (s *Service) takeBatch() []queued {
 // cannot grow memory without bound.
 func (s *Service) drainToSpool() {
 	s.mu.Lock()
-	rest := append(append([]queued{}, s.overflow...), s.queue...)
+	// Queue holds the older events — it fills first; overflow receives
+	// newer spillover. Preserve emission order in the spool.
+	rest := append(append([]queued{}, s.queue...), s.overflow...)
 	s.queue, s.overflow = nil, nil
 	s.mu.Unlock()
 	if len(rest) > 0 {

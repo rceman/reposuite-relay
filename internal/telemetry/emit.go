@@ -88,18 +88,10 @@ func (s *Service) ModelUsage(m *session.Managed, p Usage) {
 	})
 }
 
-// FinalAnswer records the runtime-visible completed agent output.
-// AgentMessage emits agent_message for one completed native assistant
-// message — verbatim content, digest/bytes measured from the delivered text.
-func (s *Service) AgentMessage(m *session.Managed, content string) {
-	s.emit(m, TypeAgentMessage, AgentMessageData{
-		Role:          "assistant",
-		Content:       content,
-		ContentBytes:  int64v(len(content)),
-		ContentDigest: Digest([]byte(content)),
-	})
-}
-
+// FinalAnswer records the runtime-visible completed agent output. A
+// Codex turn's agentMessage items and an ACP turn's result text are the
+// same completed output — Relay emits final_answer only, so no
+// redundant per-message telemetry duplicates it.
 func (s *Service) FinalAnswer(m *session.Managed, content string) {
 	if s == nil || !s.cfg.Enabled || content == "" {
 		return

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,16 @@ const (
 	runtimeSchema = "reposuite.repodex.service.runtime.v1"
 	maxFile       = 64 << 10
 	maxResp       = 4 << 20
+)
+
+// errContract marks a RepoDex contract violation (descriptor/status/
+// ingest schema mismatch, malformed reply) — reported "incompatible" and
+// never retried as a transport fault. errPermanent marks a definitively
+// rejected request (4xx other than auth): the batch is dropped and
+// counted lost rather than wedging the pipeline on infinite retry.
+var (
+	errContract  = errors.New("repodex contract violation")
+	errPermanent = errors.New("repodex permanent rejection")
 )
 
 // descriptor is RepoDex's service.runtime.json contract.
@@ -79,16 +90,16 @@ func readDescriptor(path string) (*descriptor, error) {
 		return nil, fmt.Errorf("runtime descriptor: %w", err)
 	}
 	if d.Schema != runtimeSchema {
-		return nil, fmt.Errorf("runtime descriptor schema %q", d.Schema)
+		return nil, fmt.Errorf("%w: runtime descriptor schema %q", errContract, d.Schema)
 	}
 	if d.ProtocolVersion != 1 {
-		return nil, fmt.Errorf("protocol_version %d unsupported", d.ProtocolVersion)
+		return nil, fmt.Errorf("%w: protocol_version %d unsupported", errContract, d.ProtocolVersion)
 	}
 	if !loopback(d.Host) {
-		return nil, fmt.Errorf("refusing non-loopback host %q", d.Host)
+		return nil, fmt.Errorf("%w: refusing non-loopback host %q", errContract, d.Host)
 	}
 	if d.Port == 0 {
-		return nil, fmt.Errorf("runtime descriptor port 0")
+		return nil, fmt.Errorf("%w: runtime descriptor port 0", errContract)
 	}
 	return &d, nil
 }
@@ -142,7 +153,14 @@ type HTTPDoer struct{ C *http.Client }
 func (h HTTPDoer) Do(r *Request) (*Reply, error) {
 	c := h.C
 	if c == nil {
-		c = &http.Client{Timeout: 10 * time.Second}
+		c = &http.Client{
+			Timeout: 10 * time.Second,
+			// Never follow redirects: the bearer must stay on the exact
+			// loopback endpoint the descriptor published.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	req, err := http.NewRequest(r.Method, r.URL, bytes.NewReader(r.Body))
 	if err != nil {
@@ -184,10 +202,10 @@ func statusOK(ep *endpoint, do Doer) error {
 		Schema string `json:"schema"`
 	}
 	if err := json.Unmarshal(rep.Body, &v); err != nil {
-		return fmt.Errorf("status: %w", err)
+		return fmt.Errorf("%w: status: %v", errContract, err)
 	}
 	if v.Schema != statusSchema {
-		return fmt.Errorf("status schema %q", v.Schema)
+		return fmt.Errorf("%w: status schema %q", errContract, v.Schema)
 	}
 	return nil
 }
@@ -223,34 +241,24 @@ func sendBatch(ep *endpoint, do Doer, raws [][]byte) (*ingestReply, error) {
 		return nil, err
 	}
 	if rep.Status == 401 || rep.Status == 403 {
+		// Auth failure is retryable: the sender re-discovers the
+		// descriptor/token (RepoDex restart rotates it).
 		return nil, fmt.Errorf("auth rejected: %d", rep.Status)
+	}
+	if rep.Status >= 400 && rep.Status < 500 {
+		// Any other 4xx is a definitive rejection of this request —
+		// retrying it verbatim can never succeed.
+		return nil, fmt.Errorf("%w: ingest http %d", errPermanent, rep.Status)
 	}
 	if rep.Status != 200 {
 		return nil, fmt.Errorf("ingest http %d", rep.Status)
 	}
 	var out ingestReply
 	if err := json.Unmarshal(rep.Body, &out); err != nil {
-		return nil, fmt.Errorf("ingest reply: %w", err)
+		return nil, fmt.Errorf("%w: ingest reply: %v", errContract, err)
 	}
 	if out.Schema != ingestSchema {
-		return nil, fmt.Errorf("ingest schema %q", out.Schema)
+		return nil, fmt.Errorf("%w: ingest schema %q", errContract, out.Schema)
 	}
 	return &out, nil
-}
-
-// rejectedIDs extracts permanently-rejected event_ids from ingest error
-// strings ("{event_id}: reason", "conflicting event_id {id}"). Rejected
-// events are permanent canonicalization bugs — retried forever they would
-// wedge the spool, so they are pruned and counted as lost.
-func rejectedIDs(rep *ingestReply) map[string]bool {
-	out := map[string]bool{}
-	for _, e := range rep.Errors {
-		if i := strings.Index(e, ": "); i > 0 && !strings.Contains(e[:i], " ") {
-			out[e[:i]] = true
-		}
-		if strings.HasPrefix(e, "conflicting event_id ") {
-			out[strings.TrimPrefix(e, "conflicting event_id ")] = true
-		}
-	}
-	return out
 }

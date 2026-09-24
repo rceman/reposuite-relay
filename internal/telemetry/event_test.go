@@ -31,6 +31,7 @@ type fakeDoer struct {
 	status  int
 	lastErr error
 	reply   *ingestReply
+	replyFn func() *ingestReply // per-call override; nil → default accept
 }
 
 func (f *fakeDoer) Do(r *Request) (*Reply, error) {
@@ -45,8 +46,10 @@ func (f *fakeDoer) Do(r *Request) (*Reply, error) {
 		return nil, f.lastErr
 	}
 	if strings.HasSuffix(r.URL, "/v1/status") {
+		// Discovery always answers 200 — f.status scripts the ingest
+		// endpoint only.
 		return &Reply{
-			Status: f.statusOr(200),
+			Status: 200,
 			Body:   []byte(`{"schema":"` + statusSchema + `"}`),
 		}, nil
 	}
@@ -57,6 +60,9 @@ func (f *fakeDoer) Do(r *Request) (*Reply, error) {
 		}, nil
 	}
 	rep := f.reply
+	if f.replyFn != nil {
+		rep = f.replyFn()
+	}
 	if rep == nil {
 		var evs []json.RawMessage
 		_ = json.Unmarshal(r.Body, &evs)
@@ -71,13 +77,6 @@ func (f *fakeDoer) Do(r *Request) (*Reply, error) {
 		Status: 200,
 		Body:   b,
 	}, nil
-}
-
-func (f *fakeDoer) statusOr(d int) int {
-	if f.status != 0 {
-		return f.status
-	}
-	return d
 }
 
 // writeDescriptor publishes a descriptor+token into a temp state dir.
@@ -218,9 +217,11 @@ func TestSequencePerSessionAndRestart(t *testing.T) {
 		t.Fatalf("session2 seq contaminated: %+v", evs[3])
 	}
 
-	// Daemon restart: new service, watermark durable → re-emits identical
-	// session_started at seq0 (dedup-safe), next dynamic seq resumes after
-	// the watermark, never reusing.
+	// Daemon restart: new service, watermark durable → session_started is
+	// NOT re-emitted (RepoDex dedups identical bytes but rejects drifted
+	// re-emission as a permanent conflict — seq0 was allocated once).
+	// The next dynamic seq resumes strictly after the watermark, never
+	// reusing; the reserved block's tail is a legal crash gap.
 	s2 := New(cfg, deps)
 	s2.ToolCallStarted(m1, ToolStart{
 		CallID:   "t2",
@@ -228,29 +229,34 @@ func TestSequencePerSessionAndRestart(t *testing.T) {
 		Category: CatShell,
 	})
 	s2.mu.Lock()
-	var re Event
-	for _, q := range s2.queue {
-		var e Event
-		_ = json.Unmarshal(q.raw, &e)
-		re = e
+	if len(s2.queue) != 1 {
+		t.Fatalf("restart emitted %d events, want exactly the new one", len(s2.queue))
 	}
-	var firstQueued Event
-	_ = json.Unmarshal(s2.queue[0].raw, &firstQueued)
+	var re Event
+	_ = json.Unmarshal(s2.queue[0].raw, &re)
 	s2.mu.Unlock()
-	if firstQueued.Sequence != 0 || firstQueued.Type != TypeSessionStarted {
-		t.Fatalf("restart did not re-emit seq0 started: %+v", firstQueued)
+	if re.Type == TypeSessionStarted {
+		t.Fatal("session_started re-emitted after restart")
 	}
 	if re.Sequence <= 256 {
 		t.Fatalf("seq reused after restart: %d", re.Sequence)
 	}
-	// Byte-identical session_started across restarts.
-	var a, b Event
-	_ = json.Unmarshal(s1.queue[0].raw, &a)
-	_ = json.Unmarshal(s2.queue[0].raw, &b)
-	// Timestamp differs per emission — but event_id/content shape is what
-	// dedup keys on; identity must be stable.
-	if a.EventID != b.EventID || string(a.Data) != string(b.Data) {
-		t.Fatal("session_started not stable across restart")
+	if re.EventID != "aaaa1111:257" {
+		t.Fatalf("event_id: %s", re.EventID)
+	}
+	// A session never before observed (created pre-telemetry, or a fresh
+	// session) still emits session_started at seq 0 with the immutable
+	// creation timestamp.
+	m3 := testManaged("cccc3333", "opencode", "/repo/c", 0)
+	m3.Session.CreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s2.FinalAnswer(m3, "hi")
+	s2.mu.Lock()
+	var s0 Event
+	_ = json.Unmarshal(s2.queue[1].raw, &s0)
+	s2.mu.Unlock()
+	if s0.Sequence != 0 || s0.Type != TypeSessionStarted ||
+		s0.Timestamp != "2026-01-01T00:00:00Z" {
+		t.Fatalf("retroactive session_started not deterministic: %+v", s0)
 	}
 }
 

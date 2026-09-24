@@ -56,6 +56,8 @@ func (a *Adapter) completeTurn(m *session.Managed, handle *acp.Session, turn *ac
 	if st := a.sessions[m.Session.ID]; st != nil && st.turn == turn {
 		st.turn = nil
 		st.turnID = ""
+		// Tool tracking is per-turn bounded: reset it when the turn ends.
+		st.tools = nil
 	}
 	a.mu.Unlock()
 

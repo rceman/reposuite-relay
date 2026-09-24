@@ -19,9 +19,13 @@
 }
 ```
 
-All fields optional except `enabled`. `stateDir` defaults to
-`~/reposuite/repodex`. Relay **reads** `service.runtime.json` +
-`service.token` under that dir; it never writes there.
+All fields optional except `enabled`. `stateDir` precedence:
+configured `repodex.stateDir` > `REPODEX_STATE_DIR` env >
+`~/reposuite/repodex` (the durable config wins over the environment).
+Relay **reads** `service.runtime.json` + `service.token` under that dir;
+it never writes there. Non-auth 4xx ingest responses are permanent
+(dropped, counted lost, pipeline degraded) — only transport/5xx failures
+retry.
 
 ## Discovery contract
 

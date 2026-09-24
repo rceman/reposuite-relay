@@ -20,6 +20,9 @@ service via `<stateDir>/service.runtime.json`, authenticates with
 
 ## Configuration (relay.json, strict schema)
 
+`stateDir` precedence: configured `repodex.stateDir` >
+`REPODEX_STATE_DIR` env > `~/reposuite/repodex` default.
+
 ```json
 "repodex": {
   "enabled": true,

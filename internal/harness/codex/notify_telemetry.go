@@ -59,9 +59,6 @@ func (a *Adapter) onItemCompleted(params json.RawMessage) {
 			st.current.agentItemID = p.Item.ID
 		}
 		a.mu.Unlock()
-		if p.Item.Text != "" {
-			a.deps.Telemetry.AgentMessage(m, p.Item.Text)
-		}
 		return
 	}
 	// Tool/source telemetry from the completed native item.
@@ -72,6 +69,10 @@ func (a *Adapter) onItemCompleted(params json.RawMessage) {
 				st.current.tools = map[string]*toolObs{}
 			}
 			if t := st.current.tools[p.Item.ID]; t != nil {
+				if t.completed {
+					a.mu.Unlock()
+					return // duplicate item/completed — already emitted
+				}
 				t.completed = true
 			} else if p.Item.ID != "" {
 				st.current.tools[p.Item.ID] = &toolObs{

@@ -499,26 +499,25 @@ export function decodeTelemetryHealth(v: unknown): TelemetryHealth {
 		throw new DecodeError('telemetry.state');
 	}
 	const snap: TelemetrySnapshot = {
-			enabled: t.enabled === true,
-			state: state as TelemetrySnapshot['state'],
+		enabled: t.enabled === true,
+		state: state as TelemetrySnapshot['state'],
 
-			queueDepth: reqNonNeg(t, 'queueDepth'),
-			spoolBytes: reqNonNeg(t, 'spoolBytes'),
-			observed: reqNonNeg(t, 'observed'),
-			canonicalized: reqNonNeg(t, 'canonicalized'),
-			acknowledged: reqNonNeg(t, 'acknowledged'),
-			duplicates: reqNonNeg(t, 'duplicates'),
-			rejected: reqNonNeg(t, 'rejected'),
-			lost: reqNonNeg(t, 'lost'),
-			retries: reqNonNeg(t, 'retries'),
-			rediscoveries: reqNonNeg(t, 'rediscoveries'),
-		};
-		{ const _la = 0; }
-		const instanceId = optString(t, 'instanceId');
-		if (instanceId !== undefined) snap.instanceId = instanceId;
-		const endpoint = optString(t, 'endpoint');
-		if (endpoint !== undefined) snap.endpoint = endpoint;
-		const lastAckAt = optString(t, 'lastAckAt');
-		if (lastAckAt !== undefined) snap.lastAckAt = lastAckAt;
-		return { daemon: decodeDaemonInfo(v.daemon), telemetry: snap };
+		queueDepth: reqNonNeg(t, 'queueDepth'),
+		spoolBytes: reqNonNeg(t, 'spoolBytes'),
+		observed: reqNonNeg(t, 'observed'),
+		canonicalized: reqNonNeg(t, 'canonicalized'),
+		acknowledged: reqNonNeg(t, 'acknowledged'),
+		duplicates: reqNonNeg(t, 'duplicates'),
+		rejected: reqNonNeg(t, 'rejected'),
+		lost: reqNonNeg(t, 'lost'),
+		retries: reqNonNeg(t, 'retries'),
+		rediscoveries: reqNonNeg(t, 'rediscoveries'),
+	};
+	const instanceId = optString(t, 'instanceId');
+	if (instanceId !== undefined) snap.instanceId = instanceId;
+	const endpoint = optString(t, 'endpoint');
+	if (endpoint !== undefined) snap.endpoint = endpoint;
+	const lastAckAt = optString(t, 'lastAckAt');
+	if (lastAckAt !== undefined) snap.lastAckAt = lastAckAt;
+	return { daemon: decodeDaemonInfo(v.daemon), telemetry: snap };
 }

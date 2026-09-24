@@ -146,9 +146,11 @@ func FirstToken(a, b *int64) *int64 {
 	return b
 }
 
-// toolMeta is the remembered tool-call identity — updates do not repeat
-// kind/locations.
+// ToolMeta is the remembered tool-call identity — updates do not repeat
+// kind/locations, and a second terminal update must not double-complete.
+// Entries live until the turn ends (per-turn bound), then are reset.
 type ToolMeta struct {
 	Kind string
 	Path string
+	Done bool // a terminal update was already emitted for this call
 }

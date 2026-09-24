@@ -167,7 +167,10 @@ func TestTelemetryCodexToolLifecycle(t *testing.T) {
 }
 
 func TestTelemetryCodexNegativeSourceObserved(t *testing.T) {
-	for _, kind := range []string{"tool:list", "tool:search", "tool:multi-read", "tool:mcp", "tool:web"} {
+	// listFiles, multi-action commands, and non-repo tools never produce
+	// source_observed — filenames and mixed/unattributable output are not
+	// delivered single-source content.
+	for _, kind := range []string{"tool:list", "tool:multi-read", "tool:mcp", "tool:web"} {
 		e := newEnv(t, "")
 		_, cap := e.telemetryEnv(t)
 		m := e.newSession("k"+strings.ReplaceAll(kind, ":", ""), t.TempDir())
@@ -178,8 +181,30 @@ func TestTelemetryCodexNegativeSourceObserved(t *testing.T) {
 			return len(findEvents(cap.events(), "final_answer")) > 0
 		})
 		if n := len(findEvents(cap.events(), "source_observed")); n != 0 {
-			t.Fatalf("%s: filename/listing/search wrongly observed: %d", kind, n)
+			t.Fatalf("%s: filename/listing/mixed wrongly observed: %d", kind, n)
 		}
+	}
+}
+
+// A single-action `search` command delivers source snippets — emitted as
+// search_snippet WITHOUT a path (the action path is the search root, not
+// an observed file; per-file attribution is unprovable).
+func TestTelemetryCodexSearchSnippet(t *testing.T) {
+	e := newEnv(t, "")
+	_, cap := e.telemetryEnv(t)
+	m := e.newSession("k-search", t.TempDir())
+	if _, err := e.adapter.Prompt(context.Background(), m, harness.PromptCommand{Text: "tool:search"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "search snippet", func() bool {
+		return len(findEvents(cap.events(), "source_observed")) > 0
+	})
+	od, _ := findEvents(cap.events(), "source_observed")[0]["data"].(map[string]any)
+	if od["observation_kind"] != "search_snippet" {
+		t.Fatalf("kind: %+v", od)
+	}
+	if _, hasPath := od["path"]; hasPath {
+		t.Fatalf("search root misattributed as observed file: %+v", od)
 	}
 }
 

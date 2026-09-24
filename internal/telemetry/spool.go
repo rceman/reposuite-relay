@@ -55,7 +55,10 @@ func (s *spool) load() error {
 	}
 	max := 0
 	for _, e := range ents {
-		if !strings.HasPrefix(e.Name(), "chunk-") {
+		// Only committed chunk files count toward the bound — a torn
+		// .tmp residue is recovered by the next write's O_EXCL path and
+		// must not silently eat the budget.
+		if !strings.HasPrefix(e.Name(), "chunk-") || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}
 		fi, err := e.Info()
@@ -159,6 +162,26 @@ func (s *spool) drop(c *chunk) {
 	if s.bytes < 0 {
 		s.bytes = 0
 	}
+}
+
+// quarantine sidelines the oldest chunk file when it cannot be read at
+// all — renamed out of the replay set (never silently deleted), removed
+// from the byte budget, and visible as a ".corrupt" residue.
+func (s *spool) quarantine() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names, err := s.names()
+	if err != nil || len(names) == 0 {
+		return
+	}
+	old := filepath.Join(s.dir, names[0])
+	if fi, err := os.Stat(old); err == nil {
+		s.bytes -= fi.Size()
+		if s.bytes < 0 {
+			s.bytes = 0
+		}
+	}
+	_ = os.Rename(old, old+".corrupt")
 }
 
 func (s *spool) empty() bool {

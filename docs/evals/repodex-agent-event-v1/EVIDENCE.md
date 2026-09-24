@@ -133,8 +133,17 @@ internal/daemon           GET /v1/telemetry/repodex auth matrix
   `usage_estimated` when scoped to a turn.
 - `task_outcome` is never emitted: no authoritative outcome source.
 - `context_artifact_presented` is not yet emitted.
-- ACP `agent_message` is not emitted (chunked deltas are not message
-  boundaries); `final_answer` covers the completed output.
+- `agent_message` is not emitted: for Codex the turn's completed
+  agentMessage duplicates `final_answer`; for ACP chunked deltas are not
+  message boundaries. `final_answer` covers the completed output for all
+  three harnesses — no provider-asymmetric message noise.
+- `session_started` is emitted once per durable session at seq 0 (never
+  re-emitted after restart — RepoDex treats a drifted re-emission as a
+  permanent conflict). A pre-telemetry session emits it retroactively but
+  deterministically (`CreatedAt` timestamp, immutable facts only).
+- Codex `tokenUsage.last` is the provider's last-call breakdown; emitted
+  turn-scoped with `usage_estimated=true` (a turn may span several calls —
+  last-call values are an honest proxy undercount, never an estimate).
 - Permanent RepoDex rejects are counted `rejected`/`lost` and the pipeline
   reports `degraded` — they are not retried (the durable log's word is
   final), and the session sequence stays monotone.

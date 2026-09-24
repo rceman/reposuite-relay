@@ -18,10 +18,14 @@ project_id  = presentation-catalog project id when the session cwd matches
 repository_id / repo_head / investigation_id = unset (no authority)
 ```
 
-`session_started` is emitted lazily at the first observation of a session,
-always at sequence 0. After a daemon restart it is re-emitted identically
-(event_id dedup on the RepoDex side); dynamic events resume strictly after
-the durable watermark — sequence values are never reused.
+`session_started` is emitted ONCE per durable session, lazily at its first
+telemetry observation, at sequence 0 with the durable `CreatedAt`
+timestamp. It is never re-emitted: RepoDex dedups on a whole-event
+semantic digest, so a re-emitted event with a drifted timestamp is a
+permanent CONFLICT (rejected), not a duplicate. Undelivered copies
+survive via the spool (canonical bytes preserved). After a restart the
+sequence resumes strictly after the durable watermark — the unspent tail
+of a reserved block is a legal gap, values are never reused.
 
 ## Codex (`internal/harness/codex`)
 
@@ -31,8 +35,8 @@ the durable watermark — sequence values are never reused.
 | `item/completed` commandExecution/fileChange/mcpToolCall/dynamicToolCall | tool_call_completed (ok from status/exitCode; output_bytes/digest only) |
 | commandExecution w/ exactly one `read` action + non-empty aggregatedOutput | source_observed {path, explicit_read, bytes, content_digest} |
 | fileChange diffs (non-empty)                          | source_observed {path, diff} |
-| `item/completed` agentMessage                        | agent_message (verbatim text) |
 | `turn/completed` status=completed                    | final_answer (verbatim text) |
+| duplicate `item/completed` / terminal `tool_call_update` | deduped — exactly one completion |
 | `thread/tokenUsage/updated` (`last` breakdown)       | model_call_completed {model_call_id:"turn:<id>", exact counters, usage_estimated=true} |
 | session delete                                       | session_completed {reason:"session_deleted"} |
 

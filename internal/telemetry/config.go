@@ -47,13 +47,17 @@ func (c Config) batchDelay() time.Duration {
 
 // RepoDexStateDir resolves the RepoDex state directory. Precedence:
 //
-//	REPODEX_STATE_DIR env > configured stateDir > ~/reposuite/repodex
+//	configured repodex.stateDir > REPODEX_STATE_DIR env > ~/reposuite/repodex
+//
+// The explicit durable config wins over the environment: an operator who
+// pinned a state dir in relay.json must not have it silently overridden
+// by a stray env var; the env var is the override for the DEFAULT only.
 func (c Config) RepoDexStateDir() string {
-	if d := os.Getenv("REPODEX_STATE_DIR"); d != "" {
-		return d
-	}
 	if c.StateDir != "" {
 		return c.StateDir
+	}
+	if d := os.Getenv("REPODEX_STATE_DIR"); d != "" {
+		return d
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

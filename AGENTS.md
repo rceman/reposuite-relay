@@ -90,11 +90,11 @@ IMPLEMENTED:
 - **RepoDex telemetry** (`internal/telemetry`, `repodex` section of
   `relay.json`, disabled by default): canonical AgentEvent v1 emission
   from harness-observed events only — `session_started` (lazy, seq 0,
-  restart-idempotent), `session_completed` (session delete only),
+  emitted once per durable session — never re-emitted; RepoDex conflicts
+  on drifted re-emission), `session_completed` (session delete only),
   tool_call lifecycle, `source_observed` (only when content was actually
-  delivered — never filenames/listings/prose), `agent_message`,
-  `final_answer`, turn-scoped `model_call_completed` usage with
-  `usage_estimated`. Per-session durable sequence via
+  delivered — never filenames/listings/prose), `final_answer`, turn-scoped
+  `model_call_completed` usage with `usage_estimated`. Per-session durable sequence via
   `TelemetrySeqWatermark`, separate from the canonical transcript seq.
   Async bounded queue → bare-array `/v1/events/batch` → durable-ack
   accounting; bounded retry + descriptor rediscovery (dynamic port) +

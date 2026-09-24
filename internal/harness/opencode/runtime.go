@@ -230,7 +230,13 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 			if len(update.Locations) == 1 {
 				locPath = update.Locations[0].Path
 			}
-			st.tools[update.ToolCallID] = acp.ToolMeta{Kind: update.Kind, Path: locPath}
+			// Done marks a tool_call that arrived already terminal — its
+			// completion is emitted below, and a later terminal update for
+			// the same id must not double-complete it.
+			st.tools[update.ToolCallID] = acp.ToolMeta{
+				Kind: update.Kind, Path: locPath,
+				Done: acp.TerminalStatus(update.Status),
+			}
 			a.mu.Unlock()
 		}
 		if ts := acp.ToolStart(update); ts != nil {
@@ -249,9 +255,11 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 	case acp.UpdateToolCallUpdate:
 		// Terminal status ends the call; content delivered here is the
 		// source the agent actually received. The kind resolves from the
-		// call tracked at tool_call time — never guessed.
+		// call tracked at tool_call time — never guessed. A repeated
+		// terminal update (Done) is deduped — exactly one completion.
 		kind := update.Kind
 		var locPath string
+		var dupTerminal bool
 		if st != nil {
 			a.mu.Lock()
 			if tm, ok := st.tools[update.ToolCallID]; ok {
@@ -259,11 +267,16 @@ func (a *Adapter) onUpdate(nativeSessionID string, update acp.Update) {
 					kind = tm.Kind
 				}
 				locPath = tm.Path
-			}
-			if acp.TerminalStatus(update.Status) {
-				delete(st.tools, update.ToolCallID)
+				if acp.TerminalStatus(update.Status) {
+					dupTerminal = tm.Done
+					tm.Done = true
+					st.tools[update.ToolCallID] = tm
+				}
 			}
 			a.mu.Unlock()
+		}
+		if dupTerminal {
+			break
 		}
 		if te := acp.ToolEnd(update, kind); te != nil {
 			a.deps.Telemetry.ToolCallCompleted(m, *te)
