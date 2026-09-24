@@ -31,6 +31,11 @@ $ reposuite-relay version
 reposuite-relay 0.1.0-dev
 $ reposuite-relay help
 $ reposuite-relay paths                      # resolved RepoSuite/Relay state paths
+$ reposuite-relay serve                      # run the daemon FOREGROUND (supervisor entrypoint)
+$ reposuite-relay start                      # detached daemon, waits until ready
+$ reposuite-relay stop                       # graceful daemon shutdown (sessions persist)
+$ reposuite-relay restart                    # stop then start
+$ reposuite-relay status [--json]            # running | stopped | stale — never starts
 $ reposuite-relay serve codex --key work     # create a Codex session (COLD: no process yet)
 $ reposuite-relay serve opencode --key oc    # create an OpenCode ACP session (COLD)
 $ reposuite-relay serve devin --key dv       # create a Devin ACP session (COLD)
@@ -68,8 +73,19 @@ generated value — `docs/MACHINE_API_TOKEN.md`), or the authenticated
 cookie-authenticated methods additionally require the exact canonical
 `Origin` and `X-Relay-CSRF`; bearer clients carry no CSRF obligation —
 see `docs/GATEWAY_API.md` for the machine-client contract.
-The CLI auto-starts the daemon when genuinely absent; `status` and
-`daemon stop` never do. `GET /` serves the **embedded SvelteKit Web
+The CLI auto-starts the daemon when genuinely absent; `status` never
+does. Daemon lifecycle: `serve` is the foreground production process
+(the external-supervisor contract — Relay never installs systemd/launchd/
+Windows services or boot autostart). `start` spawns the same binary
+detached (own session, stdio → `logs/relayd.log`), waits for real
+readiness, and is idempotent — the singleton flock on `run/relayd.lock`
+plus descriptor validation make a second daemon impossible. `stop` is an
+authenticated graceful shutdown that drains in-flight work and stops
+runtimes — durable RelaySessions persist and reload COLD on the next
+start. `restart` composes them. A descriptor left behind by a killed
+daemon reports as `stale` in `status` and `start` recovers cleanly. Under
+WSL, `wsl --shutdown` kills the daemon with the VM; Relay does not
+auto-start on WSL restart — run `reposuite-relay start` again. `GET /` serves the **embedded SvelteKit Web
 Admin**: the anonymous SPA shell boots from `GET /auth/session` —
 first run → one-time admin setup (Argon2id-hashed credential in
 `config/admin.json`, create-once); afterwards → login — issuing an

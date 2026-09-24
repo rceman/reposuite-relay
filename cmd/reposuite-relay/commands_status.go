@@ -122,6 +122,10 @@ func cmdStatus(args []string) int {
 		// Something answers but is not a compatible relayd generation —
 		// report unreachable; never mutate another owner's descriptor.
 		rep.Status = "unreachable"
+	} else if _, serr := os.Stat(p.DaemonDescriptor()); serr == nil {
+		// Descriptor exists but nothing live answers — the owner exited
+		// without cleanup (hard kill/crash): stale, not merely stopped.
+		rep.Status = "stale"
 	}
 
 	if jsonOut {

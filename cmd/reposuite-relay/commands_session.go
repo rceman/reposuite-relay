@@ -14,7 +14,7 @@ import (
 // cmdServe implements `serve <harness> --key <KEY>` for the built-in
 // harnesses. It never accepts an executable or native arguments: the
 // daemon runs only its own adapters.
-func cmdServe(args []string, selfExe string) int {
+func cmdServeSession(args []string, selfExe string) int {
 	if len(args) == 0 || !servableHarness(args[0]) {
 		fmt.Fprintln(os.Stderr, "usage: reposuite-relay serve fixture|codex|devin|opencode --key <KEY> [--model M] [--mode S]")
 		return 2
@@ -210,7 +210,7 @@ func cmdSessionStatus(selfExe, key string) int {
 
 // cmdStop implements `stop <KEY>` — stop the session runtime and delete
 // the durable RelaySession.
-func cmdStop(selfExe, key string) int {
+func cmdStopSession(selfExe, key string) int {
 	c, code, ok := ensureClient(selfExe)
 	if !ok {
 		return code

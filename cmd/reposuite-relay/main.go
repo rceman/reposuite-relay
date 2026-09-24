@@ -33,6 +33,11 @@ Commands:
   version                        print version
   help                           show this help
   paths                          print resolved RepoSuite/Relay state paths
+  serve                          run the daemon in the FOREGROUND
+                                 (external-supervisor entrypoint)
+  start                          start the daemon detached, wait ready
+  stop                           gracefully stop the daemon
+  restart                        stop (if running) then start
   serve fixture --key <KEY>      start a fixture session
   serve codex --key <KEY>        create a Codex session (COLD)
   serve devin --key <KEY>        create a Devin ACP session (COLD)
@@ -49,7 +54,7 @@ Commands:
   list                           list managed sessions
   session status <KEY>           show one session
   stop <KEY>                     stop a session
-  daemon stop                    stop the daemon
+  daemon stop                    stop the daemon (alias of stop)
 `
 
 func main() {
@@ -87,7 +92,13 @@ func run(args []string, selfExe string) int {
 		fmt.Printf("sessions_dir:    %s\n", p.SessionsDir())
 		fmt.Printf("log_dir:         %s\n", p.LogDir())
 	case "serve":
-		return cmdServe(args[1:], selfExe)
+		if len(args) == 1 {
+			// Bare `serve` is the canonical FOREGROUND production
+			// daemon — the external-supervisor entrypoint and the
+			// process `start` detaches.
+			return cmdServe(selfExe)
+		}
+		return cmdServeSession(args[1:], selfExe)
 	case "prompt":
 		return cmdPrompt(args[1:], selfExe)
 	case "cancel":
@@ -106,18 +117,33 @@ func run(args []string, selfExe string) int {
 			return 2
 		}
 		return cmdSessionStatus(selfExe, args[2])
-	case "stop":
-		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "reposuite-relay: stop requires exactly one session key")
+	case "start":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: start")
 			return 2
 		}
-		return cmdStop(selfExe, args[1])
+		return cmdStart(selfExe)
+	case "stop":
+		if len(args) == 1 {
+			return cmdStop() // daemon lifecycle stop
+		}
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: stop [KEY]")
+			return 2
+		}
+		return cmdStopSession(selfExe, args[1])
+	case "restart":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: restart")
+			return 2
+		}
+		return cmdRestart(selfExe)
 	case "daemon":
 		if len(args) != 2 || args[1] != "stop" {
 			fmt.Fprintln(os.Stderr, "reposuite-relay: usage: daemon stop")
 			return 2
 		}
-		return cmdDaemonStop()
+		return cmdStop()
 	case "__daemon":
 		return runDaemon(selfExe)
 	case "__fixture":

@@ -110,7 +110,7 @@ func TestForeignPeerFailsClosed(t *testing.T) {
 
 	var spawned int32
 	old := spawnFunc
-	spawnFunc = func(string) error { atomic.AddInt32(&spawned, 1); return nil }
+	spawnFunc = func(string, paths.Paths) error { atomic.AddInt32(&spawned, 1); return nil }
 	defer func() { spawnFunc = old }()
 
 	if _, err := Dial(p); !errors.Is(err, ErrBadPeer) {
@@ -138,7 +138,7 @@ func TestWrongTokenPeerFailsClosed(t *testing.T) {
 
 	var spawned int32
 	old := spawnFunc
-	spawnFunc = func(string) error { atomic.AddInt32(&spawned, 1); return nil }
+	spawnFunc = func(string, paths.Paths) error { atomic.AddInt32(&spawned, 1); return nil }
 	defer func() { spawnFunc = old }()
 
 	if _, err := Ensure(p, "/unused"); !errors.Is(err, ErrBadPeer) {
@@ -179,7 +179,7 @@ func TestDeadEndpointSpawnsContender(t *testing.T) {
 
 	var spawned int32
 	old := spawnFunc
-	spawnFunc = func(string) error { atomic.AddInt32(&spawned, 1); return nil }
+	spawnFunc = func(string, paths.Paths) error { atomic.AddInt32(&spawned, 1); return nil }
 	defer func() { spawnFunc = old }()
 
 	// Ensure will spawn repeatedly and time out — the point is that it

@@ -11,13 +11,17 @@ import (
 	"time"
 )
 
-// TestDaemonAbsentByDefault: no autostart for status/stop.
+// TestDaemonAbsentByDefault: no autostart for status/stop. Stop on an
+// absent daemon is idempotent success (canonical lifecycle contract), but
+// it must never START one.
 func TestDaemonAbsentByDefault(t *testing.T) {
 	home, root := testRoot(t)
 	daemonStopped(t, home, root)
-	if out, err := cli(t, home, root, "daemon", "stop"); err == nil {
-		t.Fatalf("daemon stop on empty root must fail: %s", out)
+	out, err := cli(t, home, root, "daemon", "stop")
+	if err != nil || !strings.Contains(out, "already stopped") {
+		t.Fatalf("daemon stop on empty root: %v: %s", err, out)
 	}
+	daemonStopped(t, home, root) // still stopped — nothing was spawned
 }
 
 // TestTwoSessionIsolation is the core acceptance test.

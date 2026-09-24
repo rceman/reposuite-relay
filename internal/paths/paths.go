@@ -128,6 +128,11 @@ func (p Paths) DaemonLock() string { return filepath.Join(p.RunDir(), "relayd.lo
 // LogDir holds Relay logs.
 func (p Paths) LogDir() string { return filepath.Join(p.RelayRoot(), "logs") }
 
+// DaemonLog is the detached daemon's stdio destination — written only
+// when the process is spawned detached (start/auto-start); `serve` keeps
+// the caller's stdio.
+func (p Paths) DaemonLog() string { return filepath.Join(p.LogDir(), "relayd.log") }
+
 // TelemetrySpool is the outage-fallback spool for canonical RepoDex
 // telemetry events — created lazily, owner-private, durable across restart.
 func (p Paths) TelemetrySpool() string {

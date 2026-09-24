@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/rceman/reposuite-relay/internal/paths"
@@ -36,7 +37,7 @@ func Ensure(p paths.Paths, selfExe string) (*Client, error) {
 	lastSpawn := time.Time{}
 	spawn := func() error {
 		lastSpawn = time.Now()
-		return spawnFunc(selfExe)
+		return spawnFunc(selfExe, p)
 	}
 	// Fast path: live daemon already.
 	if c, err := Dial(p); err == nil {
@@ -73,17 +74,29 @@ func Ensure(p paths.Paths, selfExe string) (*Client, error) {
 // spawnFunc is the auto-start seam (test-only override).
 var spawnFunc = spawnDaemon
 
-// spawnDaemon launches a detached __daemon contender. Contenders that
-// lose the singleton lock exit immediately; the winner publishes the
-// descriptor. Never blocks on the child.
-func spawnDaemon(selfExe string) error {
+// spawnDaemon launches a detached __daemon contender: its own session
+// (setsid — survives the invoking shell/SSH exit), stdin detached, and
+// stdio into the Relay log file so a failed startup stays diagnosable.
+// Contenders that lose the singleton lock exit immediately; the winner
+// publishes the descriptor. Never blocks on the child.
+func spawnDaemon(selfExe string, p paths.Paths) error {
 	cmd := exec.Command(selfExe, "__daemon")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err == nil {
-		cmd.Stdin = devNull
-		cmd.Stdout = devNull
-		cmd.Stderr = devNull
-		defer devNull.Close()
+	if err != nil {
+		return fmt.Errorf("open null device: %w", err)
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+	cmd.Stdout, cmd.Stderr = devNull, devNull
+	// Best-effort daemon log: a log open failure must not break the
+	// auto-start path — devnull remains the fallback.
+	if err := os.MkdirAll(p.LogDir(), 0o700); err == nil {
+		if log, err := os.OpenFile(p.DaemonLog(),
+			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			defer log.Close()
+			cmd.Stdout, cmd.Stderr = log, log
+		}
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start relayd: %w", err)

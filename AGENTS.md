@@ -108,6 +108,15 @@ IMPLEMENTED:
   RepoDex helpers — Gateway owns query authority.
 - `reposuite-relay status [--json]` — product status (endpoint, PID,
   uptime, session counts, API auth, admin auth) that never auto-starts.
+- Local lifecycle: bare `serve` is the foreground daemon entrypoint
+  (external-supervisor contract; `serve <harness> --key` remains session
+  creation). `start` spawns it detached via setsid with stdio to
+  `logs/relayd.log`, waits for readiness, and is idempotent through the
+  singleton flock; `stop` (bare) is the authenticated graceful shutdown
+  (`daemon stop` is its alias; `stop <KEY>` remains session delete);
+  `restart` composes stop+start. No OS service registration, no boot
+  autostart — after `wsl --shutdown` Relay stays stopped until
+  `start`/`serve` runs again.
 - NDJSON canonical event-stream foundation (`internal/events`):
   per-session seq allocator with durable block reservation, exact
   history-cursor snapshots, explicit replay floor, lazily allocated
